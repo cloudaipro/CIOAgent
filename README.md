@@ -18,7 +18,9 @@ Telegram  ──►  cfo/bot.py     I/O: text, photos, CSV uploads, chart replie
                   ▼
             cfo/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
             cfo/charts.py     matplotlib → PNG
-            cfo/memory.py     durable agent memory + chat registry (24/7 state)
+            cfo/memory.py     MemCore store: tiered notes, profile, playbooks, eviction
+            cfo/context.py    session-start memory injection (token-budgeted)
+            cfo/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
             cfo/scheduler.py  APScheduler: daily portfolio digest
             cfo/db.py         SQLite schema (transactions = source of truth)
 ```
@@ -34,10 +36,35 @@ Telegram  ──►  cfo/bot.py     I/O: text, photos, CSV uploads, chart replie
   its conversation thread. Financial figures are never stored as "memory" — they
   are always recomputed from `transactions`/`prices`.
 
+## Memory & context (MemCore)
+
+A tiered, auditable memory layer designed to be **≥ Hermes & OpenClaw** (see
+[docs/COMPARISON.md](docs/COMPARISON.md)) — all local, **no API key**:
+
+- **Injected at session start**: operator profile + pinned notes + the latest
+  session digest are packed into the system prompt within a `tiktoken` budget, so
+  the agent *knows* its context before the first message (and re-injects on every
+  reconnect/fork).
+- **Hybrid recall** (`memory_search`): FTS5 keyword + `fastembed` semantic vectors
+  in `sqlite-vec`, fused with Reciprocal Rank Fusion — finds things phrased
+  differently from how they were stored, across notes **and** past turns.
+- **Bounded for 24/7**: rolling sessions checkpoint a digest then reseed a fresh
+  thread (transcript can't grow forever); importance-decay eviction caps stored
+  notes (hot/user notes protected).
+- **Durability**: a PreCompact hook + periodic nudge + deterministic auto-capture
+  ensure notable facts are saved before any lossy boundary.
+- **Figures firewall**: the store refuses to memorize numbers/prices — those are
+  always recomputed from the ledger, so memory can never go stale on a figure.
+
+Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
+`memory_get`, `save_playbook` / `list_playbooks`.
+
 ## Setup
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# one-time: download + cache the local embedding model (~67MB) so recall is offline-stable
+.venv/bin/python -c "from cfo import recall; print('embed dim', recall.warmup())"
 cp .env.example .env          # paste your @BotFather token into TELEGRAM_BOT_TOKEN
 .venv/bin/python -m cfo.bot   # starts polling
 ```

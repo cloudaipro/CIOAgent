@@ -235,3 +235,5 @@ data/uploads/
 # CFOAgent: local-only / not for publish
 .claude/settings.local.json
 _temp/
+# fastembed model cache (~67MB, re-downloaded on first run via recall.warmup())
+data/models/

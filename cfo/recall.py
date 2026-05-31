@@ -1,0 +1,174 @@
+"""Hybrid recall: FTS5 (keyword/BM25) + sqlite-vec (semantic) merged with RRF.
+
+This is the layer that beats keyword-only memory: a query phrased differently
+from how a fact was stored still surfaces it via the vector side, while exact
+terms still hit via FTS. Both are local and offline:
+
+- embeddings: fastembed `BAAI/bge-small-en-v1.5` (ONNX, 384-dim), model cached in
+  `data/models/` so the agent is offline-stable after first download;
+- storage/ANN: sqlite-vec `vec0` tables (`mem_vec`, `turn_vec`) in the same DB.
+
+Both are required (no FTS-only mode). Results from the keyword and vector rankers
+are fused with Reciprocal Rank Fusion (RRF), the same technique Hermes/Milvus use.
+"""
+from __future__ import annotations
+
+import re
+
+import sqlite_vec
+
+from . import db
+from .db import DB_PATH, EMBED_DIM
+
+MODEL_NAME = "BAAI/bge-small-en-v1.5"
+_CACHE_DIR = str((db.Path(__file__).resolve().parent.parent / "data" / "models"))
+_RRF_K = 60
+
+_model = None
+
+
+def _embedder():
+    """Lazy-load the fastembed model from the local cache (offline after first run)."""
+    global _model
+    if _model is None:
+        from fastembed import TextEmbedding
+        _model = TextEmbedding(model_name=MODEL_NAME, cache_dir=_CACHE_DIR)
+    return _model
+
+
+def embed(texts: list[str]) -> list[list[float]]:
+    return [list(map(float, v)) for v in _embedder().embed(list(texts))]
+
+
+def embed_one(text: str) -> list[float]:
+    return embed([text])[0]
+
+
+def warmup() -> int:
+    """Download (first run) and load the embedding model; returns its dimension.
+    Run once after install so the agent is offline-stable:
+        python -c "from cfo import recall; print(recall.warmup())"
+    """
+    return len(embed_one("warmup"))
+
+
+def _ser(vec: list[float]) -> bytes:
+    assert len(vec) == EMBED_DIM, (len(vec), EMBED_DIM)
+    return sqlite_vec.serialize_float32(vec)
+
+
+# ----- indexing (called from the write path) --------------------------------
+
+def index_note(note_id: int, text: str, db_path=DB_PATH) -> None:
+    blob = _ser(embed_one(text))
+    conn = db.connect(db_path)
+    with conn:
+        conn.execute("DELETE FROM mem_vec WHERE note_id=?", (note_id,))
+        conn.execute("INSERT INTO mem_vec(note_id, embedding) VALUES(?,?)", (note_id, blob))
+    conn.close()
+
+
+def deindex_note(note_id: int, db_path=DB_PATH) -> None:
+    conn = db.connect(db_path)
+    with conn:
+        conn.execute("DELETE FROM mem_vec WHERE note_id=?", (note_id,))
+    conn.close()
+
+
+def index_turn(turn_id: int, text: str, db_path=DB_PATH) -> None:
+    blob = _ser(embed_one(text))
+    conn = db.connect(db_path)
+    with conn:
+        conn.execute("DELETE FROM turn_vec WHERE turn_id=?", (turn_id,))
+        conn.execute("INSERT INTO turn_vec(turn_id, embedding) VALUES(?,?)", (turn_id, blob))
+    conn.close()
+
+
+# ----- search ---------------------------------------------------------------
+
+def _fts_query(text: str) -> str | None:
+    """Build a safe FTS5 MATCH expression: OR of quoted alnum tokens."""
+    toks = [t for t in re.findall(r"[A-Za-z0-9]+", text.lower()) if len(t) >= 3]
+    return " OR ".join(f'"{t}"' for t in toks) if toks else None
+
+
+def _rrf(ranked_ids: list[list[int]]) -> dict[int, float]:
+    """Reciprocal Rank Fusion over several ranked id-lists (best first)."""
+    score: dict[int, float] = {}
+    for ids in ranked_ids:
+        for rank, _id in enumerate(ids):
+            score[_id] = score.get(_id, 0.0) + 1.0 / (_RRF_K + rank)
+    return score
+
+
+def _scope_chat_id(scope: str | None):
+    if scope and scope.startswith("chat:"):
+        try:
+            return int(scope.split(":", 1)[1])
+        except ValueError:
+            return None
+    return None
+
+
+def search(query: str, k: int = 5, scope: str | None = None,
+           kinds: tuple[str, ...] = ("note", "turn"), db_path=DB_PATH) -> list[dict]:
+    """Hybrid search across notes and/or conversation turns; returns top-k hits
+    [{kind, id, text, score}], best first. Notes are limited to `scope` + global;
+    turns to the chat of `scope` (if any)."""
+    match = _fts_query(query)
+    qvec = _ser(embed_one(query))
+    pool = max(k * 4, 20)
+    conn = db.connect(db_path)
+    results: list[dict] = []
+
+    if "note" in kinds:
+        fts_ids = []
+        if match:
+            fts_ids = [r["id"] for r in conn.execute(
+                "SELECT m.id FROM notes_fts f JOIN mem_notes m ON m.id=f.rowid "
+                "WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) LIMIT ?",
+                (match, pool)).fetchall()]
+        vec_ids = [r["note_id"] for r in conn.execute(
+            "SELECT note_id FROM mem_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            (qvec, pool)).fetchall()]
+        scores = _rrf([fts_ids, vec_ids])
+        if scores:
+            rows = {r["id"]: r for r in conn.execute(
+                f"SELECT id, value, scope FROM mem_notes WHERE id IN "
+                f"({','.join('?'*len(scores))})", tuple(scores)).fetchall()}
+            for _id, sc in scores.items():
+                r = rows.get(_id)
+                if not r:
+                    continue
+                if scope and r["scope"] not in (scope, "global"):
+                    continue
+                results.append({"kind": "note", "id": _id, "text": r["value"], "score": sc})
+
+    if "turn" in kinds:
+        cid = _scope_chat_id(scope)
+        fts_ids = []
+        if match:
+            fts_ids = [r["id"] for r in conn.execute(
+                "SELECT c.id FROM turns_fts f JOIN conv_turns c ON c.id=f.rowid "
+                "WHERE turns_fts MATCH ? ORDER BY bm25(turns_fts) LIMIT ?",
+                (match, pool)).fetchall()]
+        vec_ids = [r["turn_id"] for r in conn.execute(
+            "SELECT turn_id FROM turn_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            (qvec, pool)).fetchall()]
+        scores = _rrf([fts_ids, vec_ids])
+        if scores:
+            rows = {r["id"]: r for r in conn.execute(
+                f"SELECT id, role, content, chat_id FROM conv_turns WHERE id IN "
+                f"({','.join('?'*len(scores))})", tuple(scores)).fetchall()}
+            for _id, sc in scores.items():
+                r = rows.get(_id)
+                if not r:
+                    continue
+                if cid is not None and r["chat_id"] is not None and r["chat_id"] != cid:
+                    continue
+                results.append({"kind": "turn", "id": _id,
+                                "text": f"[{r['role']}] {r['content']}", "score": sc})
+
+    conn.close()
+    results.sort(key=lambda h: h["score"], reverse=True)
+    return results[:k]

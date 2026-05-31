@@ -44,6 +44,7 @@ def _agent(chat_id: int) -> CFOAgent:
         _agents[chat_id] = CFOAgent(
             resume=memory.get_session_id(chat_id),
             on_session_id=lambda sid: memory.set_session_id(chat_id, sid),
+            chat_id=chat_id,
         )
     return _agents[chat_id]
 
