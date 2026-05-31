@@ -10,7 +10,7 @@ context axis, while adding finance-grade guarantees neither rival has.
 | Injected at session start | ✅ `MEMORY.md`+`USER.md` (fixed ~1.3k tok) | ✅ `MEMORY.md` hot auto-load | ✅ profile + pinned notes + digest, **adaptive importance×recency within a tiktoken budget** |
 | Per-user profile | ✅ `USER.md` | ⚠️ via files | ✅ `user_profile` (per scope) |
 | Keyword search | ✅ FTS5 | ✅ BM25 | ✅ FTS5 (external-content) |
-| Semantic search | ✅ fastembed (133 MB) | ✅ sqlite-vec, **default needs `OPENAI_API_KEY`** | ✅ fastembed (67 MB quantized) + sqlite-vec, **no API key** |
+| Semantic search | ✅ fastembed | ✅ sqlite-vec, **default needs `OPENAI_API_KEY`** | ✅ fastembed `bge-base-en-v1.5` (768-dim, ~210 MB) + sqlite-vec, **no API key** |
 | Hybrid fusion | ✅ RRF (Milvus) | ✅ hybrid | ✅ Reciprocal Rank Fusion |
 | Works offline / no key | ⚠️ key for some backends | ⚠️ key for default embeddings | ✅ **fully offline, no key** (model cached in `data/models/`) |
 | Save enforcement | ✅ `nudge_interval` | ⚠️ reactive only | ✅ periodic nudge **+ PreCompact hook flush + deterministic auto-capture** |
@@ -18,6 +18,7 @@ context axis, while adding finance-grade guarantees neither rival has.
 | Bounded long-run growth | ⚠️ bounded files | ⚠️ files grow | ✅ **rolling sessions** (digest+reseed) **+ importance-decay eviction** |
 | Conversation history search | ✅ FTS5 | ✅ vector | ✅ `conv_turns` hybrid (notes **and** turns) |
 | Learning loop / skills | ✅ skill docs | ⚠️ limited | ✅ `playbooks` (steps reference tools) |
+| Self-improving loop | ✅ post-task reflection | ⚠️ limited | ✅ **auto-distill playbooks + auto-promote high-hit notes to hot** at each checkpoint |
 | Storage | SQLite + vec DB | SQLite + sqlite-vec | single auditable SQLite (`cfo.db`) |
 
 ## Where CFOAgent is strictly better
@@ -37,6 +38,12 @@ context axis, while adding finance-grade guarantees neither rival has.
 5. **Defense at every lossy boundary.** Facts are flushed before *both*
    compaction (PreCompact hook) and rolling-session forks, and the figures that
    matter live outside memory entirely.
+6. **Self-improving, finance-safe.** Each checkpoint reflects: it auto-distills a
+   reusable playbook when a repeatable procedure occurred and auto-promotes
+   frequently-recalled notes into the injected hot set — but every learned
+   artifact passes the figures firewall and is logged (`source=auto`), so the
+   agent gets better at *procedures and preferences* without ever caching a stale
+   number.
 
 ## Sources
 - Hermes memory: https://hermes-agent.nousresearch.com/docs/user-guide/features/memory ·

@@ -5,6 +5,6 @@ matplotlib>=3.7
 python-dotenv>=1.0
 APScheduler>=3.10
 # MemCore memory/context layer (all required — hybrid recall has no FTS-only mode)
-fastembed>=0.8        # local ONNX embeddings (bge-small-en-v1.5), no API key
+fastembed>=0.8        # local ONNX embeddings (bge-base-en-v1.5, 768-dim), no API key
 sqlite-vec>=0.1.9     # in-SQLite vector storage + ANN
 tiktoken>=0.13        # local token counting for the injection budget

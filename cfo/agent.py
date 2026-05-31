@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -52,6 +53,28 @@ _DIGEST_PROMPT = (
     "include specific dollar amounts, prices, or P&L numbers (those are recomputed "
     "from data). Do not call any tools — just write the summary."
 )
+
+# Self-improving reflection (W10): distill a reusable procedure if one occurred.
+_PLAYBOOK_PROMPT = (
+    "Reflect on this session: did we complete a repeatable, multi-step procedure "
+    "worth reusing next time (e.g. a monthly review, a rebalancing check)? If yes, "
+    "reply EXACTLY in this form:\nNAME: <short_snake_case_name>\nSTEPS: <numbered "
+    "steps that reference your tools; NO dollar amounts or prices>\nIf nothing is "
+    "reusable, reply with just: NONE. Do not call any tools."
+)
+
+
+def _parse_playbook(text: str):
+    """Parse the distillation reply into (name, steps) or None."""
+    if not text or text.strip().upper().startswith("NONE"):
+        return None
+    m = re.search(r"NAME:\s*(.+)", text)
+    s = re.search(r"STEPS:\s*(.+)", text, re.S)
+    if not m or not s:
+        return None
+    name = m.group(1).strip().splitlines()[0][:60]
+    steps = s.group(1).strip()
+    return (name, steps) if name and steps else None
 
 
 def _text(s: str) -> dict:
@@ -381,6 +404,25 @@ class CFOAgent:
         if digest.strip():
             memory.add_digest(self._chat_id, self._session_id, digest,
                               turn_count=self._turns, token_count=self._tokens)
+        # --- self-improving reflection (W10): runs while the session is still live ---
+        try:
+            promoted = memory.promote_hot(self._scope)   # useful notes -> injected
+            if promoted:
+                log.info("promoted %d note(s) to hot for %s", promoted, self._scope)
+        except Exception:
+            log.exception("promote_hot failed")
+        try:
+            pb_text, _ = await self._run_query(_PLAYBOOK_PROMPT)
+            parsed = _parse_playbook(pb_text)
+            if parsed:
+                name, steps = parsed
+                try:
+                    memory.add_playbook(name, steps, scope=self._scope)
+                    log.info("auto-distilled playbook '%s' for %s", name, self._scope)
+                except memory.FiguresFirewallError:
+                    pass   # never persist a procedure that smuggles figures
+        except Exception:
+            log.exception("playbook distillation failed")
         # reseed a fresh, small session (digest already saved -> safe if this fails)
         self._turns = 0
         self._tokens = 0

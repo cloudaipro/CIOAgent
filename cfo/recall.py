@@ -20,7 +20,7 @@ import sqlite_vec
 from . import db
 from .db import DB_PATH, EMBED_DIM
 
-MODEL_NAME = "BAAI/bge-small-en-v1.5"
+MODEL_NAME = "BAAI/bge-base-en-v1.5"   # 768-dim, full precision (higher recall fidelity)
 _CACHE_DIR = str((db.Path(__file__).resolve().parent.parent / "data" / "models"))
 _RRF_K = 60
 
@@ -82,6 +82,24 @@ def index_turn(turn_id: int, text: str, db_path=DB_PATH) -> None:
         conn.execute("DELETE FROM turn_vec WHERE turn_id=?", (turn_id,))
         conn.execute("INSERT INTO turn_vec(turn_id, embedding) VALUES(?,?)", (turn_id, blob))
     conn.close()
+
+
+def reindex_all(db_path=DB_PATH) -> tuple[int, int]:
+    """Re-embed every note and turn into the vec tables. Run after an embedding
+    dim/model change (db.connect flags `vec_reindex_needed`). Returns (notes, turns)."""
+    conn = db.connect(db_path)
+    notes = conn.execute("SELECT id, value FROM mem_notes").fetchall()
+    turns = conn.execute("SELECT id, content FROM conv_turns").fetchall()
+    conn.close()
+    for r in notes:
+        index_note(r["id"], r["value"], db_path)
+    for r in turns:
+        index_turn(r["id"], r["content"], db_path)
+    conn = db.connect(db_path)
+    with conn:
+        conn.execute("DELETE FROM meta WHERE key='vec_reindex_needed'")
+    conn.close()
+    return len(notes), len(turns)
 
 
 # ----- search ---------------------------------------------------------------

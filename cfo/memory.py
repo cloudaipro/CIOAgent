@@ -28,6 +28,9 @@ from . import recall as _recall   # aliased: this module also defines a recall()
 # never evicted; warm agent/auto notes decay by recency×importance×hits.
 MAX_NOTES_PER_SCOPE = int(os.getenv("CFO_MAX_NOTES", "500"))
 _HALFLIFE_DAYS = 30.0
+# A warm note recalled this many times is auto-promoted to hot (injected at
+# session start) — memory curates itself by usefulness (self-improving loop).
+PROMOTE_HITS = int(os.getenv("CFO_PROMOTE_HITS", "3"))
 
 
 class FiguresFirewallError(ValueError):
@@ -206,6 +209,21 @@ def evict(scope: str, max_notes: int = MAX_NOTES_PER_SCOPE, db_path=db.DB_PATH) 
             conn.execute("DELETE FROM mem_notes WHERE id=?", (i,))
     conn.close()
     return len(ids)
+
+
+def promote_hot(scope: str, hits_threshold: int = PROMOTE_HITS, db_path=db.DB_PATH) -> int:
+    """Promote frequently-recalled WARM notes to HOT so they get injected at
+    session start. Part of the self-improving loop. Returns the number promoted."""
+    conn = db.connect(db_path)
+    with conn:
+        cur = conn.execute(
+            "UPDATE mem_notes SET tier='hot', updated_at=datetime('now') "
+            "WHERE scope=? AND tier='warm' AND hits>=?",
+            (scope, hits_threshold),
+        )
+    n = cur.rowcount
+    conn.close()
+    return n
 
 
 # ----- session digests (rolling-session checkpoints) ------------------------

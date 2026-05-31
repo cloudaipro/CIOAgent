@@ -53,6 +53,10 @@ A tiered, auditable memory layer designed to be **≥ Hermes & OpenClaw** (see
   notes (hot/user notes protected).
 - **Durability**: a PreCompact hook + periodic nudge + deterministic auto-capture
   ensure notable facts are saved before any lossy boundary.
+- **Self-improving**: at each checkpoint the agent reflects — auto-distilling a
+  reusable playbook when a repeatable procedure occurred, and promoting
+  frequently-used notes into the injected set. Learned artifacts pass the figures
+  firewall and are logged (`source=auto`).
 - **Figures firewall**: the store refuses to memorize numbers/prices — those are
   always recomputed from the ledger, so memory can never go stale on a figure.
 
@@ -63,7 +67,7 @@ Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-# one-time: download + cache the local embedding model (~67MB) so recall is offline-stable
+# one-time: download + cache the local embedding model (bge-base, ~210MB) so recall is offline-stable
 .venv/bin/python -c "from cfo import recall; print('embed dim', recall.warmup())"
 cp .env.example .env          # paste your @BotFather token into TELEGRAM_BOT_TOKEN
 .venv/bin/python -m cfo.bot   # starts polling

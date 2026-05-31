@@ -161,13 +161,14 @@ END;
 -- sqlite-vec semantic layer (vec0 virtual tables; the extension is loaded on
 -- every connect, so these CREATE statements succeed). embedding dim = 384
 -- (fastembed BAAI/bge-small-en-v1.5).
-CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec  USING vec0(note_id INTEGER PRIMARY KEY, embedding float[384]);
-CREATE VIRTUAL TABLE IF NOT EXISTS turn_vec USING vec0(turn_id INTEGER PRIMARY KEY, embedding float[384]);
+CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec  USING vec0(note_id INTEGER PRIMARY KEY, embedding float[768]);
+CREATE VIRTUAL TABLE IF NOT EXISTS turn_vec USING vec0(turn_id INTEGER PRIMARY KEY, embedding float[768]);
 """
 
 # Embedding dimension for the fastembed model; sqlite-vec vec0 tables above must
 # match. Kept here so recall.py and the schema agree on one source of truth.
-EMBED_DIM = 384
+# 768 = BAAI/bge-base-en-v1.5 (full precision, higher recall fidelity).
+EMBED_DIM = 768
 
 
 def _load_vec(conn: sqlite3.Connection) -> None:
@@ -194,6 +195,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_migrated_v2','1')")
 
 
+def _drop_stale_vec(conn: sqlite3.Connection) -> bool:
+    """If the stored embedding dim differs from EMBED_DIM, drop the vec0 tables so
+    the schema recreates them at the new dim. Returns True if dropped (needs
+    reindex). No-op on a fresh DB (vec tables don't exist yet)."""
+    has_vec = conn.execute("SELECT 1 FROM sqlite_master WHERE name='mem_vec'").fetchone()
+    if not has_vec:
+        return False
+    has_meta = conn.execute("SELECT 1 FROM sqlite_master WHERE name='meta'").fetchone()
+    recorded = None
+    if has_meta:
+        r = conn.execute("SELECT value FROM meta WHERE key='embed_dim'").fetchone()
+        recorded = int(r["value"]) if r else None
+    if recorded != EMBED_DIM:
+        conn.execute("DROP TABLE IF EXISTS mem_vec")
+        conn.execute("DROP TABLE IF EXISTS turn_vec")
+        return True
+    return False
+
+
 def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     """Open a connection: load sqlite-vec, ensure schema, run one-time migration."""
     path = Path(db_path)
@@ -201,8 +221,14 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     _load_vec(conn)            # before executescript: schema creates vec0 tables
+    dropped = _drop_stale_vec(conn)
     conn.executescript(SCHEMA)
     _migrate(conn)
+    with conn:
+        conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('embed_dim',?)",
+                     (str(EMBED_DIM),))
+        if dropped:   # vectors were wiped on a dim change -> need re-embedding
+            conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('vec_reindex_needed','1')")
     return conn
 
 

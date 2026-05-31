@@ -174,6 +174,56 @@ def test_cold_boot_continuity():
     assert tid in [h["id"] for h in hits]           # old turn still findable
 
 
+def test_promote_hot():
+    p = _tmpdb()
+    nid = memory.remember("a frequently useful note", scope="s", tier="warm", db_path=p)
+    memory.bump(nid, by=3, db_path=p)
+    promoted = memory.promote_hot("s", hits_threshold=3, db_path=p)
+    assert promoted == 1
+    assert memory.get_note(nid, db_path=p)["tier"] == "hot"
+
+
+def test_playbook_parser():
+    from cfo.agent import _parse_playbook
+    assert _parse_playbook("NONE") is None
+    assert _parse_playbook("nothing reusable") is None
+    name, steps = _parse_playbook("NAME: monthly_review\nSTEPS: 1. portfolio_summary\n2. list_positions")
+    assert name == "monthly_review" and "portfolio_summary" in steps
+
+
+def test_reflection_loop():
+    """_checkpoint must auto-promote hot notes and auto-distill a playbook (stubbed)."""
+    import cfo.agent as agent
+    rec = {"digest": 0, "playbook": None, "promote": 0}
+    orig = (agent.memory.add_digest, agent.memory.add_playbook, agent.memory.promote_hot)
+    agent.memory.add_digest = lambda *a, **k: rec.__setitem__("digest", rec["digest"] + 1)
+    agent.memory.add_playbook = lambda name, steps, scope: rec.__setitem__("playbook", name)
+    agent.memory.promote_hot = lambda scope: (rec.__setitem__("promote", 2) or 2)
+
+    class Dummy:
+        async def disconnect(self): pass
+
+    async def run():
+        a = agent.CFOAgent(chat_id=99)
+        async def fake_run(p):
+            if "Reflect on this session" in p:
+                return ("NAME: monthly_review\nSTEPS: 1. portfolio_summary\n2. list_positions", [])
+            return ("a digest of the session", [])
+        a._run_query = fake_run
+        a._ensure = lambda: asyncio.sleep(0)
+        a._make_client = lambda resume: Dummy()
+        a._client = Dummy()
+        await a._checkpoint()
+
+    try:
+        asyncio.run(run())
+        assert rec["digest"] == 1, rec
+        assert rec["promote"] == 2, rec
+        assert rec["playbook"] == "monthly_review", rec
+    finally:
+        agent.memory.add_digest, agent.memory.add_playbook, agent.memory.promote_hot = orig
+
+
 def test_offline_embedding():
     # env forced offline at import; embedding must still work from the local cache.
     assert recall.warmup() == db.EMBED_DIM

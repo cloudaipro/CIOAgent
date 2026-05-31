@@ -22,7 +22,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import memory, scheduler
+from . import memory, recall, scheduler
 from .agent import CFOAgent
 
 load_dotenv()
@@ -130,6 +130,10 @@ async def _prewarm_chat(chat_id: int) -> None:
 
 async def _post_init(app: Application) -> None:
     """Start the scheduler and eagerly resume known chat sessions at boot."""
+    if memory.get_meta("vec_reindex_needed"):   # embedding dim/model changed
+        log.info("re-embedding memory after model change…")
+        n, t = recall.reindex_all()
+        log.info("reindex complete: %d notes, %d turns", n, t)
     app.bot_data["scheduler"] = scheduler.start(app.bot)
     chats = memory.all_chats()
     if chats:
