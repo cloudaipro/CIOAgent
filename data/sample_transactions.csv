@@ -1,0 +1,7 @@
+txn_date,symbol,action,quantity,price,fees,currency,notes
+2025-01-10,AAPL,BUY,10,180.00,1.00,USD,initial
+2025-02-15,AAPL,BUY,5,200.00,1.00,USD,add
+2025-03-20,AAPL,SELL,4,220.00,1.00,USD,trim
+2025-01-12,MSFT,BUY,8,400.00,1.00,USD,
+2025-04-01,MSFT,DIV,0,12.00,0,USD,quarterly dividend
+2025-02-01,NVDA,BUY,20,120.00,1.00,USD,

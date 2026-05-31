@@ -1,0 +1,5 @@
+{
+  "enabledPlugins": {
+    "mermaid-doc-guard@claude-skills": true
+  }
+}

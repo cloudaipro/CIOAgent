@@ -1,0 +1,32 @@
+# systemd unit for the 24/7 CFO agent.
+#
+# Install:
+#   sudo cp deploy/cfo-agent.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cfo-agent
+#   journalctl -u cfo-agent -f          # follow logs
+#
+# Edit User= and the two paths below to match your machine.
+
+[Unit]
+Description=CFO Agent (Telegram bot, 24/7)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=skchen
+WorkingDirectory=/mnt/AIWorkSpace/work/CFOAgent
+# Pin HOME so the SDK resolves the same ~/.claude session transcripts used for
+# resume. Without this, a service with an unset HOME would read a different
+# (empty) config dir and every chat would start cold after a reboot.
+Environment=HOME=/home/skchen
+ExecStart=/mnt/AIWorkSpace/work/CFOAgent/.venv/bin/python -m cfo.bot
+# Always come back up — this is what makes the agent 24/7.
+Restart=always
+RestartSec=5
+# Durable state lives in the SQLite DB, so a restart loses no portfolio data
+# and resumes each chat's SDK session from the stored session_id.
+
+[Install]
+WantedBy=multi-user.target
