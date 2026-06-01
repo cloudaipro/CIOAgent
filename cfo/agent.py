@@ -313,10 +313,19 @@ async def t_run_strategy(args):
     }, indent=2))
 
 
+@tool("refresh_prices",
+      "Fetch live market prices (latest close) for all open positions and update valuations.",
+      {})
+async def t_refresh_prices(args):
+    r = portfolio.refresh_live_prices()
+    return _text(json.dumps(r, indent=2))
+
+
 CFO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
-             t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy]
+             t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
+             t_refresh_prices]
 _TOOL_NAMES = ["mcp__cfo__" + t.name for t in CFO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CFO agent, focused on their stock portfolio.

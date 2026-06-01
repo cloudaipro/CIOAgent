@@ -220,6 +220,50 @@ def realized_pl(db_path=db.DB_PATH) -> pd.DataFrame:
     return pd.DataFrame(out, columns=["symbol", "realized_pl", "dividends", "total"])
 
 
+def refresh_live_prices(symbols=None, quote_fn=None, db_path=db.DB_PATH) -> dict:
+    """Fetch live prices for open positions and write them to the prices table.
+
+    Args:
+        symbols: list of symbol strings to refresh; defaults to open positions
+                 (rows with quantity > 0).
+        quote_fn: callable(sym) -> dict|None; defaults to cfo.stock.get_quote
+                  (lazy import so portfolio stays importable without stock deps).
+        db_path: path to the SQLite database.
+
+    Returns:
+        {"updated": [{"symbol": .., "price": ..}],
+         "failed":  [sym, ..],
+         "as_of":   "YYYY-MM-DD"}
+    """
+    from datetime import date as _date
+
+    if quote_fn is None:
+        from .stock import get_quote as quote_fn  # lazy — keeps portfolio offline-safe
+
+    if symbols is None:
+        pos = positions(db_path)
+        symbols = pos.loc[pos["quantity"] > 0, "symbol"].tolist()
+
+    updated = []
+    failed = []
+    for sym in symbols:
+        try:
+            q = quote_fn(sym)
+            if q is not None and q.get("price") is not None:
+                set_price(sym, q["price"], q.get("date"), db_path=db_path)
+                updated.append({"symbol": sym, "price": q["price"]})
+            else:
+                failed.append(sym)
+        except Exception:
+            failed.append(sym)
+
+    return {
+        "updated": updated,
+        "failed": failed,
+        "as_of": _date.today().isoformat(),
+    }
+
+
 def summary(db_path=db.DB_PATH) -> dict:
     """Portfolio totals."""
     pos = positions(db_path)

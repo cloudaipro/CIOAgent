@@ -47,6 +47,20 @@ def _format_digest() -> str:
     return "\n".join(lines)
 
 
+async def price_refresh() -> None:
+    """Fetch live prices for all open positions and write them to the DB.
+
+    Never raises into the scheduler — all errors are caught and logged.
+    """
+    try:
+        result = portfolio.refresh_live_prices()
+        updated = len(result.get("updated", []))
+        failed = len(result.get("failed", []))
+        log.info("price_refresh complete: %d updated, %d failed", updated, failed)
+    except Exception:
+        log.exception("price_refresh job failed")
+
+
 async def daily_digest(bot) -> None:
     """Push the digest to all subscribed chats. Never raises into the scheduler.
 
@@ -76,6 +90,9 @@ def start(bot) -> AsyncIOScheduler:
 
     CFO_DIGEST_HOUR / CFO_DIGEST_MINUTE (local TZ, default 08:00) control timing.
     Set CFO_DIGEST_HOUR=off to disable.
+
+    CFO_PRICE_REFRESH_HOUR / CFO_PRICE_REFRESH_MINUTE (local TZ, default 17:00)
+    control the daily price refresh. Set CFO_PRICE_REFRESH_HOUR=off to disable.
     """
     hour = os.getenv("CFO_DIGEST_HOUR", "8")
     if hour.lower() == "off":
@@ -100,4 +117,22 @@ def start(bot) -> AsyncIOScheduler:
         sched.add_job(daily_digest, "date",
                       run_date=now.replace(microsecond=0) + timedelta(seconds=15),
                       args=[bot], id="digest_catchup", replace_existing=True)
+
+    # ----- price refresh job --------------------------------------------------
+    pr_hour = os.getenv("CFO_PRICE_REFRESH_HOUR", "17")
+    if pr_hour.lower() != "off":
+        pr_hour = int(pr_hour)
+        pr_minute = int(os.getenv("CFO_PRICE_REFRESH_MINUTE", "0"))
+        sched.add_job(price_refresh, "cron", hour=pr_hour, minute=pr_minute,
+                      id="price_refresh", replace_existing=True,
+                      coalesce=True, misfire_grace_time=3600)
+        log.info("price refresh scheduled at %02d:%02d local", pr_hour, pr_minute)
+        # Boot-time one-shot: always fire ~15s after start so data is fresh on restart.
+        sched.add_job(price_refresh, "date",
+                      run_date=now.replace(microsecond=0) + timedelta(seconds=15),
+                      id="price_refresh_boot", replace_existing=True)
+        log.info("price refresh boot one-shot queued")
+    else:
+        log.info("price refresh disabled (CFO_PRICE_REFRESH_HOUR=off)")
+
     return sched
