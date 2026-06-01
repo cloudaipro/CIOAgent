@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-# Ensure cfo is importable regardless of invocation path.
+# Ensure cio is importable regardless of invocation path.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from cfo import db, portfolio
+from cio import db, portfolio
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,7 @@ from cfo import db, portfolio
 @pytest.fixture
 def tmp_db(tmp_path):
     """Return a path to a fresh SQLite DB with AAPL and MSFT BUY transactions."""
-    db_path = tmp_path / "test_cfo.db"
+    db_path = tmp_path / "test_cio.db"
     conn = db.connect(db_path)
     with conn:
         conn.executemany(
@@ -83,7 +83,7 @@ def test_refresh_updated_and_failed(tmp_db):
 
 
 # ---------------------------------------------------------------------------
-# Test 2: lazy coupling — importing cfo.portfolio must NOT pull in cfo.stock
+# Test 2: lazy coupling — importing cio.portfolio must NOT pull in cio.stock
 # ---------------------------------------------------------------------------
 
 def test_lazy_coupling_subprocess():
@@ -91,9 +91,9 @@ def test_lazy_coupling_subprocess():
     code = (
         "import sys, os; "
         "sys.path.insert(0, r'" + str(_REPO_ROOT) + "'); "
-        "import cfo.portfolio; "
-        "assert 'cfo.stock' not in sys.modules, "
-        "'cfo.stock was imported at portfolio import time'"
+        "import cio.portfolio; "
+        "assert 'cio.stock' not in sys.modules, "
+        "'cio.stock was imported at portfolio import time'"
     )
     proc = subprocess.run(
         [sys.executable, "-c", code],

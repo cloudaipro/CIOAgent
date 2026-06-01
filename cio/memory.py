@@ -26,11 +26,11 @@ from . import recall as _recall   # aliased: this module also defines a recall()
 
 # Eviction keeps memory bounded over months of 24/7 use. Hot/user notes are
 # never evicted; warm agent/auto notes decay by recency×importance×hits.
-MAX_NOTES_PER_SCOPE = int(os.getenv("CFO_MAX_NOTES", "500"))
+MAX_NOTES_PER_SCOPE = int(os.getenv("CIO_MAX_NOTES", os.getenv("CFO_MAX_NOTES", "500")))
 _HALFLIFE_DAYS = 30.0
 # A warm note recalled this many times is auto-promoted to hot (injected at
 # session start) — memory curates itself by usefulness (self-improving loop).
-PROMOTE_HITS = int(os.getenv("CFO_PROMOTE_HITS", "3"))
+PROMOTE_HITS = int(os.getenv("CIO_PROMOTE_HITS", os.getenv("CFO_PROMOTE_HITS", "3")))
 
 
 class FiguresFirewallError(ValueError):

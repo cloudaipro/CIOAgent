@@ -226,7 +226,7 @@ def refresh_live_prices(symbols=None, quote_fn=None, db_path=db.DB_PATH) -> dict
     Args:
         symbols: list of symbol strings to refresh; defaults to open positions
                  (rows with quantity > 0).
-        quote_fn: callable(sym) -> dict|None; defaults to cfo.stock.get_quote
+        quote_fn: callable(sym) -> dict|None; defaults to cio.stock.get_quote
                   (lazy import so portfolio stays importable without stock deps).
         db_path: path to the SQLite database.
 

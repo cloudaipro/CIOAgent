@@ -1,7 +1,7 @@
 """
-conftest.py — shared fixtures and helpers for the CFOAgent test suite.
+conftest.py — shared fixtures and helpers for the CIOAgent test suite.
 
-Inserts the repo root onto sys.path so `import cfo` works under pytest
+Inserts the repo root onto sys.path so `import cio` works under pytest
 regardless of where pytest is invoked from.
 """
 import sys

@@ -47,7 +47,7 @@ def embed_one(text: str) -> list[float]:
 def warmup() -> int:
     """Download (first run) and load the embedding model; returns its dimension.
     Run once after install so the agent is offline-stable:
-        python -c "from cfo import recall; print(recall.warmup())"
+        python -c "from cio import recall; print(recall.warmup())"
     """
     return len(embed_one("warmup"))
 

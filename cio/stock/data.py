@@ -1,5 +1,5 @@
 """
-Stock data fetch + cache for CFOAgent.
+Stock data fetch + cache for CIOAgent.
 
 Reused / refactored from AI4StockMarket/StockPricePrediction:
   - build_stocks_data.py : load_or_download_stock_data, closest_trading_day, vol_as_int
@@ -27,7 +27,7 @@ _DEFAULT_CACHE_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "data", "stock_cache",
 )
-STOCK_CACHE_DIR = os.environ.get("CFO_STOCK_CACHE_DIR", _DEFAULT_CACHE_DIR)
+STOCK_CACHE_DIR = os.environ.get("CIO_STOCK_CACHE_DIR", os.environ.get("CFO_STOCK_CACHE_DIR", _DEFAULT_CACHE_DIR))
 STOCK_CACHING = True
 STOCK_CACHE_FILE_TYPE = "pkl"  # pkl or csv
 

@@ -1,8 +1,8 @@
-"""Telegram front-end for the CFO agent.
+"""Telegram front-end for the CIO agent.
 
-Receives text / photos / CSV documents, routes them to a per-chat CFOAgent
+Receives text / photos / CSV documents, routes them to a per-chat CIOAgent
 (running on your Claude Pro subscription), and replies with text plus any
-charts the agent generated. Run:  python -m cfo.bot
+charts the agent generated. Run:  python -m cio.bot
 """
 from __future__ import annotations
 
@@ -23,25 +23,25 @@ from telegram.ext import (
 )
 
 from . import memory, recall, scheduler
-from .agent import CFOAgent
+from .agent import CIOAgent
 
 load_dotenv()
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
 )
-log = logging.getLogger("cfo.bot")
+log = logging.getLogger("cio.bot")
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
 TG_LIMIT = 4096
 
 # One conversational agent per chat, created lazily.
-_agents: dict[int, CFOAgent] = {}
+_agents: dict[int, CIOAgent] = {}
 
 
-def _agent(chat_id: int) -> CFOAgent:
+def _agent(chat_id: int) -> CIOAgent:
     if chat_id not in _agents:
         memory.touch_chat(chat_id)
-        _agents[chat_id] = CFOAgent(
+        _agents[chat_id] = CIOAgent(
             resume=memory.get_session_id(chat_id),
             on_session_id=lambda sid: memory.set_session_id(chat_id, sid),
             chat_id=chat_id,
@@ -73,7 +73,7 @@ async def _run(update: Update, prompt: str) -> None:
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "📊 CFO agent online.\n\n"
+        "📊 CIO agent online.\n\n"
         "• Ask anything: \"how's my portfolio?\", \"top gainer?\", \"show allocation\"\n"
         "• Set a price: \"set AAPL 230\"\n"
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
@@ -165,7 +165,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-    log.info("CFO bot polling…")
+    log.info("CIO bot polling…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

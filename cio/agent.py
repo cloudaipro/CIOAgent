@@ -36,12 +36,16 @@ _LOCK = asyncio.Lock()
 
 # Rolling session: after this many turns or approx tokens, checkpoint a digest
 # and reseed a fresh session so a single chat's transcript can't grow forever.
-ROLL_TURNS = int(os.getenv("CFO_ROLL_TURNS", "40"))
-ROLL_TOKENS = int(os.getenv("CFO_ROLL_TOKENS", "16000"))
+def _env(name, default=None):          # name without prefix, e.g. "MODEL"
+    return os.getenv("CIO_" + name, os.getenv("CFO_" + name, default))
+
+
+ROLL_TURNS = int(_env("ROLL_TURNS", "40"))
+ROLL_TOKENS = int(_env("ROLL_TOKENS", "16000"))
 
 # Every N turns, remind the agent to persist anything notable (Hermes-style
 # nudge) — cheap prompt augmentation, no extra LLM call.
-NUDGE_TURNS = int(os.getenv("CFO_NUDGE_TURNS", "8"))
+NUDGE_TURNS = int(_env("NUDGE_TURNS", "8"))
 _NUDGE_SUFFIX = (
     "\n\n(System reminder: if anything durable about my preferences, plans, or "
     "watchlist came up, save it with the remember tool. Never save figures.)"
@@ -151,7 +155,7 @@ async def t_pl_chart(args):
 
 
 # Scope of the chat whose turn is currently running. Turns are serialized by
-# _LOCK, so a module global is safe; CFOAgent sets it before each query so the
+# _LOCK, so a module global is safe; CIOAgent sets it before each query so the
 # memory tools read/write the right per-chat namespace.
 _ACTIVE_SCOPE = "global"
 
@@ -335,14 +339,14 @@ async def t_stock_panel(args):
         f"No data for {sym}.")
 
 
-CFO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
+CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
              t_refresh_prices, t_stock_panel]
-_TOOL_NAMES = ["mcp__cfo__" + t.name for t in CFO_TOOLS]
+_TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
-SYSTEM_PROMPT = """You are the user's personal CFO agent, focused on their stock portfolio.
+SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock portfolio.
 
 Rules:
 - NEVER invent numbers. Get every figure from the tools. If data is missing, say so.
@@ -361,21 +365,21 @@ Rules:
 
 def build_options(model: str | None = None, resume: str | None = None,
                   system_prompt: str | None = None, hooks=None) -> ClaudeAgentOptions:
-    server = create_sdk_mcp_server("cfo", "1.0.0", CFO_TOOLS)
+    server = create_sdk_mcp_server("cio", "1.0.0", CIO_TOOLS)
     return ClaudeAgentOptions(
         system_prompt=system_prompt or SYSTEM_PROMPT,
-        mcp_servers={"cfo": server},
+        mcp_servers={"cio": server},
         allowed_tools=_TOOL_NAMES + ["Read"],
         disallowed_tools=["Bash", "Write", "Edit", "WebFetch", "WebSearch"],
         permission_mode="bypassPermissions",
         cwd=str(PROJECT_ROOT),
-        model=model or os.getenv("CFO_MODEL") or None,
+        model=_env("MODEL") or None,
         resume=resume,
         hooks=hooks,
     )
 
 
-class CFOAgent:
+class CIOAgent:
     """One conversational session (per chat). Reuses a connected SDK client.
 
     For 24/7 operation the SDK handles long-context overflow with automatic
@@ -403,7 +407,7 @@ class CFOAgent:
         Flag a checkpoint so we durably persist a digest right after this turn —
         nothing notable is lost to the summary."""
         import logging
-        logging.getLogger("cfo.agent").info("PreCompact (%s) for %s — will checkpoint",
+        logging.getLogger("cio.agent").info("PreCompact (%s) for %s — will checkpoint",
                                              input_data.get("trigger"), self._scope)
         self._compaction_pending = True
         return {}
@@ -429,7 +433,7 @@ class CFOAgent:
             if not self._resume:
                 raise
             import logging
-            logging.getLogger("cfo.agent").warning(
+            logging.getLogger("cio.agent").warning(
                 "resume %s failed (%s); starting a fresh session", self._resume, e)
             self._resume = None
             self._session_id = None
@@ -485,7 +489,7 @@ class CFOAgent:
         forking, then reseed a fresh session whose injected context now includes
         that digest. Financial data is untouched (it lives in the DB)."""
         import logging
-        log = logging.getLogger("cfo.agent")
+        log = logging.getLogger("cio.agent")
         try:
             digest, _ = await self._run_query(_DIGEST_PROMPT)
         except Exception:

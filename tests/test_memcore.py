@@ -18,7 +18,7 @@ from pathlib import Path
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-from cfo import context, db, memory, recall  # noqa: E402
+from cio import context, db, memory, recall  # noqa: E402
 
 
 def _tmpdb() -> Path:
@@ -117,7 +117,7 @@ def test_playbooks():
 
 def test_rolling_session_cadence():
     """Drive ask() with stubs (no LLM): a checkpoint must fire every ROLL_TURNS."""
-    import cfo.agent as agent
+    import cio.agent as agent
     old_roll, old_nudge = agent.ROLL_TURNS, agent.NUDGE_TURNS
     agent.ROLL_TURNS, agent.NUDGE_TURNS = 10, 0
     recorded = []
@@ -128,7 +128,7 @@ def test_rolling_session_cadence():
         async def disconnect(self): pass
 
     async def run():
-        a = agent.CFOAgent(chat_id=42)
+        a = agent.CIOAgent(chat_id=42)
         async def fake_run(_): return ("ok", [])
         async def fake_ensure(): return None
         a._run_query = fake_run
@@ -164,7 +164,7 @@ def test_cold_boot_continuity():
     tid = cur.lastrowid
     conn.close()
     recall.index_turn(tid, "I want to hedge my tech bets before the Fed meeting", p)
-    # --- cold boot: what a fresh CFOAgent assembles before the first message ---
+    # --- cold boot: what a fresh CIOAgent assembles before the first message ---
     block = context.build_memory_block(chat_id=1, db_path=p)
     assert "reduce single-name risk" in block      # hot note injected
     assert "solo CFO" in block                      # profile injected
@@ -184,7 +184,7 @@ def test_promote_hot():
 
 
 def test_playbook_parser():
-    from cfo.agent import _parse_playbook
+    from cio.agent import _parse_playbook
     assert _parse_playbook("NONE") is None
     assert _parse_playbook("nothing reusable") is None
     name, steps = _parse_playbook("NAME: monthly_review\nSTEPS: 1. portfolio_summary\n2. list_positions")
@@ -193,7 +193,7 @@ def test_playbook_parser():
 
 def test_reflection_loop():
     """_checkpoint must auto-promote hot notes and auto-distill a playbook (stubbed)."""
-    import cfo.agent as agent
+    import cio.agent as agent
     rec = {"digest": 0, "playbook": None, "promote": 0}
     orig = (agent.memory.add_digest, agent.memory.add_playbook, agent.memory.promote_hot)
     agent.memory.add_digest = lambda *a, **k: rec.__setitem__("digest", rec["digest"] + 1)
@@ -204,7 +204,7 @@ def test_reflection_loop():
         async def disconnect(self): pass
 
     async def run():
-        a = agent.CFOAgent(chat_id=99)
+        a = agent.CIOAgent(chat_id=99)
         async def fake_run(p):
             if "Reflect on this session" in p:
                 return ("NAME: monthly_review\nSTEPS: 1. portfolio_summary\n2. list_positions", [])

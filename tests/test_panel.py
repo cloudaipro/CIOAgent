@@ -1,5 +1,5 @@
 """
-Offline pytest suite for cfo.stock.panel — render_panel, related_links, agent tool registration.
+Offline pytest suite for cio.stock.panel — render_panel, related_links, agent tool registration.
 
 All tests run WITHOUT network access.
   - load_or_download_stock_data  → synthetic OHLCV via monkeypatch
@@ -48,7 +48,7 @@ FAKE_FUND = {
 
 def _patch_stock_data(monkeypatch):
     """Monkeypatch load_or_download_stock_data and fundamentals to offline values."""
-    import cfo.stock.data as data_mod
+    import cio.stock.data as data_mod
 
     synthetic_ohlcv = make_ohlcv(n_rows=300)
     monkeypatch.setattr(data_mod, "load_or_download_stock_data",
@@ -60,7 +60,7 @@ def _patch_stock_data(monkeypatch):
 
     # Also patch the panel module's imported references if already bound
     try:
-        import cfo.stock.panel as panel_mod
+        import cio.stock.panel as panel_mod
         monkeypatch.setattr(panel_mod, "load_or_download_stock_data",
                             lambda *a, **kw: synthetic_ohlcv, raising=False)
         monkeypatch.setattr(panel_mod, "fundamentals",
@@ -79,7 +79,7 @@ def test_render_panel_writes_png(tmp_path, monkeypatch):
     """render_panel("3293.TWO") must write a non-empty .png and return its path."""
     _patch_stock_data(monkeypatch)
 
-    from cfo.stock.panel import render_panel
+    from cio.stock.panel import render_panel
     path = render_panel("3293.TWO", out_dir=str(tmp_path))
 
     assert os.path.exists(path), f"PNG not found at: {path}"
@@ -93,8 +93,8 @@ def test_render_panel_writes_png(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_panel_import_no_network():
-    """Importing cfo.stock.panel must not trigger any network call."""
-    import cfo.stock.panel  # noqa: F401 — just confirm import succeeds
+    """Importing cio.stock.panel must not trigger any network call."""
+    import cio.stock.panel  # noqa: F401 — just confirm import succeeds
     import matplotlib.pyplot as plt
     sans_serif = plt.rcParams.get("font.sans-serif", [])
     assert "Noto Sans CJK JP" in sans_serif or "DejaVu Sans" in sans_serif, (
@@ -108,7 +108,7 @@ def test_panel_import_no_network():
 
 def test_related_links_tw():
     """related_links('3293.TWO') must return TW-specific links with correct keys."""
-    from cfo.stock.panel import related_links
+    from cio.stock.panel import related_links
     links = related_links("3293.TWO")
     assert isinstance(links, dict), f"Expected dict, got {type(links)}"
     expected_keys = {"Yahoo", "Google", "TradingView", "Goodinfo", "Wantgoo"}
@@ -126,7 +126,7 @@ def test_related_links_tw():
 
 def test_related_links_us():
     """related_links('AAPL') must return US-specific links with correct keys."""
-    from cfo.stock.panel import related_links
+    from cio.stock.panel import related_links
     links = related_links("AAPL")
     assert isinstance(links, dict), f"Expected dict, got {type(links)}"
     expected_keys = {"Yahoo", "Google", "TradingView", "Finviz"}
@@ -138,18 +138,18 @@ def test_related_links_us():
 
 
 # ---------------------------------------------------------------------------
-# 5. stock_panel in CFO_TOOLS; count == 20
+# 5. stock_panel in CIO_TOOLS; count == 20
 # ---------------------------------------------------------------------------
 
-def test_stock_panel_in_cfo_tools():
-    """'stock_panel' must be in CFO_TOOLS and the total count must be 20."""
-    import cfo.agent as agent_mod
-    tool_names = [t.name for t in agent_mod.CFO_TOOLS]
+def test_stock_panel_in_cio_tools():
+    """'stock_panel' must be in CIO_TOOLS and the total count must be 20."""
+    import cio.agent as agent_mod
+    tool_names = [t.name for t in agent_mod.CIO_TOOLS]
     assert "stock_panel" in tool_names, (
-        f"'stock_panel' not found in CFO_TOOLS. Current tools: {tool_names}"
+        f"'stock_panel' not found in CIO_TOOLS. Current tools: {tool_names}"
     )
-    assert len(agent_mod.CFO_TOOLS) == 20, (
-        f"Expected 20 tools in CFO_TOOLS, got {len(agent_mod.CFO_TOOLS)}: {tool_names}"
+    assert len(agent_mod.CIO_TOOLS) == 20, (
+        f"Expected 20 tools in CIO_TOOLS, got {len(agent_mod.CIO_TOOLS)}: {tool_names}"
     )
 
 
@@ -159,7 +159,7 @@ def test_stock_panel_in_cfo_tools():
 
 def test_render_panel_partial_fundamentals(tmp_path, monkeypatch):
     """render_panel must succeed even when most fundamentals are None."""
-    import cfo.stock.data as data_mod
+    import cio.stock.data as data_mod
 
     synthetic_ohlcv = make_ohlcv(n_rows=100)
     all_none_fund = {k: None for k in FAKE_FUND}
@@ -169,7 +169,7 @@ def test_render_panel_partial_fundamentals(tmp_path, monkeypatch):
                         lambda *a, **kw: dict(all_none_fund))
     monkeypatch.setattr(data_mod, "normalize_symbol", lambda s: s)
 
-    from cfo.stock.panel import render_panel
+    from cio.stock.panel import render_panel
     path = render_panel("AAPL", out_dir=str(tmp_path))
     assert os.path.exists(path), f"PNG not found: {path}"
     assert os.path.getsize(path) > 1024, "PNG too small with all-None fundamentals"
@@ -181,7 +181,7 @@ def test_render_panel_partial_fundamentals(tmp_path, monkeypatch):
 
 def test_render_panel_no_ohlcv(tmp_path, monkeypatch):
     """render_panel must succeed even when load_or_download_stock_data returns None."""
-    import cfo.stock.data as data_mod
+    import cio.stock.data as data_mod
 
     monkeypatch.setattr(data_mod, "load_or_download_stock_data",
                         lambda *a, **kw: None)
@@ -189,6 +189,6 @@ def test_render_panel_no_ohlcv(tmp_path, monkeypatch):
                         lambda *a, **kw: dict(FAKE_FUND))
     monkeypatch.setattr(data_mod, "normalize_symbol", lambda s: s)
 
-    from cfo.stock.panel import render_panel
+    from cio.stock.panel import render_panel
     path = render_panel("3293.TWO", out_dir=str(tmp_path))
     assert os.path.exists(path), f"PNG not found: {path}"

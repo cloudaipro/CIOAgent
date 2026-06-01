@@ -1,7 +1,7 @@
 """Session-start context assembly (the injection layer).
 
 Hermes/OpenClaw inject a bounded "hot" memory file into the prompt at session
-start so the agent *knows* its context before turn one. CFOAgent does the same,
+start so the agent *knows* its context before turn one. CIOAgent does the same,
 but adaptively: it ranks notes by importance×recency and packs the operator
 profile + pinned notes + latest session digest into a **token budget** (measured
 with tiktoken, with headroom), so injected context can never blow the window.

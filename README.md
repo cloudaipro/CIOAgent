@@ -1,6 +1,6 @@
-# CFO Agent
+# CIO Agent
 
-A personal CFO chat agent for a solo operator. Talk to it on **Telegram**; it
+A personal CIO chat agent for a solo operator. Talk to it on **Telegram**; it
 answers questions about your **stock portfolio**, imports CSVs, and sends charts.
 
 Runs on your **Claude Pro subscription** via `claude-agent-sdk` — **no
@@ -10,19 +10,19 @@ ANTHROPIC_API_KEY needed**. The Claude Code CLI must be installed and logged in
 ## Architecture
 
 ```
-Telegram  ──►  cfo/bot.py     I/O: text, photos, CSV uploads, chart replies
+Telegram  ──►  cio/bot.py     I/O: text, photos, CSV uploads, chart replies
                   │
                   ▼
-              cfo/agent.py    Claude agent (Pro auth) + in-process MCP tools
+              cio/agent.py    Claude agent (Pro auth) + in-process MCP tools
                   │
                   ▼
-            cfo/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
-            cfo/charts.py     matplotlib → PNG
-            cfo/memory.py     MemCore store: tiered notes, profile, playbooks, eviction
-            cfo/context.py    session-start memory injection (token-budgeted)
-            cfo/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
-            cfo/scheduler.py  APScheduler: daily portfolio digest
-            cfo/db.py         SQLite schema (transactions = source of truth)
+            cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
+            cio/charts.py     matplotlib → PNG
+            cio/memory.py     MemCore store: tiered notes, profile, playbooks, eviction
+            cio/context.py    session-start memory injection (token-budgeted)
+            cio/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
+            cio/scheduler.py  APScheduler: daily portfolio digest
+            cio/db.py         SQLite schema (transactions = source of truth)
 ```
 
 - **Cost basis**: average-cost method. Positions & P&L are *derived* from the
@@ -68,9 +68,9 @@ Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # one-time: download + cache the local embedding model (bge-base, ~210MB) so recall is offline-stable
-.venv/bin/python -c "from cfo import recall; print('embed dim', recall.warmup())"
+.venv/bin/python -c "from cio import recall; print('embed dim', recall.warmup())"
 cp .env.example .env          # paste your @BotFather token into TELEGRAM_BOT_TOKEN
-.venv/bin/python -m cfo.bot   # starts polling
+.venv/bin/python -m cio.bot   # starts polling
 ```
 
 ## Use (in Telegram)
@@ -87,22 +87,24 @@ cp .env.example .env          # paste your @BotFather token into TELEGRAM_BOT_TO
 For an always-on agent that auto-starts on boot and restarts on crash:
 
 ```bash
-sudo cp deploy/cfo-agent.service /etc/systemd/system/
+sudo cp deploy/cio-agent.service /etc/systemd/system/
 # edit User=, WorkingDirectory=, HOME=, and ExecStart= paths if not skchen
 sudo systemctl daemon-reload
-sudo systemctl enable --now cfo-agent     # start now + on every boot
-journalctl -u cfo-agent -f                # follow logs
+sudo systemctl enable --now cio-agent     # start now + on every boot
+journalctl -u cio-agent -f                # follow logs
 ```
 
 After a reboot the service comes back automatically. Durable state (portfolio,
-memory, subscriptions, per-chat session ids) lives in `data/cfo.db`, so nothing
-is lost; each chat resumes its thread on its next message.
+memory, subscriptions, per-chat session ids) lives in `data/cio.db` (falls back
+to `data/cfo.db` if `cio.db` is absent — no data loss during migration), so
+nothing is lost; each chat resumes its thread on its next message.
 
 **Daily digest timing** — set in `.env` (local timezone):
 
 ```
-CFO_DIGEST_HOUR=8        # hour 0–23, or "off" to disable
-CFO_DIGEST_MINUTE=0
+CIO_DIGEST_HOUR=8        # hour 0–23, or "off" to disable
+CIO_DIGEST_MINUTE=0
+# CFO_DIGEST_HOUR / CFO_DIGEST_MINUTE still honored (back-compat)
 ```
 
 If the machine is rebooting at digest time, a catch-up runs shortly after boot
@@ -112,9 +114,9 @@ If the machine is rebooting at digest time, a catch-up runs shortly after boot
 
 ```bash
 .venv/bin/python -c "
-import asyncio; from cfo.agent import CFOAgent
+import asyncio; from cio.agent import CIOAgent
 async def m():
-    a=CFOAgent()
+    a=CIOAgent()
     print((await a.ask('summarize my portfolio'))[0]); await a.close()
 asyncio.run(m())"
 ```

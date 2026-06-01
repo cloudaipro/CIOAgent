@@ -1,5 +1,5 @@
 """
-Offline pytest suite for cfo.stock — fetch/cache/strategy subsystem.
+Offline pytest suite for cio.stock — fetch/cache/strategy subsystem.
 
 All tests run WITHOUT network access. Real yfinance.download is monkeypatched
 wherever a download would otherwise occur.
@@ -15,7 +15,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-import cfo.stock as s
+import cio.stock as s
 from tests.conftest import make_ohlcv, make_wide_ohlcv
 
 
@@ -64,7 +64,7 @@ def test_cache_roundtrip(tmp_path, monkeypatch):
     - return a non-empty DataFrame,
     - NOT call yfin.download on a second call whose range is covered (cache hit).
     """
-    import cfo.stock.data as data_mod
+    import cio.stock.data as data_mod
 
     # Redirect cache to the temp directory.
     monkeypatch.setattr(data_mod, "STOCK_CACHE_DIR", str(tmp_path))
@@ -98,7 +98,7 @@ def test_cache_roundtrip(tmp_path, monkeypatch):
 
 def test_latest_quote_offline(monkeypatch):
     """latest_quote returns a dict with numeric 'price' and 'volume' keys."""
-    import cfo.stock.data as data_mod
+    import cio.stock.data as data_mod
 
     synthetic = make_ohlcv(n_rows=10)
 
@@ -139,7 +139,7 @@ def test_run_strategy_on_dataframe():
 
 def test_run_strategy_no_data_raises(monkeypatch):
     """run_strategy with a symbol must raise ValueError when fetch returns None."""
-    # run_strategy in cfo/stock/__init__.py calls load_or_download_stock_data via
+    # run_strategy in cio/stock/__init__.py calls load_or_download_stock_data via
     # the name it imported into its own namespace — patch that binding directly.
     monkeypatch.setattr(s, "load_or_download_stock_data", lambda *a, **kw: None)
 

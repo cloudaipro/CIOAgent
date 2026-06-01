@@ -1,4 +1,4 @@
-"""SQLite layer for the CFO agent.
+"""SQLite layer for the CIO agent.
 
 Single local DB file. Source of truth for the stock-portfolio domain is the
 `transactions` table; positions and P&L are *derived* from it so cost basis is
@@ -10,7 +10,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cfo.db"
+_DATA = Path(__file__).resolve().parent.parent / "data"
+DB_PATH = _DATA / "cio.db"
+if not DB_PATH.exists() and (_DATA / "cfo.db").exists():
+    DB_PATH = _DATA / "cfo.db"        # keep using the owner's existing DB in place
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS transactions (

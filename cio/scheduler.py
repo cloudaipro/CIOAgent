@@ -1,6 +1,6 @@
 """Autonomous scheduled work for the 24/7 runtime.
 
-The bot is event-driven (it reacts to messages), but a 24/7 CFO should also act
+The bot is event-driven (it reacts to messages), but a 24/7 CIO should also act
 on its own. APScheduler runs inside the bot's asyncio loop and pushes a daily
 portfolio digest to every subscribed chat.
 
@@ -18,7 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from . import memory, portfolio
 
-log = logging.getLogger("cfo.scheduler")
+log = logging.getLogger("cio.scheduler")
 
 _LAST_DIGEST_KEY = "last_digest_date"  # ISO date of the last digest actually sent
 
@@ -88,17 +88,18 @@ async def daily_digest(bot) -> None:
 def start(bot) -> AsyncIOScheduler:
     """Start the scheduler on the running loop. Returns it so the caller can stop it.
 
-    CFO_DIGEST_HOUR / CFO_DIGEST_MINUTE (local TZ, default 08:00) control timing.
-    Set CFO_DIGEST_HOUR=off to disable.
+    CIO_DIGEST_HOUR / CIO_DIGEST_MINUTE (local TZ, default 08:00) control timing.
+    Set CIO_DIGEST_HOUR=off to disable. CFO_DIGEST_HOUR/MINUTE still honored.
 
-    CFO_PRICE_REFRESH_HOUR / CFO_PRICE_REFRESH_MINUTE (local TZ, default 17:00)
-    control the daily price refresh. Set CFO_PRICE_REFRESH_HOUR=off to disable.
+    CIO_PRICE_REFRESH_HOUR / CIO_PRICE_REFRESH_MINUTE (local TZ, default 17:00)
+    control the daily price refresh. Set CIO_PRICE_REFRESH_HOUR=off to disable.
+    CFO_PRICE_REFRESH_HOUR/MINUTE still honored.
     """
-    hour = os.getenv("CFO_DIGEST_HOUR", "8")
+    hour = os.getenv("CIO_DIGEST_HOUR", os.getenv("CFO_DIGEST_HOUR", "8"))
     if hour.lower() == "off":
-        log.info("daily digest disabled (CFO_DIGEST_HOUR=off)")
+        log.info("daily digest disabled (CIO_DIGEST_HOUR=off)")
         return None
-    hour, minute = int(hour), int(os.getenv("CFO_DIGEST_MINUTE", "0"))
+    hour, minute = int(hour), int(os.getenv("CIO_DIGEST_MINUTE", os.getenv("CFO_DIGEST_MINUTE", "0")))
     sched = AsyncIOScheduler()
     # coalesce + grace: if the loop was briefly blocked past fire time, still run
     # once rather than skip. (Catch-up for full downtime is handled below.)
@@ -119,10 +120,10 @@ def start(bot) -> AsyncIOScheduler:
                       args=[bot], id="digest_catchup", replace_existing=True)
 
     # ----- price refresh job --------------------------------------------------
-    pr_hour = os.getenv("CFO_PRICE_REFRESH_HOUR", "17")
+    pr_hour = os.getenv("CIO_PRICE_REFRESH_HOUR", os.getenv("CFO_PRICE_REFRESH_HOUR", "17"))
     if pr_hour.lower() != "off":
         pr_hour = int(pr_hour)
-        pr_minute = int(os.getenv("CFO_PRICE_REFRESH_MINUTE", "0"))
+        pr_minute = int(os.getenv("CIO_PRICE_REFRESH_MINUTE", os.getenv("CFO_PRICE_REFRESH_MINUTE", "0")))
         sched.add_job(price_refresh, "cron", hour=pr_hour, minute=pr_minute,
                       id="price_refresh", replace_existing=True,
                       coalesce=True, misfire_grace_time=3600)
@@ -133,6 +134,6 @@ def start(bot) -> AsyncIOScheduler:
                       id="price_refresh_boot", replace_existing=True)
         log.info("price refresh boot one-shot queued")
     else:
-        log.info("price refresh disabled (CFO_PRICE_REFRESH_HOUR=off)")
+        log.info("price refresh disabled (CIO_PRICE_REFRESH_HOUR=off)")
 
     return sched

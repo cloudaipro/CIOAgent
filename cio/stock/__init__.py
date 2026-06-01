@@ -1,5 +1,5 @@
 """
-CFOAgent stock subsystem — fetch + cache + strategies.
+CIOAgent stock subsystem — fetch + cache + strategies.
 
 Reused from AI4StockMarket/StockPricePrediction (reviewed / refactored):
   - fetch + cache .............. data.py

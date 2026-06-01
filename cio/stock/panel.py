@@ -40,7 +40,7 @@ _NA_MSG = "—　無資料來源（yfinance）"   # em-space for visual indent
 
 # ---- output directory --------------------------------------------------------
 def _charts_dir() -> Path:
-    """Mirror cfo/charts.py OUT_DIR without importing the portfolio sub-system."""
+    """Mirror cio/charts.py OUT_DIR without importing the portfolio sub-system."""
     try:
         from ..charts import OUT_DIR  # type: ignore[import]
         return OUT_DIR
