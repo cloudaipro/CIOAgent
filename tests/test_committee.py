@@ -6,10 +6,16 @@ All tests monkeypatch ask_role and/or gather_bundle; no network, no LLM.
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
+from pathlib import Path
 import textwrap
 from typing import Any
 
 import pytest
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # ---------------------------------------------------------------------------
 # Fixtures / canned data
@@ -81,6 +87,7 @@ _ROLE_YAML: dict[str, str] = {
         vote: BUY
         confidence: 65
         reason: Broader market tailwinds support the position
+        memory_note: AAPL benefits from risk-on macro tailwinds in tech rotation cycles
         ```"""),
     "equity": textwrap.dedent("""\
         ```yaml
@@ -140,6 +147,7 @@ _ROLE_YAML: dict[str, str] = {
         vote: SELL
         confidence: 55
         reason: Tail risks are underpriced; elevated concentration risk
+        memory_note: AAPL China concentration is a persistent tail risk worth monitoring each cycle
         ```"""),
     "catalyst": textwrap.dedent("""\
         ```yaml
@@ -180,6 +188,7 @@ _ROLE_YAML: dict[str, str] = {
             probability: 20%
             price_target: Qualitative assessment — significant drawdown
             key_drivers: Qualitative assessment — China restrictions + rate spike
+        memory_note: AAPL is a quality compounder — revisit thesis if services growth decelerates
         ```"""),
 }
 
@@ -187,8 +196,17 @@ _ROLE_YAML: dict[str, str] = {
 async def _canned_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
     """Async version: determine which role is being called and return canned yaml.
     Detection is purely on system_prompt to avoid confusion when user_prompt
-    contains output from prior LLM calls."""
+    contains output from prior LLM calls.
+
+    Debate challenge/response calls ask for 'Free text — no yaml needed'; return
+    plain prose for those so memory_note never leaks through the debate section.
+    """
     sp = system_prompt.lower()
+    up = user_prompt.lower()
+
+    # Debate calls: free-text prose, no YAML
+    if "free text" in up or "no yaml needed" in up:
+        return "This is a qualitative debate response with no figures or YAML."
 
     # CIO must come before moderator — CIO system prompt contains "cio"
     if "chief investment officer" in sp:
@@ -904,3 +922,302 @@ class TestBuildReportCosmetics:
         from cio.committee.report import build_report
         report = build_report(SYMBOL_AAPL, result)
         assert "Confidence-Weighted Score" not in report
+
+
+# ---------------------------------------------------------------------------
+# Per-agent MemCore tests (Step 5) — all offline, tmp db
+# ---------------------------------------------------------------------------
+
+def _tmpdb() -> Path:
+    """Create a fresh isolated temp db for one test."""
+    from cio import db
+    p = Path(tempfile.mkdtemp()) / "t.db"
+    db.init(p)
+    return p
+
+
+class TestAgentMemoryIsolation:
+    """Core isolation guarantee: notes in one scope never surface for another."""
+
+    def test_note_visible_to_own_scope(self, monkeypatch):
+        """A note saved for 'risk' is visible via recall_block('risk', ...)."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio.committee import agent_memory
+        agent_memory.save_note("risk", "AAPL China tail risk is a persistent watch-item", "AAPL")
+        block = agent_memory.recall_block("risk", "AAPL")
+        assert "AAPL China tail risk" in block
+
+    def test_note_invisible_to_other_scope(self, monkeypatch):
+        """A note saved for 'risk' must NOT appear in recall_block('valuation', ...)."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio.committee import agent_memory
+        agent_memory.save_note("risk", "AAPL China tail risk is a persistent watch-item", "AAPL")
+        block = agent_memory.recall_block("valuation", "AAPL")
+        assert "AAPL China tail risk" not in block
+
+    def test_global_note_invisible_to_committee_scope(self, monkeypatch):
+        """A global note must NOT appear in any committee recall_block."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory
+        from cio.committee import agent_memory
+        # Write a global note directly (bypassing agent_memory so scope='global')
+        memory.remember("global thesis: macro matters", scope="global", db_path=p)
+        block = agent_memory.recall_block("risk", "AAPL")
+        assert "global thesis" not in block
+
+    def test_include_global_false_excludes_global_note(self, monkeypatch):
+        """recall.search with include_global=False excludes a note that include_global=True would include."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory, recall
+        memory.remember("global recall test note", scope="global", db_path=p)
+        # include_global=True (default) — should find it
+        hits_with = recall.search("global recall test note", k=5, scope="committee:risk",
+                                  kinds=("note",), db_path=p, include_global=True)
+        # include_global=False — must NOT find it
+        hits_without = recall.search("global recall test note", k=5, scope="committee:risk",
+                                     kinds=("note",), db_path=p, include_global=False)
+        assert any("global recall test note" in h["text"] for h in hits_with), \
+            "include_global=True should surface a global note"
+        assert not any("global recall test note" in h["text"] for h in hits_without), \
+            "include_global=False must not surface a global note"
+
+    def test_cross_scope_strict(self, monkeypatch):
+        """recall.search with include_global=False finds own-scope note but not other-scope note."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory, recall
+        memory.remember("risk agent unique phrase", scope="committee:risk", db_path=p)
+        memory.remember("valuation agent unique phrase", scope="committee:valuation", db_path=p)
+        risk_hits = recall.search("unique phrase", k=5, scope="committee:risk",
+                                  kinds=("note",), db_path=p, include_global=False)
+        val_hits = recall.search("unique phrase", k=5, scope="committee:valuation",
+                                 kinds=("note",), db_path=p, include_global=False)
+        risk_texts = [h["text"] for h in risk_hits]
+        val_texts = [h["text"] for h in val_hits]
+        assert any("risk agent" in t for t in risk_texts)
+        assert not any("valuation agent" in t for t in risk_texts)
+        assert any("valuation agent" in t for t in val_texts)
+        assert not any("risk agent" in t for t in val_texts)
+
+
+class TestAgentMemoryFirewall:
+    """Figures firewall must hold for committee agents."""
+
+    def test_figure_note_rejected(self, monkeypatch):
+        """save_note with a dollar amount returns None and stores nothing."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory
+        from cio.committee import agent_memory
+        result = agent_memory.save_note("risk", "fair value $182 target", "AAPL")
+        assert result is None
+        assert memory.count_notes("committee:risk", db_path=p) == 0
+
+    def test_qualitative_note_accepted(self, monkeypatch):
+        """A qualitative note (no figure) is stored and count increases."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory
+        from cio.committee import agent_memory
+        result = agent_memory.save_note("risk", "AAPL regulatory risk is a persistent watch-item", "AAPL")
+        assert isinstance(result, int)
+        assert memory.count_notes("committee:risk", db_path=p) == 1
+
+
+class TestAgentMemoryInjection:
+    """run_specialist injects the right agent's memory into its system prompt."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_injection_contains_own_note(self, monkeypatch):
+        """After seeding a hot note for 'risk', run_specialist passes it in the system prompt."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory
+        from cio.committee import agent_memory
+        from cio.committee.roles import SPECIALISTS
+
+        # Seed a HOT note directly for the risk scope
+        memory.remember(
+            "AAPL tail risk pattern watch-item",
+            scope="committee:risk", tier="hot", db_path=p,
+        )
+
+        captured: list[str] = []
+
+        async def fake_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
+            captured.append(system_prompt)
+            return _ROLE_YAML["risk"]
+
+        monkeypatch.setattr("cio.committee.engine.ask_role", fake_ask_role)
+
+        risk_role = next(r for r in SPECIALISTS if r["key"] == "risk")
+        from cio.committee.engine import run_specialist
+        self._run(run_specialist(risk_role, "DATA", "AAPL"))
+
+        assert captured, "ask_role was not called"
+        assert "AAPL tail risk pattern watch-item" in captured[0], \
+            "Hot note for risk scope not found in system prompt"
+
+    def test_injection_excludes_other_scope_note(self, monkeypatch):
+        """A note seeded for 'valuation' must NOT appear in the 'risk' agent's prompt."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory
+        from cio.committee.roles import SPECIALISTS
+
+        memory.remember(
+            "AAPL valuation note only for valuation scope",
+            scope="committee:valuation", tier="hot", db_path=p,
+        )
+
+        captured: list[str] = []
+
+        async def fake_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
+            captured.append(system_prompt)
+            return _ROLE_YAML["risk"]
+
+        monkeypatch.setattr("cio.committee.engine.ask_role", fake_ask_role)
+
+        risk_role = next(r for r in SPECIALISTS if r["key"] == "risk")
+        from cio.committee.engine import run_specialist
+        self._run(run_specialist(risk_role, "DATA", "AAPL"))
+
+        assert captured, "ask_role was not called"
+        assert "valuation note only for valuation scope" not in captured[0], \
+            "Valuation-scoped note leaked into risk agent's system prompt"
+
+
+class TestAgentMemoryPromotion:
+    """Warm notes promoted to hot after enough bumps appear in build_scope_block."""
+
+    def test_promote_on_reflect(self, monkeypatch):
+        """Seed a warm note, bump it >= PROMOTE_HITS times, reflect → note becomes hot."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory
+        from cio.committee import agent_memory
+
+        nid = agent_memory.save_note("risk", "watch AAPL China exposure each earnings", "AAPL")
+        assert nid is not None
+
+        # Bump enough times to cross the promotion threshold
+        from cio.memory import PROMOTE_HITS
+        for _ in range(PROMOTE_HITS):
+            memory.bump(nid, db_path=p)
+
+        promoted = agent_memory.reflect("risk")
+        assert promoted >= 1
+
+        # Now it must appear in build_scope_block (hot notes are injected)
+        from cio import context
+        block = context.build_scope_block("committee:risk", db_path=p)
+        assert "watch AAPL China exposure" in block
+
+    def test_recall_block_bumps_drive_promotion(self, monkeypatch):
+        """Repeated recall_block calls bump the hit counter; reflect then promotes."""
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        from cio import memory
+        from cio.committee import agent_memory
+        from cio.memory import PROMOTE_HITS
+
+        nid = agent_memory.save_note("risk", "AAPL regulatory watch pattern", "AAPL")
+        assert nid is not None
+
+        # Each recall_block call bumps matching notes
+        for _ in range(PROMOTE_HITS):
+            agent_memory.recall_block("risk", "AAPL")
+
+        promoted = agent_memory.reflect("risk")
+        assert promoted >= 1
+
+        note = memory.get_note(nid, db_path=p)
+        assert note is not None
+        assert note["tier"] == "hot"
+
+
+class TestAgentMemoryReportOmission:
+    """memory_note must never appear in the rendered committee report."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_result(self, monkeypatch):
+        p = _tmpdb()
+        monkeypatch.setattr("cio.committee.agent_memory.DB_PATH", p)
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
+        from cio.committee.engine import run_committee
+        return self._run(run_committee(SYMBOL_AAPL))
+
+    def test_memory_note_absent_from_report(self, monkeypatch):
+        """The text of memory_note values must not appear in build_report output."""
+        result = self._make_result(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        # These are the memory_note values injected in the canned YAML
+        assert "AAPL benefits from risk-on macro tailwinds in tech rotation cycles" not in report
+        assert "AAPL China concentration is a persistent tail risk worth monitoring each cycle" not in report
+        assert "AAPL is a quality compounder" not in report
+
+    def test_memory_note_in_opinion_dict_not_report(self, monkeypatch):
+        """memory_note is present in the opinion dict but build_report does not render it."""
+        result = self._make_result(monkeypatch)
+        from cio.committee.report import build_report
+        # It may be in the opinion dict (parsed from yaml)
+        market_op = next((op for op in result.opinions if op["key"] == "market"), None)
+        assert market_op is not None
+        # memory_note in opinion dict is fine (it's the agent's private memory)
+        # But build_report must not render it
+        report = build_report(SYMBOL_AAPL, result)
+        assert "memory_note" not in report
+
+
+class TestBuildScopeBlock:
+    """context.build_scope_block returns scope-only content within budget."""
+
+    def test_empty_scope_returns_empty(self, monkeypatch):
+        """An empty scope produces an empty string."""
+        p = _tmpdb()
+        from cio import context
+        block = context.build_scope_block("committee:risk", budget=400, db_path=p)
+        assert block == ""
+
+    def test_hot_note_appears_in_block(self, monkeypatch):
+        """A hot note written for the scope appears in build_scope_block."""
+        p = _tmpdb()
+        from cio import context, memory
+        memory.remember("risk hot note for scope block test", scope="committee:risk",
+                        tier="hot", db_path=p)
+        block = context.build_scope_block("committee:risk", db_path=p)
+        assert "risk hot note for scope block test" in block
+
+    def test_global_note_excluded(self, monkeypatch):
+        """A global hot note must NOT appear in a committee scope block."""
+        p = _tmpdb()
+        from cio import context, memory
+        memory.remember("global hot note must stay out", scope="global", tier="hot", db_path=p)
+        block = context.build_scope_block("committee:risk", db_path=p)
+        assert "global hot note must stay out" not in block
+
+    def test_budget_respected(self, monkeypatch):
+        """build_scope_block stays within the token budget."""
+        p = _tmpdb()
+        from cio import context, memory
+        # Write many hot notes
+        for i in range(20):
+            try:
+                memory.remember(f"risk note number {i} about sector dynamics", scope="committee:risk",
+                                tier="hot", db_path=p)
+            except Exception:
+                pass
+        budget = 50
+        block = context.build_scope_block("committee:risk", budget=budget, db_path=p)
+        if block:
+            assert context.count_tokens(block) <= budget

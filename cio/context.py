@@ -95,6 +95,55 @@ def build_memory_block(chat_id: int | None = None, budget: int = DEFAULT_BUDGET,
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
+def build_scope_block(scope: str, budget: int = DEFAULT_BUDGET, db_path=DB_PATH) -> str:
+    """Assemble a scoped memory block for a committee agent within `budget` tokens.
+
+    Packs ONLY the given scope's material — no global, no chat:* leakage:
+      1. scope profile (if any)
+      2. hot notes for this scope sorted by (importance, updated_at)
+      3. scope playbooks (if any)
+
+    Header: '## Your memory (prior durable notes — you already know this)'.
+    Returns '' if nothing fits or the scope has no data yet.
+    """
+    profile = memory.get_profile(scope, db_path=db_path)
+    notes = memory.list_notes(scope, tier="hot", limit=50, db_path=db_path)
+    notes.sort(key=lambda n: (n["importance"], n["updated_at"]), reverse=True)
+    pbs = memory.list_playbooks(scope, db_path=db_path)
+    # list_playbooks includes global playbooks; keep only scope-specific ones
+    pbs = [p for p in pbs if p["scope"] == scope]
+
+    header = "## Your memory (prior durable notes — you already know this)"
+    lines = [header]
+
+    def fits(*extra: str) -> bool:
+        return count_tokens("\n".join(lines + list(extra))) <= budget
+
+    if profile:
+        pl = "**Profile:** " + " | ".join(f"{k}: {v}" for k, v in profile.items())
+        if fits(pl):
+            lines.append(pl)
+
+    tag = "**Pinned notes:**"
+    have_tag = False
+    for n in notes:
+        ln = f"- {n['value']}"
+        trial = ([tag, ln] if not have_tag else [ln])
+        if not fits(*trial):
+            break
+        if not have_tag:
+            lines.append(tag)
+            have_tag = True
+        lines.append(ln)
+
+    if pbs:
+        pl = "**Saved playbooks:** " + ", ".join(p["name"] for p in pbs)
+        if fits(pl):
+            lines.append(pl)
+
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def compose_system_prompt(base: str, chat_id: int | None = None,
                           budget: int = DEFAULT_BUDGET, db_path=DB_PATH) -> str:
     """Base system prompt + injected memory block (if any)."""

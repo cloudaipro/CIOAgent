@@ -16,6 +16,7 @@ import yaml
 
 from .bundle import gather_bundle, format_bundle
 from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
+from . import agent_memory
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
 
     Returns a dict containing: key, title, vote, confidence, reason,
     plus all role-specific fields, and _raw for debugging.
+    memory_note stays in the dict for the agent but is NOT rendered in build_report.
     """
     fields_list = ", ".join(role["fields"])
     user_prompt = (
@@ -132,8 +134,17 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
         f"DATA:\n{bundle_text}"
     )
 
-    raw = await ask_role(role["system_prompt"], user_prompt)
+    # Inject this agent's own scoped memory block (never another agent's)
+    mem = agent_memory.recall_block(role["key"], symbol)
+    system_prompt = role["system_prompt"] + ("\n\n" + mem if mem else "")
+
+    raw = await ask_role(system_prompt, user_prompt)
     parsed = parse_yaml_block(raw)
+
+    # Strip memory_note from _raw so it never propagates to the report renderer
+    # (debate section renders _raw verbatim; memory_note is the agent's private store).
+    import re as _re
+    raw_clean = _re.sub(r"\nmemory_note:.*", "", raw)
 
     result = {
         "key": role["key"],
@@ -141,11 +152,16 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
         "vote": parsed.get("vote", "HOLD"),
         "confidence": parsed.get("confidence", 50),
         "reason": parsed.get("reason", parsed.get("_raw", "")),
-        "_raw": raw,
+        "_raw": raw_clean,
     }
-    # Merge role-specific fields
+    # Merge role-specific fields (including memory_note — private, not rendered)
     for f in role["fields"]:
         result[f] = parsed.get(f)
+
+    # Save the agent's private durable takeaway (figures firewall enforced inside)
+    note_val = parsed.get("memory_note")
+    if isinstance(note_val, str) and note_val.strip():
+        agent_memory.save_note(role["key"], note_val.strip(), symbol)
 
     return result
 
@@ -314,8 +330,27 @@ async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeRes
         f"Required output fields: final_recommendation, confidence_score, risk_rating, "
         f"time_horizon, base_case, bull_case, bear_case, scenarios"
     )
-    cio_raw = await ask_role(CIO_SYSTEM, cio_prompt, model=cio_model)
+    # Inject CIO's own scoped memory block
+    cio_mem = agent_memory.recall_block("cio", resolved)
+    cio_system = CIO_SYSTEM + ("\n\n" + cio_mem if cio_mem else "")
+    cio_raw = await ask_role(cio_system, cio_prompt, model=cio_model)
     cio = parse_yaml_block(cio_raw)
+
+    # Save CIO's durable takeaway (figures firewall enforced inside save_note)
+    cio_note = cio.get("memory_note")
+    if isinstance(cio_note, str) and cio_note.strip():
+        agent_memory.save_note("cio", cio_note.strip(), resolved)
+
+    # Post-pipeline reflect: promote frequently-recalled warm notes to hot
+    # for all agents that ran this round (failures must not fail the run)
+    roles_that_ran = [role["key"] for role in SPECIALISTS
+                      if not (role["key"] == "etf" and not is_etf)]
+    roles_that_ran.append("cio")
+    for rk in roles_that_ran:
+        try:
+            agent_memory.reflect(rk)
+        except Exception as _e:
+            log.debug("reflect failed for %s: %s", rk, _e)
 
     return CommitteeResult(
         symbol=symbol,

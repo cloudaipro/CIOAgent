@@ -129,10 +129,13 @@ def _scope_chat_id(scope: str | None):
 
 
 def search(query: str, k: int = 5, scope: str | None = None,
-           kinds: tuple[str, ...] = ("note", "turn"), db_path=DB_PATH) -> list[dict]:
+           kinds: tuple[str, ...] = ("note", "turn"), db_path=DB_PATH, *,
+           include_global: bool = True) -> list[dict]:
     """Hybrid search across notes and/or conversation turns; returns top-k hits
-    [{kind, id, text, score}], best first. Notes are limited to `scope` + global;
-    turns to the chat of `scope` (if any)."""
+    [{kind, id, text, score}], best first. Notes are limited to `scope` + global
+    (when include_global=True, the default); pass include_global=False to restrict
+    hits strictly to `scope` only (used by per-agent committee recall for isolation).
+    Turns are always limited to the chat of `scope` (if any)."""
     match = _fts_query(query)
     qvec = _ser(embed_one(query))
     pool = max(k * 4, 20)
@@ -158,8 +161,13 @@ def search(query: str, k: int = 5, scope: str | None = None,
                 r = rows.get(_id)
                 if not r:
                     continue
-                if scope and r["scope"] not in (scope, "global"):
-                    continue
+                if scope:
+                    if include_global:
+                        if r["scope"] not in (scope, "global"):
+                            continue
+                    else:
+                        if r["scope"] != scope:
+                            continue
                 results.append({"kind": "note", "id": _id, "text": r["value"], "score": sc})
 
     if "turn" in kinds:
