@@ -1,6 +1,7 @@
 claude-agent-sdk>=0.2.87
 python-telegram-bot>=22.0
 pandas>=2.0
+numpy<2.3              # capped: numba (via pandas_ta) requires numpy>=1.24,<2.3
 matplotlib>=3.7
 python-dotenv>=1.0
 APScheduler>=3.10
@@ -8,3 +9,11 @@ APScheduler>=3.10
 fastembed>=0.8        # local ONNX embeddings (bge-base-en-v1.5, 768-dim), no API key
 sqlite-vec>=0.1.9     # in-SQLite vector storage + ANN
 tiktoken>=0.13        # local token counting for the injection budget
+# Stock subsystem (cfo/stock): fetch + cache + strategies, reused from StockPricePrediction.
+# Requires Python >=3.12 (pandas_ta 0.4.x).
+yfinance>=0.2                  # Yahoo Finance price/volume fetch
+joblib>=1.3                    # per-symbol pickle cache
+pandas-market-calendars>=4.0   # NYSE trading-day alignment
+pandas_ta>=0.4.71b0            # technical-analysis engine used by the strategies
+finta>=1.3                     # indicators.py helper (find_swings etc.)
+scikit-learn>=1.3              # pvt_strategy scoring

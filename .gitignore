@@ -237,3 +237,7 @@ data/uploads/
 _temp/
 # fastembed model cache (bge-base ~210MB, re-downloaded on first run via recall.warmup())
 data/models/
+.venv.bak311/
+
+# CFOAgent: stock data cache (regenerable per-symbol pickles)
+data/stock_cache/

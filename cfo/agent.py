@@ -247,9 +247,76 @@ async def t_list_playbooks(args):
     return _text("\n\n".join(f"## {p['name']}\n{p['steps']}" for p in pbs))
 
 
+# ----- stock market tools (live price/volume + cache + TA strategies) --------
+# The stock subsystem is imported lazily inside each tool so the agent (and the
+# TA engine's heavier deps) only load when a stock tool is actually used.
+
+@tool("stock_quote",
+      "Live latest price, volume and OHLC for a stock symbol (Yahoo Finance, cached).",
+      {"symbol": str})
+async def t_stock_quote(args):
+    from . import stock
+    q = stock.get_quote(args["symbol"].upper())
+    if not q:
+        return _text(f"No quote available for {args['symbol'].upper()}.")
+    return _text(json.dumps(q, indent=2))
+
+
+@tool("stock_history",
+      "Historical daily OHLCV for a symbol between two YYYY-MM-DD dates (cached). "
+      "Returns the row count and the most recent rows.",
+      {"symbol": str, "start": str, "end": str})
+async def t_stock_history(args):
+    from . import stock
+    df = stock.get_history(args["symbol"].upper(), args["start"], args["end"])
+    if df is None or len(df) == 0:
+        return _text(f"No data for {args['symbol'].upper()} in that range.")
+    tail = df[["Open", "High", "Low", "Close", "Volume"]].tail(10)
+    return _text(f"{len(df)} rows {df.index[0].date()}..{df.index[-1].date()}\n{tail.to_string()}")
+
+
+@tool("list_stock_strategies",
+      "List the technical-analysis strategies available for stock signal analysis.",
+      {})
+async def t_list_strategies(args):
+    from . import stock
+    names = stock.list_strategies()
+    return _text(f"{len(names)} strategies:\n" + ", ".join(names))
+
+
+@tool("run_stock_strategy",
+      "Run one technical-analysis strategy on a symbol and report its latest firing signals. "
+      "Use list_stock_strategies for valid names (e.g. rsi, macd, stoch).",
+      {"symbol": str, "strategy": str})
+async def t_run_strategy(args):
+    from . import stock
+    sym = args["symbol"].upper()
+    name = args["strategy"].lower()
+    try:
+        sig = stock.run_strategy(sym, name)
+    except KeyError:
+        return _text(f"Unknown strategy '{name}'. See list_stock_strategies.")
+    except ValueError as e:
+        return _text(str(e))
+    if sig is None or len(sig) == 0:
+        return _text(f"No signals produced for {sym} / {name}.")
+    last = sig.iloc[-1]
+    firing = [c for c, v in last.items() if v == 1]
+    recent = sig.tail(60)
+    active_recent = [c for c in sig.columns if (recent[c] == 1).any()]
+    return _text(json.dumps({
+        "symbol": sym,
+        "strategy": name,
+        "as_of": str(sig.index[-1].date()),
+        "signals_firing_today": firing,
+        "signals_active_last_60d": active_recent,
+    }, indent=2))
+
+
 CFO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
-             t_save_playbook, t_list_playbooks]
+             t_save_playbook, t_list_playbooks,
+             t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy]
 _TOOL_NAMES = ["mcp__cfo__" + t.name for t in CFO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CFO agent, focused on their stock portfolio.
