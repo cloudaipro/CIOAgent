@@ -46,6 +46,28 @@ def confidence_band(score: int | float) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _human_num(x: Any) -> str:
+    """
+    Humanize a large number into $T/$B/$M notation.
+
+    Examples: 4523118034944 → '$4.52T', 912345678901 → '$912.3B', 45000000 → '$45.0M'.
+    Falls back to str(x) on non-numeric input.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    abs_v = abs(v)
+    sign = "-" if v < 0 else ""
+    if abs_v >= 1e12:
+        return f"{sign}${abs_v / 1e12:.2f}T"
+    if abs_v >= 1e9:
+        return f"{sign}${abs_v / 1e9:.1f}B"
+    if abs_v >= 1e6:
+        return f"{sign}${abs_v / 1e6:.1f}M"
+    return f"{sign}${abs_v:,.0f}"
+
+
 def _v(val: Any, default: str = "_Insufficient data._") -> str:
     """Render a value; use default when None or empty."""
     if val is None:
@@ -220,9 +242,10 @@ def build_report(symbol: str, result) -> str:
 
     # ── 2. Company Overview ────────────────────────────────────────────────
     mktcap = fund.get("market_cap")
+    mktcap_str = _human_num(mktcap) if mktcap is not None else "_Insufficient data._"
     overview_lines = [
         f"**Name:** {_v(name)}",
-        f"**Market Cap:** {_v(mktcap)}",
+        f"**Market Cap:** {mktcap_str}",
         f"**52W High:** {_v(fund.get('wk52_high'))}  |  **52W Low:** {_v(fund.get('wk52_low'))}",
         f"**Last Price:** {_v(quote.get('close'))}  |  **Change:** {_v(quote.get('change_pct'))}%",
     ]
@@ -333,7 +356,7 @@ def build_report(symbol: str, result) -> str:
         f"\n**Vote Tally:** BUY {vote_tally.get('buy_count', 0)} | "
         f"HOLD {vote_tally.get('hold_count', 0)} | "
         f"SELL {vote_tally.get('sell_count', 0)}  \n"
-        f"**Confidence-Weighted Score:** {_v(vote_tally.get('confidence_weighted_score'))}  \n"
+        f"**Net Directional Score (-1 all-sell … +1 all-buy):** {_v(vote_tally.get('confidence_weighted_score'))}  \n"
         f"**Tally Recommendation:** {_v(vote_tally.get('tally_recommendation'))}"
     )
     # Debate subsections

@@ -23,6 +23,21 @@ log = logging.getLogger(__name__)
 # LLM entry point — THE single point tests can monkeypatch
 # ---------------------------------------------------------------------------
 
+def _is_limit_notice(text: str) -> bool:
+    """
+    Return True only for short rate-limit / session-limit notices from Claude.
+
+    The length guard (>400 chars → False) ensures a real analyst answer that merely
+    contains the word "limit" is never silently dropped.
+    """
+    t = text.strip().lower()
+    if len(t) > 400:                      # real analyst answers are long; notices are short
+        return False
+    return any(p in t for p in (
+        "you've hit your", "session limit", "usage limit",
+        "rate limit", "resets ", "try again later"))
+
+
 async def ask_role(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
     """
     One-shot LLM query using the subscription claude-agent-sdk client.
@@ -63,7 +78,11 @@ async def ask_role(system_prompt: str, user_prompt: str, model: str | None = Non
                     if isinstance(blk, TextBlock):
                         parts.append(blk.text)
         await client.disconnect()
-        return "\n".join(parts).strip()
+        collected = "\n".join(parts).strip()
+        if _is_limit_notice(collected):
+            log.warning("ask_role hit a limit notice; treating as empty")
+            return ""
+        return collected
     except Exception as e:
         log.warning("ask_role failed: %s", e)
         return ""

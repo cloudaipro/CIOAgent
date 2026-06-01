@@ -805,3 +805,102 @@ class TestBuildReportDebate:
         report = build_report(SYMBOL_AAPL, result)
         for header in EXPECTED_SECTION_HEADERS:
             assert header in report, f"Missing section after debate: {header}"
+
+
+# ---------------------------------------------------------------------------
+# KG-7 — _is_limit_notice unit tests
+# ---------------------------------------------------------------------------
+
+class TestIsLimitNotice:
+    def test_true_on_real_notice(self):
+        """The canonical limit notice must be detected."""
+        from cio.committee.engine import _is_limit_notice
+        notice = "You've hit your session limit · resets 3:30pm"
+        assert _is_limit_notice(notice) is True
+
+    def test_true_on_usage_limit(self):
+        from cio.committee.engine import _is_limit_notice
+        assert _is_limit_notice("usage limit reached, try again later") is True
+
+    def test_true_on_rate_limit(self):
+        from cio.committee.engine import _is_limit_notice
+        assert _is_limit_notice("rate limit exceeded. resets in one hour.") is True
+
+    def test_false_on_long_analyst_answer_with_limit_word(self):
+        """A 500-char analyst paragraph that mentions 'limit' must NOT be treated as a notice."""
+        from cio.committee.engine import _is_limit_notice
+        long_answer = (
+            "The company's growth is constrained by regulatory limit caps in the EU, "
+            "but its domestic market expansion more than compensates. The balance sheet "
+            "is strong: net debt-to-EBITDA is below the sector limit of 3x, and free "
+            "cash flow yield is among the highest in the peer group. We maintain a BUY "
+            "recommendation with a 12-month price target representing meaningful upside. "
+            "Risk factors include macroeconomic headwinds and potential margin compression "
+            "from rising input costs, but management has a strong track record of navigating "
+            "such challenges effectively."
+        )
+        assert len(long_answer) > 400
+        assert _is_limit_notice(long_answer) is False
+
+    def test_false_on_normal_short_text_no_keywords(self):
+        from cio.committee.engine import _is_limit_notice
+        assert _is_limit_notice("Buy. Strong fundamentals.") is False
+
+    def test_empty_string_is_false(self):
+        """Empty string has no limit keywords → False."""
+        from cio.committee.engine import _is_limit_notice
+        assert _is_limit_notice("") is False
+
+
+# ---------------------------------------------------------------------------
+# KG-6 — build_report cosmetics
+# ---------------------------------------------------------------------------
+
+class TestBuildReportCosmetics:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_result(self, monkeypatch):
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
+        from cio.committee.engine import run_committee
+        return self._run(run_committee(SYMBOL_AAPL))
+
+    def test_market_cap_humanized_trillions(self, monkeypatch):
+        """Market cap 2.7T should render as $2.70T (not raw integer)."""
+        result = self._make_result(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        # 2_700_000_000_000 → $2.70T
+        assert "$2.70T" in report, f"Expected '$2.70T' in report, got excerpt: {report[report.find('Market Cap'):report.find('Market Cap')+60]}"
+
+    def test_market_cap_humanized_large_example(self):
+        """_human_num(4523118034944) → '$4.52T'."""
+        from cio.committee.report import _human_num
+        assert _human_num(4523118034944) == "$4.52T"
+
+    def test_human_num_billions(self):
+        from cio.committee.report import _human_num
+        assert _human_num(912_300_000_000) == "$912.3B"
+
+    def test_human_num_millions(self):
+        from cio.committee.report import _human_num
+        assert _human_num(45_000_000) == "$45.0M"
+
+    def test_human_num_non_numeric_fallback(self):
+        from cio.committee.report import _human_num
+        assert _human_num("N/A") == "N/A"
+
+    def test_tally_label_net_directional(self, monkeypatch):
+        """Tally line must show 'Net Directional Score' label."""
+        result = self._make_result(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        assert "Net Directional Score" in report
+
+    def test_old_tally_label_absent(self, monkeypatch):
+        """'Confidence-Weighted Score' label must no longer appear in report."""
+        result = self._make_result(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        assert "Confidence-Weighted Score" not in report

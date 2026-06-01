@@ -7,6 +7,7 @@ charts the agent generated. Run:  python -m cio.bot
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 from pathlib import Path
@@ -78,7 +79,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• Set a price: \"set AAPL 230\"\n"
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
         "• Send a broker screenshot or receipt photo and I'll read it\n"
-        "• /subscribe for a daily portfolio digest (/unsubscribe to stop)"
+        "• /subscribe for a daily portfolio digest (/unsubscribe to stop)\n"
+        "• /committee SYMBOL — full AI investment-committee report"
     )
 
 
@@ -118,6 +120,86 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                            f"and give a one-line portfolio summary.")
     else:
         await update.message.reply_text("Saved, but I only import .csv files for now.")
+
+
+async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        # ── 1. Parse symbol ───────────────────────────────────────────────
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: /committee SYMBOL  (e.g. /committee AAPL or /committee 2330.TW)"
+            )
+            return
+        sym = ctx.args[0].upper()
+
+        # ── 2. Acknowledge ────────────────────────────────────────────────
+        await update.message.reply_text(
+            f"🏛 Convening the investment committee on {sym}…\n"
+            "This runs ~10-20 model calls (specialists → debate → CIO), "
+            "typically 1-3 min. I'll send the full report when ready."
+        )
+        await update.effective_chat.send_action(ChatAction.TYPING)
+
+        # ── 3. Run committee ──────────────────────────────────────────────
+        from .committee import run_committee, build_report
+        try:
+            result = await run_committee(sym)
+        except Exception as e:
+            log.exception("run_committee error for %s", sym)
+            await update.message.reply_text(f"⚠️ Committee error: {e}")
+            return
+
+        # ── 4. No data ────────────────────────────────────────────────────
+        if result.error:
+            await update.message.reply_text(
+                f"No data for {sym}. Check the symbol (TW codes need .TW/.TWO)."
+            )
+            return
+
+        # ── 5. Build + upload report ──────────────────────────────────────
+        md = build_report(sym, result)
+        date_str = datetime.date.today().isoformat()
+        report_dir = UPLOAD_DIR / "committee_reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"{sym}_committee_{date_str}.md"
+        report_path.write_text(md, encoding="utf-8")
+        with open(report_path, "rb") as fh:
+            await update.message.reply_document(
+                fh, filename=report_path.name
+            )
+
+        # ── 6. Short summary message ──────────────────────────────────────
+        from .committee.report import confidence_band
+
+        cio = result.cio or {}
+        tally = result.vote_tally or {}
+        consensus = result.consensus or {}
+
+        final_rec = cio.get("final_recommendation") or "N/A"
+        conf_score = cio.get("confidence_score")
+        band = confidence_band(conf_score) if conf_score is not None else "N/A"
+        conf_str = f"{conf_score}" if conf_score is not None else "N/A"
+        buy_c = tally.get("buy_count", 0)
+        hold_c = tally.get("hold_count", 0)
+        sell_c = tally.get("sell_count", 0)
+        agree = consensus.get("agreement_score") or "N/A"
+
+        summary = (
+            f"📋 *{sym} Committee Summary*\n\n"
+            f"*Recommendation:* {final_rec}\n"
+            f"*Confidence:* {conf_str} — {band}\n"
+            f"*Vote Tally:* BUY {buy_c} | HOLD {hold_c} | SELL {sell_c}\n"
+            f"*Agreement Score:* {agree}\n\n"
+            f"_Full report attached above._"
+        )
+        await update.message.reply_text(summary, parse_mode="Markdown")
+
+    except Exception as e:
+        log.exception("cmd_committee crashed unexpectedly")
+        try:
+            await update.message.reply_text(f"⚠️ Committee error: {e}")
+        except Exception:
+            pass
 
 
 async def _prewarm_chat(chat_id: int) -> None:
@@ -162,6 +244,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    app.add_handler(CommandHandler("committee", cmd_committee))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
