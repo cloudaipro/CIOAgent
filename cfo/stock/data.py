@@ -11,6 +11,7 @@ Dropped from the source: torch/random and the MyPyUtil/ai4stock_util imports (un
 """
 import os
 import logging
+from functools import lru_cache
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -141,6 +142,116 @@ def load_or_download_stock_data(symbol, start, end):
     except Exception as e:
         log.error("Error downloading data for %s: %s", symbol, e)
         return None
+
+
+@lru_cache(maxsize=128)
+def normalize_symbol(symbol: str) -> str:
+    """
+    Resolve a bare 4-digit TW code to a yfinance ticker.
+
+    - Bare 4-digit string  → try "{code}.TW"; if data comes back empty try "{code}.TWO".
+    - Already has a suffix (.TW / .TWO / other) → pass through unchanged.
+    - Non-numeric / US symbols → pass through unchanged.
+
+    The resolved symbol is cached so repeated calls with the same input are free.
+    """
+    s = symbol.strip()
+    # Already has an exchange suffix or is non-numeric → pass through.
+    if "." in s:
+        return s
+    if not s.isdigit():
+        return s
+    # Bare 4-digit numeric code — try .TW first, then .TWO.
+    for suffix in (".TW", ".TWO"):
+        candidate = s + suffix
+        try:
+            end = datetime.now()
+            start = end - timedelta(days=10)
+            df = load_or_download_stock_data(candidate, start, end)
+            if df is not None and not df.empty:
+                return candidate
+        except Exception:
+            pass
+    # Nothing worked — default to .TW (caller will handle empty data).
+    return s + ".TW"
+
+
+_FUNDAMENTALS_FIELDS = (
+    "name", "pe", "pb", "yield_pct", "eps", "roe_pct", "margin_pct",
+    "market_cap", "wk52_high", "wk52_low", "short_ratio", "shares_short",
+    "revenue_q",
+)
+
+
+def fundamentals(symbol: str) -> dict:
+    """
+    Fetch key fundamental data for *symbol* from yfinance.
+
+    Every field defaults to None; never raises.  Fields:
+      name, pe, pb, yield_pct, eps, roe_pct, margin_pct,
+      market_cap, wk52_high, wk52_low, short_ratio, shares_short,
+      revenue_q  (list of {"period": str, "value": float, "yoy_pct": float|None})
+    """
+    result = {f: None for f in _FUNDAMENTALS_FIELDS}
+    try:
+        import yfinance as yf
+        tk = yf.Ticker(symbol)
+        info = tk.info or {}
+
+        def _get(key, transform=None):
+            v = info.get(key)
+            if v is None:
+                return None
+            try:
+                return transform(v) if transform else v
+            except Exception:
+                return None
+
+        result["name"] = _get("longName")
+        result["pe"] = _get("trailingPE")
+        result["pb"] = _get("priceToBook")
+        result["yield_pct"] = _get("dividendYield")     # already a percent
+        result["eps"] = _get("trailingEps")
+        result["roe_pct"] = _get("returnOnEquity", lambda v: v * 100)   # fraction → %
+        result["margin_pct"] = _get("profitMargins", lambda v: v * 100)  # fraction → %
+        result["market_cap"] = _get("marketCap")
+        result["wk52_high"] = _get("fiftyTwoWeekHigh")
+        result["wk52_low"] = _get("fiftyTwoWeekLow")
+        result["short_ratio"] = _get("shortRatio")
+        result["shares_short"] = _get("sharesShort")
+
+        # Quarterly revenue
+        try:
+            qis = tk.quarterly_income_stmt
+            if qis is not None and "Total Revenue" in qis.index:
+                rev_series = qis.loc["Total Revenue"].dropna().sort_index()
+                # Build (period, value) pairs with YoY where prior year exists.
+                items = []
+                for ts, val in rev_series.items():
+                    label = ts.strftime("%Y-Q") + str((ts.month - 1) // 3 + 1) if hasattr(ts, "strftime") else str(ts)
+                    # Look for same quarter a year earlier.
+                    yoy = None
+                    try:
+                        import pandas as pd
+                        prior_ts = ts - pd.DateOffset(years=1)
+                        # Find closest entry within 45 days.
+                        diffs = abs(rev_series.index - prior_ts)
+                        closest_idx = diffs.argmin()
+                        if diffs[closest_idx].days <= 45:
+                            prior_val = rev_series.iloc[closest_idx]
+                            if prior_val and prior_val != 0:
+                                yoy = (val - prior_val) / abs(prior_val) * 100
+                    except Exception:
+                        pass
+                    items.append({"period": label, "value": float(val), "yoy_pct": yoy})
+                result["revenue_q"] = items if len(items) >= 2 else None
+        except Exception:
+            result["revenue_q"] = None
+
+    except Exception:
+        pass
+
+    return result
 
 
 def latest_quote(symbol, lookback_days=10):

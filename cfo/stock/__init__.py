@@ -22,8 +22,11 @@ from .data import (  # noqa: E402
     load_or_download_stock_data,
     latest_quote,
     closest_trading_day,
+    fundamentals,
+    normalize_symbol,
     STOCK_CACHE_DIR,
 )
+from .panel import render_panel, related_links  # noqa: E402
 
 
 def get_quote(symbol):
@@ -106,5 +109,9 @@ __all__ = [
     "load_or_download_stock_data",
     "latest_quote",
     "closest_trading_day",
+    "fundamentals",
+    "normalize_symbol",
+    "render_panel",
+    "related_links",
     "STOCK_CACHE_DIR",
 ]

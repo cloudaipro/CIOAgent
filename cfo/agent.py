@@ -321,11 +321,25 @@ async def t_refresh_prices(args):
     return _text(json.dumps(r, indent=2))
 
 
+@tool("stock_panel",
+      "Render a one-stop single-stock panel image (price, fundamentals, revenue, links) and send it.",
+      {"symbol": str})
+async def t_stock_panel(args):
+    from . import stock
+    sym = args["symbol"].upper()
+    path = stock.render_panel(sym)
+    links = stock.related_links(sym)      # dict name->url
+    return _emit_image(path,
+        "Stock panel generated; it will be sent to the user.\n相關連結: " +
+        " · ".join(f"[{k}]({v})" for k, v in links.items()),
+        f"No data for {sym}.")
+
+
 CFO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
-             t_refresh_prices]
+             t_refresh_prices, t_stock_panel]
 _TOOL_NAMES = ["mcp__cfo__" + t.name for t in CFO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CFO agent, focused on their stock portfolio.
