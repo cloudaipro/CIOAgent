@@ -194,20 +194,24 @@ class CommitteeResult:
     vote_tally: dict = field(default_factory=dict)
     cio: dict = field(default_factory=dict)
     error: str | None = None
+    round1_opinions: list[dict] = field(default_factory=list)
+    debate: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-async def run_committee(symbol: str) -> CommitteeResult:
+async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeResult:
     """
     Run the full committee pipeline for *symbol*:
       1. gather_bundle
-      2. specialists (sequential)
-      3. moderator consensus
-      4. CIO final decision
+      2. specialists (sequential) — Round 1
+      3. debate (Round 2 cross-exam + Round 3 revisions) — optional, bounded
+      4. moderator consensus on Round 3 votes
+      5. CIO final decision on Round 3 votes
 
+    debate=None reads CIO_DEBATE env var (default "on").
     Returns CommitteeResult; never raises.
     """
     # Step 1 — data
@@ -247,7 +251,24 @@ async def run_committee(symbol: str) -> CommitteeResult:
                 opinion[f] = None
         opinions.append(opinion)
 
-    # Step 3 — consensus (moderator LLM + deterministic tally)
+    # Step 3 — debate (Round 2 cross-exam + Round 3 revisions)
+    if debate is None:
+        debate = os.getenv("CIO_DEBATE", "on").lower() != "off"
+
+    round1_opinions = list(opinions)
+    debate_result: dict = {"skipped": True, "pairs": [], "exchanges": [], "round3_opinions": opinions}
+
+    if debate:
+        # Check genuine disagreement before importing debate module
+        unique_base = {str(op.get("vote", "HOLD")).upper().replace("STRONG ", "") for op in opinions}
+        if len(unique_base) > 1:
+            from .debate import run_debate
+            roles_by_key = {r["key"]: r for r in SPECIALISTS}
+            debate_result = await run_debate(opinions, bundle_text, resolved, roles_by_key)
+            opinions = debate_result.get("round3_opinions", opinions)
+        # else: all same vote — debate_result stays skipped
+
+    # Step 4 — consensus (moderator LLM + deterministic tally) on final (Round 3) votes
     vote_tally = _compute_vote_tally(opinions)
 
     opinions_summary = "\n\n".join(
@@ -286,4 +307,6 @@ async def run_committee(symbol: str) -> CommitteeResult:
         consensus=consensus,
         vote_tally=vote_tally,
         cio=cio,
+        round1_opinions=round1_opinions,
+        debate=debate_result,
     )

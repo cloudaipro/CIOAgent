@@ -511,3 +511,297 @@ def test_cio_tools_count():
     """CIO_TOOLS must still be exactly 20 after adding the committee module."""
     from cio.agent import CIO_TOOLS
     assert len(CIO_TOOLS) == 20, f"CIO_TOOLS count changed: {len(CIO_TOOLS)}"
+
+
+# ---------------------------------------------------------------------------
+# select_debate_pairs tests
+# ---------------------------------------------------------------------------
+
+# Canned opinions for pair-selection tests
+_OP_BEAR = {"key": "risk", "title": "Risk Management", "vote": "SELL", "confidence": 55}
+_OP_BULL = {"key": "equity", "title": "Equity Research", "vote": "BUY", "confidence": 75}
+_OP_HOLD = {"key": "industry", "title": "Industry Intelligence", "vote": "HOLD", "confidence": 55}
+_OP_VAL_HOLD = {"key": "valuation", "title": "Valuation", "vote": "HOLD", "confidence": 60}
+_OP_RISK_SELL = {"key": "risk", "title": "Risk Management", "vote": "SELL", "confidence": 55}
+_OP_VAL_BUY = {"key": "valuation", "title": "Valuation", "vote": "BUY", "confidence": 70}
+
+
+class TestSelectDebatePairs:
+    def test_all_same_vote_returns_empty(self):
+        """All HOLD → no genuine disagreement → []."""
+        from cio.committee.debate import select_debate_pairs
+        opinions = [
+            {"key": "market", "vote": "HOLD", "confidence": 60},
+            {"key": "equity", "vote": "HOLD", "confidence": 65},
+            {"key": "risk", "vote": "HOLD", "confidence": 50},
+        ]
+        assert select_debate_pairs(opinions, max_pairs=2) == []
+
+    def test_all_same_buy_returns_empty(self):
+        """All BUY → []."""
+        from cio.committee.debate import select_debate_pairs
+        opinions = [
+            {"key": "market", "vote": "BUY", "confidence": 70},
+            {"key": "equity", "vote": "BUY", "confidence": 75},
+        ]
+        assert select_debate_pairs(opinions, max_pairs=2) == []
+
+    def test_mixed_votes_core_pair_bear_challenges_bull(self):
+        """Mixed votes → core pair: most-bearish challenges most-bullish."""
+        from cio.committee.debate import select_debate_pairs
+        opinions = [_OP_BEAR, _OP_BULL, _OP_HOLD]
+        pairs = select_debate_pairs(opinions, max_pairs=2)
+        assert len(pairs) >= 1
+        challenger, target = pairs[0]
+        # challenger is the most bearish (SELL), target is most bullish (BUY)
+        assert challenger["key"] == "risk"
+        assert target["key"] == "equity"
+
+    def test_risk_valuation_prd_pair_included_when_votes_differ(self):
+        """risk/valuation with different votes → PRD pair included."""
+        from cio.committee.debate import select_debate_pairs
+        opinions = [_OP_RISK_SELL, _OP_VAL_BUY, _OP_HOLD]
+        pairs = select_debate_pairs(opinions, max_pairs=2)
+        keys = [(ch["key"], tg["key"]) for ch, tg in pairs]
+        # core pair: risk (SELL) challenges valuation (BUY) — same as PRD pair here
+        assert ("risk", "valuation") in keys
+
+    def test_risk_valuation_skipped_when_same_vote(self):
+        """risk/valuation same vote → PRD pair NOT included (deduped/same vote)."""
+        from cio.committee.debate import select_debate_pairs
+        # risk=HOLD, valuation=HOLD → no debate at all
+        opinions = [
+            {"key": "risk", "vote": "HOLD", "confidence": 55},
+            {"key": "valuation", "vote": "HOLD", "confidence": 60},
+            {"key": "equity", "vote": "HOLD", "confidence": 75},
+        ]
+        assert select_debate_pairs(opinions, max_pairs=2) == []
+
+    def test_respects_max_pairs_cap(self):
+        """max_pairs=1 → at most 1 pair returned."""
+        from cio.committee.debate import select_debate_pairs
+        opinions = [_OP_RISK_SELL, _OP_VAL_BUY, _OP_HOLD]
+        pairs = select_debate_pairs(opinions, max_pairs=1)
+        assert len(pairs) <= 1
+
+    def test_no_self_pairs(self):
+        """No pair has challenger == target."""
+        from cio.committee.debate import select_debate_pairs
+        opinions = [_OP_BEAR, _OP_BULL, _OP_HOLD, _OP_VAL_HOLD]
+        for ch, tg in select_debate_pairs(opinions, max_pairs=4):
+            assert ch["key"] != tg["key"]
+
+    def test_empty_opinions_returns_empty(self):
+        from cio.committee.debate import select_debate_pairs
+        assert select_debate_pairs([], max_pairs=2) == []
+
+    def test_max_pairs_zero_returns_empty(self):
+        from cio.committee.debate import select_debate_pairs
+        assert select_debate_pairs([_OP_BEAR, _OP_BULL], max_pairs=0) == []
+
+
+# ---------------------------------------------------------------------------
+# run_committee with debate ON (extended tests)
+# ---------------------------------------------------------------------------
+
+# Canned responses for debate rounds.
+# Detection by prompt CONTENT (system_prompt is role-based; user_prompt has markers).
+# challenge prompt contains "pointed rebuttal"
+# response prompt contains "Defend or concede"
+# revision prompt contains "DEBATE TRANSCRIPT"
+_CANNED_CHALLENGE = "I challenge you: the downside risks are being severely underweighted."
+_CANNED_RESPONSE = "I acknowledge the risk, but the quality franchise justifies a premium."
+
+# Round 3 revision: risk analyst changes from SELL to HOLD after hearing debate
+_RISK_REVISED_YAML = textwrap.dedent("""\
+    ```yaml
+    risk_score: 50
+    major_risks: Qualitative assessment — China ban risk, services regulation
+    worst_case_scenario: Qualitative assessment — 20% drawdown on regulatory shock
+    vote: HOLD
+    confidence: 45
+    reason: Revised after debate — tail risks partially offset by quality narrative
+    ```""")
+
+
+async def _debate_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
+    """
+    Extended canned ask_role that detects debate rounds by user_prompt content.
+    - challenge: "pointed rebuttal"
+    - response: "Defend or concede"
+    - revision: "DEBATE TRANSCRIPT" — risk specialist changes to HOLD
+    - all else: delegate to the original _canned_ask_role
+    """
+    if "pointed rebuttal" in user_prompt:
+        return _CANNED_CHALLENGE
+    if "Defend or concede" in user_prompt:
+        return _CANNED_RESPONSE
+    if "DEBATE TRANSCRIPT" in user_prompt:
+        sp = system_prompt.lower()
+        if "risk management" in sp:
+            return _RISK_REVISED_YAML
+        # All other specialists hold their Round 1 position
+        return await _canned_ask_role(system_prompt, user_prompt, model)
+    return await _canned_ask_role(system_prompt, user_prompt, model)
+
+
+class TestRunCommitteeDebate:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_result_debate_on(self, monkeypatch):
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _debate_ask_role)
+        monkeypatch.setattr("cio.committee.debate.ask_role", _debate_ask_role)
+        from cio.committee.engine import run_committee
+        return self._run(run_committee(SYMBOL_AAPL, debate=True))
+
+    def test_round1_opinions_populated(self, monkeypatch):
+        """result.round1_opinions should hold the 7 Round 1 specialist votes."""
+        result = self._make_result_debate_on(monkeypatch)
+        assert len(result.round1_opinions) == 7
+
+    def test_debate_exchanges_non_empty(self, monkeypatch):
+        """Debate must produce at least one exchange with actual challenge AND
+        response text — guards against the role system_prompt not being resolved
+        from roles_by_key (opinion dicts carry no system_prompt), which would
+        silently swallow both calls into empty strings."""
+        result = self._make_result_debate_on(monkeypatch)
+        assert not result.debate.get("skipped", True)
+        exchanges = result.debate["exchanges"]
+        assert len(exchanges) >= 1
+        ex = exchanges[0]
+        assert ex["challenge"].strip(), "challenge text empty — system_prompt not resolved"
+        assert ex["response"].strip(), "response text empty — system_prompt not resolved"
+
+    def test_opinions_are_round3(self, monkeypatch):
+        """result.opinions (final) must differ from round1_opinions — risk changed vote."""
+        result = self._make_result_debate_on(monkeypatch)
+        # risk was SELL in Round 1; should be HOLD in Round 3
+        r1_risk = next(op for op in result.round1_opinions if op["key"] == "risk")
+        r3_risk = next(op for op in result.opinions if op["key"] == "risk")
+        assert r1_risk["vote"] == "SELL"
+        assert r3_risk["vote"] == "HOLD"
+
+    def test_tally_computed_on_round3(self, monkeypatch):
+        """vote_tally must reflect Round 3 votes (risk now HOLD → sell_count decreases)."""
+        result = self._make_result_debate_on(monkeypatch)
+        # With risk moved from SELL→HOLD, sell_count should be 0
+        assert result.vote_tally["sell_count"] == 0
+
+    def test_debate_off_via_param(self, monkeypatch):
+        """debate=False → result.debate skipped, opinions == round1."""
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
+        from cio.committee.engine import run_committee
+        result = self._run(run_committee(SYMBOL_AAPL, debate=False))
+        assert result.debate.get("skipped") is True
+        assert result.opinions == result.round1_opinions
+
+    def test_debate_off_via_env(self, monkeypatch):
+        """CIO_DEBATE=off → skipped."""
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
+        monkeypatch.setenv("CIO_DEBATE", "off")
+        from cio.committee.engine import run_committee
+        result = self._run(run_committee(SYMBOL_AAPL))
+        assert result.debate.get("skipped") is True
+
+    def test_all_same_vote_skips_gracefully(self, monkeypatch):
+        """When all specialists return same vote, debate skips with no exception."""
+        same_vote_yaml = textwrap.dedent("""\
+            ```yaml
+            vote: HOLD
+            confidence: 60
+            reason: Everything is fine.
+            ```""")
+
+        async def _all_hold(system_prompt, user_prompt, model=None):
+            sp = system_prompt.lower()
+            if "chief investment officer" in sp:
+                return _ROLE_YAML["cio"]
+            if "moderator" in sp:
+                return _ROLE_YAML["moderator"]
+            return same_vote_yaml
+
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _all_hold)
+        from cio.committee.engine import run_committee
+        result = self._run(run_committee(SYMBOL_AAPL, debate=True))
+        assert result.debate.get("skipped") is True
+        assert result.error is None
+
+
+# ---------------------------------------------------------------------------
+# build_report debate sections
+# ---------------------------------------------------------------------------
+
+class TestBuildReportDebate:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_result_debate_on(self, monkeypatch):
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _debate_ask_role)
+        monkeypatch.setattr("cio.committee.debate.ask_role", _debate_ask_role)
+        from cio.committee.engine import run_committee
+        return self._run(run_committee(SYMBOL_AAPL, debate=True))
+
+    def test_debate_section_present_when_debate_ran(self, monkeypatch):
+        """Report must contain ### Debate when debate ran."""
+        result = self._make_result_debate_on(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        assert "### Debate" in report
+
+    def test_vote_changes_section_present(self, monkeypatch):
+        """Report must contain ### Vote Changes when debate ran."""
+        result = self._make_result_debate_on(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        assert "### Vote Changes" in report
+
+    def test_vote_change_non_trivial(self, monkeypatch):
+        """Risk moved SELL→HOLD — table must show that change."""
+        result = self._make_result_debate_on(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        assert "SELL→HOLD" in report
+
+    def test_no_material_disagreement_when_skipped(self, monkeypatch):
+        """Debate skipped → '_No material disagreement; debate skipped.' in report."""
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
+        from cio.committee.engine import run_committee
+        result = self._run(run_committee(SYMBOL_AAPL, debate=False))
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        assert "_No material disagreement; debate skipped._" in report
+
+    def test_report_never_crashes_on_missing_debate_field(self):
+        """build_report must not crash when debate field is absent."""
+        from cio.committee.engine import CommitteeResult
+        from cio.committee.report import build_report
+        empty_result = CommitteeResult(
+            symbol="EMPTY",
+            resolved="EMPTY",
+            as_of="2026-06-01T00:00:00",
+            bundle={},
+            opinions=[],
+            consensus={},
+            vote_tally={},
+            cio={},
+        )
+        # debate and round1_opinions default to empty — should not crash
+        try:
+            build_report("EMPTY", empty_result)
+        except Exception as e:
+            pytest.fail(f"build_report raised {e} on missing debate field")
+
+    def test_all_13_sections_still_present_with_debate(self, monkeypatch):
+        """All 13 original section headers must still appear when debate ran."""
+        result = self._make_result_debate_on(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        for header in EXPECTED_SECTION_HEADERS:
+            assert header in report, f"Missing section after debate: {header}"

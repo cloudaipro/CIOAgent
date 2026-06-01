@@ -96,6 +96,70 @@ def _scenario_table(scenarios: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Debate subsection renderer
+# ---------------------------------------------------------------------------
+
+def _debate_section(debate_data: dict, round1_opinions: list[dict], final_opinions: list[dict]) -> str:
+    """
+    Render the ### Debate and ### Vote Changes subsections.
+
+    Returns an empty string (no subsection) when debate data is absent.
+    Never raises.
+    """
+    try:
+        if not debate_data:
+            return ""
+
+        parts: list[str] = []
+
+        if debate_data.get("skipped", True):
+            parts.append("\n### Debate\n\n_No material disagreement; debate skipped._")
+        else:
+            # ### Debate — exchanges
+            exchanges = debate_data.get("exchanges") or []
+            debate_lines: list[str] = ["\n### Debate\n"]
+            for ex in exchanges:
+                c_title = _v(ex.get("challenger_title"), "?")
+                t_title = _v(ex.get("target_title"), "?")
+                challenge = _v(ex.get("challenge"), "_No challenge recorded._")
+                response = _v(ex.get("response"), "_No response recorded._")
+                debate_lines.append(f"**{c_title} challenges {t_title}:**\n\n{challenge}\n")
+                debate_lines.append(f"**{t_title} responds:**\n\n{response}\n")
+            parts.append("\n".join(debate_lines))
+
+            # ### Vote Changes (Round 1 → Round 3)
+            r1_by_key = {op.get("key"): op for op in round1_opinions}
+            r3_by_key = {op.get("key"): op for op in final_opinions}
+            all_keys = list(r1_by_key.keys())
+
+            change_lines: list[str] = [
+                "\n### Vote Changes (Round 1 → Round 3)\n",
+                "| Specialist | R1 vote (conf) | R3 vote (conf) | Δ |",
+                "|---|---|---|---|",
+            ]
+            for key in all_keys:
+                r1 = r1_by_key.get(key, {})
+                r3 = r3_by_key.get(key, r1)
+                title = _v(r1.get("title") or r3.get("title"), key)
+                r1_vote = _v(r1.get("vote"), "?")
+                r1_conf = _v(r1.get("confidence"), "?")
+                r3_vote = _v(r3.get("vote"), "?")
+                r3_conf = _v(r3.get("confidence"), "?")
+                r1_cell = f"{r1_vote} ({r1_conf})"
+                r3_cell = f"{r3_vote} ({r3_conf})"
+                if r1_vote == r3_vote and str(r1_conf) == str(r3_conf):
+                    delta = "— (unchanged)"
+                else:
+                    delta = f"{r1_vote}→{r3_vote}"
+                change_lines.append(f"| {title} | {r1_cell} | {r3_cell} | {delta} |")
+            parts.append("\n".join(change_lines))
+
+        return "\n".join(parts)
+    except Exception:
+        return "\n_Insufficient data._"
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
@@ -122,6 +186,8 @@ def build_report(symbol: str, result) -> str:
     vote_tally = _get("vote_tally") or {}
     cio = _get("cio") or {}
     error = _get("error")
+    round1_opinions = _get("round1_opinions") or []
+    debate_data = _get("debate") or {}
 
     fund = bundle.get("fundamentals") or {}
     quote = bundle.get("quote") or {}
@@ -270,6 +336,8 @@ def build_report(symbol: str, result) -> str:
         f"**Confidence-Weighted Score:** {_v(vote_tally.get('confidence_weighted_score'))}  \n"
         f"**Tally Recommendation:** {_v(vote_tally.get('tally_recommendation'))}"
     )
+    # Debate subsections
+    committee_body_parts.append(_debate_section(debate_data, round1_opinions, opinions))
     sections.append(_section("Investment Committee Findings", "\n".join(committee_body_parts)))
 
     # ── 13. Final Recommendation ──────────────────────────────────────────
