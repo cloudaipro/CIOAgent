@@ -241,3 +241,6 @@ data/models/
 
 # CFOAgent: stock data cache (regenerable per-symbol pickles)
 data/stock_cache/
+
+# Committee dev smoke reports (generated)
+docs/reports/
