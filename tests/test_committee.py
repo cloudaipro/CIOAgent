@@ -1252,11 +1252,11 @@ class TestModelsConfig:
         load_config.cache_clear()
 
     def test_resolve_cio_returns_claude(self):
-        """Default YAML maps cio → ('claude', None)."""
+        """Default YAML maps cio → ('claude', 'claude-opus-4-8')."""
         from cio.committee.models import resolve
         service, model = resolve("cio")
         assert service == "claude"
-        assert model is None
+        assert model == "claude-opus-4-8"
 
     def test_resolve_market_returns_nim(self):
         """Default YAML maps market → ('nim', 'minimaxai/minimax-m2.7')."""

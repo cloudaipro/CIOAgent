@@ -11,5 +11,5 @@ agents:
   risk:      {service: nim,    model: minimaxai/minimax-m2.7}
   catalyst:  {service: nim,    model: minimaxai/minimax-m2.7}
   moderator: {service: nim,    model: minimaxai/minimax-m2.7}
-  cio:       {service: claude, model: null}   # null => claude-agent-sdk default model
+  cio:       {service: claude, model: claude-opus-4-8}   # Opus 4.8 (final decision-maker)
 nim: {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}

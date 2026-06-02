@@ -32,7 +32,7 @@ _BUILTIN: dict[str, Any] = {
         "risk":      {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
         "catalyst":  {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
         "moderator": {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "cio":       {"service": "claude", "model": None},
+        "cio":       {"service": "claude", "model": "claude-opus-4-8"},
     },
     "nim": {
         "base_url": "https://integrate.api.nvidia.com/v1",
