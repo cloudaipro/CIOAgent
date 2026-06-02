@@ -69,9 +69,30 @@ def vol_as_int(tick_data):
     return tick_data
 
 
+# Tickers use letters, digits and a few punctuation chars (".", "-", "^" indices,
+# "=" futures). Anything else (path separators, "..", spaces) is stripped so a
+# hostile symbol can never traverse out of the cache dir or name a pickle to load.
+import re as _re
+_SAFE_SYM = _re.compile(r"[^A-Za-z0-9.\-^=]")
+
+
+def safe_symbol(symbol: str) -> str:
+    """Sanitize a ticker for safe use in a filename. Strips path/illegal chars and
+    leading dots; caps length. Raises ValueError if nothing valid remains."""
+    s = _SAFE_SYM.sub("", str(symbol)).lstrip(".")[:24]
+    if not s:
+        raise ValueError(f"invalid symbol: {symbol!r}")
+    return s
+
+
 def _cache_path(symbol):
     os.makedirs(STOCK_CACHE_DIR, exist_ok=True)
-    return os.path.join(STOCK_CACHE_DIR, f"{symbol}.{STOCK_CACHE_FILE_TYPE}")
+    path = os.path.join(STOCK_CACHE_DIR, f"{safe_symbol(symbol)}.{STOCK_CACHE_FILE_TYPE}")
+    # Defense in depth: never read/write a pickle outside the cache dir.
+    root = os.path.realpath(STOCK_CACHE_DIR)
+    if os.path.commonpath([os.path.realpath(path), root]) != root:
+        raise ValueError(f"unsafe cache path for symbol {symbol!r}")
+    return path
 
 
 def load_or_download_stock_data(symbol, start, end):

@@ -17,9 +17,11 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -35,6 +37,21 @@ log = logging.getLogger("cio.bot")
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "reports"
 TG_LIMIT = 4096
+
+# Access control: if CIO_ALLOWED_CHATS is set (comma-separated chat ids), the bot
+# ignores every other chat. Unset = open (back-compat) but warned about at startup.
+ALLOWED_CHATS = {
+    int(x) for x in os.getenv("CIO_ALLOWED_CHATS", "").replace(" ", "").split(",")
+    if x and x.lstrip("-").isdigit()
+}
+
+# Keep generated filenames inside their directory (no path traversal from a symbol).
+_SAFE_NAME = __import__("re").compile(r"[^A-Za-z0-9.\-^=]")
+
+
+def _safe_name(text: str, fallback: str = "report") -> str:
+    s = _SAFE_NAME.sub("", str(text)).lstrip(".")[:24]
+    return s or fallback
 
 # One conversational agent per chat, created lazily.
 _agents: dict[int, CIOAgent] = {}
@@ -72,6 +89,17 @@ async def _run(update: Update, prompt: str) -> None:
 
 
 # ----- handlers -------------------------------------------------------------
+
+async def _gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Access-control gate (runs before all handlers). When an allowlist is set,
+    drop updates from any other chat so the bot — which can read the operator's
+    portfolio, ingest CSVs, and spend NIM credits via /committee — is not open to
+    strangers who discover it."""
+    chat = update.effective_chat
+    if ALLOWED_CHATS and (chat is None or chat.id not in ALLOWED_CHATS):
+        log.warning("blocked unauthorized chat %s", getattr(chat, "id", None))
+        raise ApplicationHandlerStop
+
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
@@ -161,7 +189,7 @@ async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         md = build_report(sym, result)
         date_str = datetime.date.today().isoformat()
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        report_path = REPORTS_DIR / f"{sym}_committee_{date_str}.md"
+        report_path = REPORTS_DIR / f"{_safe_name(sym)}_committee_{date_str}.md"
         report_path.write_text(md, encoding="utf-8")
         with open(report_path, "rb") as fh:
             await update.message.reply_document(
@@ -241,6 +269,13 @@ def main() -> None:
         .post_shutdown(_post_shutdown)
         .build()
     )
+    # Access-control gate first (group=-1) so it runs before every handler.
+    app.add_handler(TypeHandler(Update, _gate), group=-1)
+    if ALLOWED_CHATS:
+        log.info("access control: %d allowed chat(s)", len(ALLOWED_CHATS))
+    else:
+        log.warning("CIO_ALLOWED_CHATS not set — bot responds to ANY chat. "
+                    "Set it to your Telegram chat id(s) to lock the bot down.")
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
