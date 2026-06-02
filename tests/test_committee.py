@@ -17,6 +17,17 @@ import pytest
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
+
+@pytest.fixture(autouse=True)
+def _isolate_committee_db(monkeypatch, tmp_path):
+    """Route ALL committee per-agent memory to a throwaway db. Without this any
+    test that drives run_committee() would write real notes (+768-dim vectors) to
+    the live data/committee.db. Per-test temp db = full isolation. Tests that need
+    their own handle still monkeypatch agent_memory.DB_PATH explicitly (overrides)."""
+    monkeypatch.setattr("cio.committee.agent_memory.DB_PATH",
+                        tmp_path / "committee_test.db")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures / canned data
 # ---------------------------------------------------------------------------

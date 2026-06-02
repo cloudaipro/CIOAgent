@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from .. import context, db, memory, recall
 
@@ -24,7 +25,10 @@ log = logging.getLogger(__name__)
 MEM_BUDGET: int = int(os.getenv("CIO_AGENT_MEM_BUDGET", "400"))
 
 # Module-level DB path — tests monkeypatch this to a temp db.
-DB_PATH = db.DB_PATH
+# Committee memory lives in its OWN db (data/committee.db) so the agents'
+# accruing notes + 768-dim embeddings don't bloat the portfolio db. db.connect()
+# self-initializes any path (schema/vec/migration), so this file auto-creates.
+DB_PATH = Path(os.getenv("CIO_COMMITTEE_DB") or (db.DB_PATH.parent / "committee.db"))
 
 
 # ---------------------------------------------------------------------------

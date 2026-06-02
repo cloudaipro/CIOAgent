@@ -244,3 +244,8 @@ data/stock_cache/
 
 # Committee reports (generated user data)
 data/reports/
+
+# SQLite transient sidecars
+*.db-journal
+*.db-wal
+*.db-shm
