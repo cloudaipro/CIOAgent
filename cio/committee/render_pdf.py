@@ -107,8 +107,15 @@ def markdown_to_pdf(
     Returns str(out_path).
     """
     # Lazy imports — heavy native libs; keep module-level import cost zero.
+    import logging as _logging
     import markdown as _markdown  # pip: markdown
     import weasyprint  # pip: weasyprint
+
+    # WeasyPrint's font subsetting (fontTools) floods the log at DEBUG/INFO on every
+    # render. Cap these third-party loggers at WARNING so a /committee PDF doesn't
+    # bury the app's own logs. Idempotent; affects only these named loggers.
+    for _noisy in ("fontTools", "fontTools.subset", "fontTools.ttLib", "weasyprint"):
+        _logging.getLogger(_noisy).setLevel(_logging.WARNING)
 
     html_body = _markdown.markdown(
         md,
