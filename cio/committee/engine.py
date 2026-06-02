@@ -211,6 +211,10 @@ async def ask_role(
     # Explicit model arg always wins over config-resolved
     effective_model = model if model is not None else resolved_model
 
+    # Console visibility: which agent is using which service/model this call.
+    log.info("agent %s → %s:%s", role_key or "?", service,
+             effective_model or "(claude default)")
+
     if service == "nim":
         return await _ask_nim(system_prompt, user_prompt, effective_model)
     return await _ask_claude(system_prompt, user_prompt, effective_model)
