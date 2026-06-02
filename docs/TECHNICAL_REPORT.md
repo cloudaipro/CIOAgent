@@ -1,17 +1,29 @@
-# CFO Agent — Technical Report
+# CIO Agent — Technical Report
 
-A personal CFO chat agent for a solo operator. It answers stock-portfolio
-questions over Telegram, imports CSVs, renders charts, and runs 24/7 with a
-tiered, self-improving memory layer (MemCore). It is built on
-`claude-agent-sdk` using Claude Code Pro authentication — **no `ANTHROPIC_API_KEY`
-and no external services** (embeddings and search are fully local).
+**AI Investment Committee Agent System (AICAS).** A personal investment agent for a
+solo operator. Over Telegram it answers stock-portfolio questions, imports CSVs,
+renders charts, fetches live quotes / runs 38 technical strategies, and — on demand —
+convenes a **multi-agent investment committee** that produces an institutional-grade
+research report. It runs 24/7 with a tiered, self-improving memory layer (MemCore).
 
-- **Stack**: Python 3.11, `claude-agent-sdk`, `python-telegram-bot`, pandas,
-  SQLite (+ `sqlite-vec`), `fastembed` (ONNX), `tiktoken`, APScheduler, matplotlib.
-- **Source of truth**: the `transactions` and `prices` tables. All portfolio
-  figures are *derived* and recomputed, never cached.
-- **Process model**: one long-lived asyncio process (the Telegram bot) that owns
-  one `CFOAgent` (SDK session) per chat.
+The conversational agent is built on `claude-agent-sdk` using **Claude Code Pro
+authentication — no `ANTHROPIC_API_KEY`**. Embeddings and search are fully local. The
+committee's specialist agents are pluggable per-role between the **Claude subscription**
+and **NVIDIA NIM** (OpenAI-compatible, e.g. `minimax-m2.7`).
+
+- **Stack**: Python 3.12, `claude-agent-sdk`, `python-telegram-bot`, `httpx` (NIM),
+  pandas / numpy (`<2.3`), `pandas_ta` + a vendored TA engine, SQLite (+ `sqlite-vec`),
+  `fastembed` (ONNX), `tiktoken`, APScheduler, matplotlib, `yfinance`, PyYAML.
+- **Source of truth**: the `transactions` and `prices` tables. All portfolio figures
+  are *derived* and recomputed, never cached.
+- **Process model**: one long-lived asyncio process (the Telegram bot) that owns one
+  `CIOAgent` (SDK session) per chat; the committee runs as an in-process pipeline.
+
+> Heritage: the project was renamed from **CFOAgent → CIOAgent**. Env vars use the
+> `CIO_*` namespace with a `CFO_*` fallback; the db defaults to `data/cio.db` but falls
+> back to an existing `data/cfo.db`. The vendored TA engine under `cio/stock/engine/`
+> retains a `cfo` token — that is the *Chande Forecast Oscillator* indicator, unrelated
+> to the project name.
 
 ---
 
@@ -19,41 +31,51 @@ and no external services** (embeddings and search are fully local).
 
 ```mermaid
 flowchart TD
-    TG["Telegram"] <--> BOT["cfo/bot.py<br/>handlers, prewarm, scheduler wiring"]
-    BOT --> AGENT["cfo/agent.py<br/>CFOAgent (SDK client) + 14 MCP tools"]
-    AGENT --> CTX["cfo/context.py<br/>session-start memory injection"]
-    AGENT --> PORT["cfo/portfolio.py<br/>average-cost engine"]
-    AGENT --> CHARTS["cfo/charts.py<br/>matplotlib PNGs"]
-    AGENT --> MEM["cfo/memory.py<br/>MemCore store"]
-    MEM --> RECALL["cfo/recall.py<br/>hybrid search + embeddings"]
+    TG["Telegram"] <--> BOT["cio/bot.py<br/>handlers, access gate, scheduler"]
+    BOT --> AGENT["cio/agent.py<br/>CIOAgent (SDK) + 20 MCP tools"]
+    BOT --> COMM["cio/committee/*<br/>investment committee pipeline"]
+    AGENT --> CTX["cio/context.py<br/>memory injection"]
+    AGENT --> PORT["cio/portfolio.py<br/>average-cost engine"]
+    AGENT --> CHARTS["cio/charts.py + stock/panel.py"]
+    AGENT --> MEM["cio/memory.py<br/>MemCore store"]
+    AGENT --> STK["cio/stock/*<br/>quotes, cache, 38 TA strategies"]
+    MEM --> RECALL["cio/recall.py<br/>hybrid search + embeddings"]
     CTX --> MEM
-    SCHED["cfo/scheduler.py<br/>daily digest"] --> PORT
-    BOT --> SCHED
-    PORT --> DB[("cfo/db.py<br/>SQLite: cfo.db")]
+    COMM --> STK
+    COMM --> AMEM["committee/agent_memory.py<br/>per-agent MemCore"]
+    COMM --> MODELS["committee/models.py<br/>claude | NVIDIA NIM router"]
+    AMEM --> CDB[("data/committee.db<br/>WAL")]
+    PORT --> DB[("cio/db.py<br/>data/cio.db")]
     MEM --> DB
     RECALL --> DB
-    CHARTS --> PORT
+    SCHED["cio/scheduler.py<br/>digest + price refresh"] --> PORT
     AGENT -. "Pro auth, subprocess" .-> CLAUDE["claude CLI / SDK"]
+    MODELS -. "Bearer key, httpx" .-> NIM["NVIDIA NIM API"]
 ```
 
 | Module | Responsibility |
 |---|---|
-| `bot.py` | Telegram I/O; routes text/photo/CSV to the per-chat agent; `/subscribe`; boot-time reindex, scheduler start, eager session pre-warm |
-| `agent.py` | `CFOAgent` wraps one SDK session; defines 14 in-process MCP tools; rolling sessions, PreCompact hook, nudge, reflection loop |
-| `context.py` | Assembles the injected "hot" memory block within a token budget |
-| `recall.py` | fastembed embeddings + `sqlite-vec` ANN + FTS5, fused with RRF; (re)indexing |
-| `memory.py` | Tiered note store, profile, digests, playbooks, eviction, chat registry, figures firewall |
-| `portfolio.py` | Average-cost basis, positions, realized P&L, summary; idempotent CSV ingest |
-| `charts.py` | Allocation pie / P&L bar PNGs |
-| `scheduler.py` | APScheduler daily digest (DB-direct, idempotent, reboot catch-up) |
-| `db.py` | One SQLite file; schema, `sqlite-vec` loader, dim-migration, legacy migration |
+| `bot.py` | Telegram I/O; **access-control gate**; routes text/photo/CSV to the per-chat agent; `/committee`, `/subscribe`; boot reindex, scheduler start, eager pre-warm |
+| `agent.py` | `CIOAgent` wraps one SDK session; 20 in-process MCP tools; rolling sessions, PreCompact hook, nudge, reflection loop |
+| `context.py` | Assembles the injected "hot" memory block within a token budget (`build_memory_block` chat-scoped, `build_scope_block` arbitrary-scoped) |
+| `recall.py` | fastembed embeddings + `sqlite-vec` ANN + FTS5, fused with RRF; strict-scope recall (`include_global`) |
+| `memory.py` | Tiered note store, profile, digests, playbooks, eviction, chat registry, **figures firewall** |
+| `portfolio.py` | Average-cost basis, positions, realized P&L, summary; idempotent CSV ingest; live-price refresh |
+| `charts.py` / `stock/panel.py` | Allocation pie / P&L bar PNGs; one-stop single-stock panel image |
+| `scheduler.py` | APScheduler daily digest + EOD price-refresh (DB-direct, idempotent, reboot catch-up) |
+| `db.py` | SQLite schema, `sqlite-vec` loader, dim-migration, legacy migration; self-initializes any db path |
+| `stock/data.py` | yfinance fetch + per-symbol cache (**sanitized paths**) + fundamentals + symbol normalization |
+| `stock/engine/**` | Vendored TA engine: 38 strategies + indicators (pandas 3 / numpy 2 refactor) |
+| `committee/*` | The investment committee (see §6) |
 
 ---
 
 ## 2. Data model
 
-Two disjoint domains share one SQLite file. The **figures firewall** is the rule
-that keeps them separate: monetary numbers live only in the financial domain.
+Two SQLite files. **`cio.db`** holds the portfolio + conversational MemCore.
+**`committee.db`** holds the committee's per-agent memory (WAL mode), kept separate so
+the agents' accruing notes + 768-dim vectors never bloat the portfolio db. The
+**figures firewall** keeps monetary numbers out of every memory domain.
 
 ```mermaid
 erDiagram
@@ -61,48 +83,41 @@ erDiagram
     mem_notes ||--o| mem_vec : "note_id"
     mem_notes ||--o| notes_fts : "rowid"
     conv_turns ||--o| turn_vec : "turn_id"
-    conv_turns ||--o| turns_fts : "rowid"
     chats ||--o{ session_digests : "chat_id"
     chats ||--o{ conv_turns : "chat_id"
-
     transactions { int id PK }
     prices { text symbol PK }
     mem_notes { int id PK }
     user_profile { text scope PK }
-    session_digests { int id PK }
-    conv_turns { int id PK }
     playbooks { int id PK }
-    chats { int chat_id PK }
     meta { text key PK }
 ```
 
-**Financial domain (figures — source of truth):**
+**Financial domain (figures — source of truth, `cio.db`):**
 - `transactions` — every BUY/SELL/DIV; positions and P&L derive from this.
-- `prices` — latest manual close per symbol.
+- `prices` — latest close per symbol (manual or refreshed).
 - `imported_files` — sha256 of each ingested CSV (idempotency ledger).
 
 **MemCore domain (qualitative — never figures):**
 - `mem_notes` — tiered notes (`scope`, `tier` hot/warm, `importance`, `hits`, `source`).
-- `user_profile` — per-scope role/stack/prefs/goals (injected).
-- `session_digests` — rolling-session checkpoints.
-- `conv_turns` — full conversation history (cold, searchable).
-- `playbooks` — distilled reusable procedures.
-- `notes_fts` / `turns_fts` — FTS5 keyword indexes (kept in sync by triggers).
+- `user_profile`, `session_digests`, `conv_turns`, `playbooks`.
+- `notes_fts` / `turns_fts` — FTS5 keyword indexes (trigger-synced).
 - `mem_vec` / `turn_vec` — `sqlite-vec` `vec0` tables, `float[768]` embeddings.
+- In **`committee.db`**: the same `mem_notes` / `mem_vec` / `notes_fts` tables, scoped
+  `committee:{role}` — one logical namespace per agent (see §6.4).
 
-**Runtime:** `chats` (subscription + per-chat SDK `session_id`), `meta`
-(bookkeeping: `embed_dim`, `vec_reindex_needed`, `last_digest_date`, migration flags).
+**Runtime:** `chats` (per-chat SDK `session_id`), `meta` (`embed_dim`, migration flags).
 
 ---
 
 ## 3. Memory & context (MemCore)
 
-Designed to be ≥ Hermes & OpenClaw (see [COMPARISON.md](COMPARISON.md)). Three
-tiers by access pattern:
+Three tiers by access pattern. The same machinery serves the conversational agent
+(scopes `global` / `chat:{id}`) and each committee agent (scope `committee:{role}`).
 
 ```mermaid
 flowchart LR
-    subgraph HOT["HOT — injected every session start"]
+    subgraph HOT["HOT — injected at session start"]
         P["user_profile"]
         HN["mem_notes tier=hot"]
         PB["playbook names"]
@@ -112,230 +127,221 @@ flowchart LR
         WN["mem_notes tier=warm"]
     end
     subgraph COLD["COLD — hybrid-searchable"]
-        CT["conv_turns (every turn)"]
-        DGS["session_digests"]
+        CT["conv_turns / session_digests"]
     end
-    HOT --> INJ["context.compose_system_prompt<br/>(tiktoken budget)"]
-    WARM --> SRCH["memory_search (RRF)"]
+    HOT --> INJ["context.build_*_block<br/>(tiktoken budget)"]
+    WARM --> SRCH["recall.search (RRF)"]
     COLD --> SRCH
-    INJ --> SP["SDK system prompt"]
 ```
 
-### 3.1 Write path
-
-```mermaid
-sequenceDiagram
-    participant A as agent (remember tool / auto-capture)
-    participant M as memory.remember
-    participant FW as figures firewall
-    participant DB as mem_notes (+ FTS trigger)
-    participant R as recall.index_note
-    A->>M: value, key?, scope, tier, source
-    M->>FW: _guard_figures(value)
-    alt looks like a figure
-        FW-->>A: FiguresFirewallError (use portfolio tools)
-    else qualitative
-        M->>DB: upsert row (FTS5 synced by trigger)
-        M->>R: embed(value) -> mem_vec
-        M->>M: if count(scope) > cap -> evict()
-    end
-```
-
-A note is rejected if its value contains a currency amount (`$123`) or a number
-adjacent to a valuation keyword (`worth`, `price`, `P&L`, `value`, …). This is the
-guarantee no rival has: a number can never become stale "memory".
+### 3.1 Write path & figures firewall
+`memory.remember(value, scope, tier, source)` rejects any value containing a currency
+amount (`$123`) or a number adjacent to a valuation keyword (`worth`, `price`, `P&L`,
+…) via `_guard_figures` → `FiguresFirewallError`. A qualitative note is upserted (FTS5
+synced by trigger), embedded into `mem_vec`, and eviction runs if the scope exceeds the
+cap. **A number can never become stale "memory."**
 
 ### 3.2 Injection at session start
-
-On every `_make_client` (init, fresh-session fallback, and rolling-session fork),
 `context.build_memory_block` packs **profile → hot notes (importance × recency) →
-playbook names → latest digest** into a `tiktoken`-measured budget
-(`DEFAULT_BUDGET = 1000`, hard bound — the joined block is re-measured at each add).
-The block is appended to the base system prompt, so the agent *knows* its context
-before turn one.
+playbook names → latest digest** into a `tiktoken` budget (`DEFAULT_BUDGET = 1000`,
+hard bound). `build_scope_block(scope, budget)` does the same for a single arbitrary
+scope (no global, no chat) — the committee uses it for per-agent injection.
 
-### 3.3 Hybrid recall (`memory_search`)
-
-```mermaid
-flowchart LR
-    Q["query"] --> E["fastembed bge-base 768d"]
-    Q --> F["FTS5 tokens (len>=3)"]
-    E --> KNN["sqlite-vec KNN<br/>mem_vec / turn_vec"]
-    F --> BM["FTS5 bm25<br/>notes_fts / turns_fts"]
-    KNN --> RRF["Reciprocal Rank Fusion<br/>score = sum 1/(60+rank)"]
-    BM --> RRF
-    RRF --> TOPK["top-k notes + turns"]
-```
-
-The vector side finds matches phrased differently from how they were stored
-(where keyword search alone misses); FTS catches exact terms. RRF merges both.
-Both layers are required — there is no keyword-only degraded mode.
+### 3.3 Hybrid recall (RRF)
+`recall.search(query, k, scope, kinds, include_global)` fuses a `sqlite-vec` KNN over
+768-d embeddings with FTS5 bm25 via Reciprocal Rank Fusion (`K = 60`). `include_global`
+(default True) lets committee callers pass **False** for strict per-agent isolation.
 
 ### 3.4 Bounding for 24/7
+- **Eviction**: when a scope exceeds `MAX_NOTES_PER_SCOPE` (500), the lowest-scoring
+  warm, non-user notes drop (`importance × (1+log1p(hits)) × 0.5^(age/30d)`); vectors
+  removed in sync. Hot and user notes are never evicted.
+- **Rolling sessions** (`CIOAgent._checkpoint`): bound transcript growth (digest +
+  reseed; digest written *before* the fork, so a crash mid-fork loses nothing).
 
-- **Eviction** (`memory.evict`): when a scope exceeds `MAX_NOTES_PER_SCOPE` (500),
-  the lowest-scoring **warm, non-user** notes are dropped. Score =
-  `importance × (1+log1p(hits)) × 0.5^(age_days/30)`. Hot and user notes are never
-  evicted; vectors are removed in sync.
-- **Rolling sessions** (`CFOAgent._checkpoint`): bounds transcript growth (see §4.2).
-
-### 3.5 Durability (facts survive every lossy boundary)
-
-- **PreCompact hook** (`_on_precompact`): the SDK fires it before lossy
-  compaction; the agent flags a checkpoint so notable facts are durably digested.
-- **Nudge**: every `NUDGE_TURNS` (8) the user prompt is augmented with a reminder
-  to persist anything notable (cheap; no extra call).
-- **Deterministic auto-capture**: `set_price`/`ingest` write `source=auto` event
-  notes (event references, never numbers).
-
-### 3.6 Self-improving reflection loop
-
-At each checkpoint, while the session is still live:
-- **Auto-promote**: warm notes with `hits ≥ PROMOTE_HITS` (3) become hot → injected
-  next session (memory curates itself by usefulness).
-- **Auto-distill**: the agent is asked whether a repeatable procedure occurred; a
-  parseable `NAME:/STEPS:` reply is saved as a playbook (`source=auto`, figure-free).
+### 3.5 Durability & self-improvement
+PreCompact hook + periodic nudge + deterministic auto-capture persist facts across
+lossy boundaries. At each checkpoint: **auto-promote** warm notes with `hits ≥
+PROMOTE_HITS` (3) to hot; **auto-distill** a repeatable procedure into a (figure-free)
+playbook.
 
 ---
 
-## 4. Control flow
+## 4. Stock subsystem (`cio/stock/`)
 
-### 4.1 A message turn
+- **`data.py`** — `load_or_download_stock_data` fetches OHLCV from yfinance and caches
+  one joblib pickle per symbol under `data/stock_cache/`. **Cache paths are sanitized**
+  (`safe_symbol` + realpath containment) so a hostile ticker cannot traverse the dir or
+  name an arbitrary pickle (see §7). `fundamentals()` pulls PE/PB/yield/EPS/ROE/margin/
+  market-cap/52-week/quarterly-revenue + `quoteType` (ETF detection). `normalize_symbol`
+  resolves a bare 4-digit code to `.TW`/`.TWO`.
+- **`engine/`** — a vendored strategy engine: 38 technical strategies + indicators,
+  refactored for pandas 3 / numpy 2. Exposed via the `cio.stock` facade
+  (`list_strategies`, `run_strategy`).
+- **`panel.py`** — `render_panel()` composes a portrait PNG (price candles + MA, basic
+  fundamentals, quarterly revenue, links) with CJK fonts and TW color convention.
+
+Agent tools: `stock_quote`, `stock_history`, `list_stock_strategies`,
+`run_stock_strategy`, `refresh_prices`, `stock_panel`.
+
+---
+
+## 5. Control flow — a message turn
 
 ```mermaid
 sequenceDiagram
     participant U as Telegram user
+    participant G as _gate (access control)
     participant B as bot.py
-    participant A as CFOAgent.ask
-    participant Q as _run_query (under _LOCK)
+    participant A as CIOAgent.ask
     participant SDK as Claude SDK session
     participant T as MCP tools
-    U->>B: text / photo / CSV
+    U->>G: update
+    G-->>U: drop if chat not in CIO_ALLOWED_CHATS
+    G->>B: (authorized) route text/photo/CSV/command
     B->>A: ask(prompt)
-    A->>A: _ensure() (connect/resume, inject memory)
-    A->>A: nudge every N turns
-    A->>Q: locked turn, set _ACTIVE_SCOPE to chat scope
-    Q->>SDK: client.query(prompt)
-    SDK->>T: tool calls (portfolio / memory / charts)
+    A->>A: _ensure() connect/resume + inject memory; nudge every N turns
+    A->>SDK: locked turn (client.query)
+    SDK->>T: tool calls (portfolio / memory / stock / charts)
     T-->>SDK: results (figures from DB, charts to _PENDING)
-    SDK-->>Q: AssistantMessage (text) + session_id
-    Q-->>A: (text, image paths)
-    A->>A: bump counters, checkpoint if compaction_pending or over thresholds
+    SDK-->>A: AssistantMessage + session_id
+    A->>A: checkpoint if compaction_pending or over thresholds
     A-->>B: text + images
     B-->>U: reply (chunked) + photos
 ```
 
-Turns are serialized per process by `_LOCK`; `_ACTIVE_SCOPE` is set under that lock
-so the module-level MCP tools read/write the correct per-chat namespace.
+Turns are serialized per process by `_LOCK`; `_ACTIVE_SCOPE` is set under that lock so
+the module-level MCP tools read/write the correct per-chat namespace. All durable state
+survives reboot in SQLite; stale `session_id` degrades to a fresh session; CSV ingest is
+idempotent so redelivered messages are safe.
 
-### 4.2 Rolling-session checkpoint
+---
 
-```mermaid
-sequenceDiagram
-    participant A as CFOAgent._checkpoint
-    participant SDK as current session
-    participant M as memory
-    A->>SDK: digest query (no figures)
-    SDK-->>A: digest text
-    A->>M: add_digest(...)
-    Note over A,M: digest persisted BEFORE fork
-    A->>M: promote_hot(scope) reflection
-    A->>SDK: playbook distillation query
-    SDK-->>A: NAME / STEPS or NONE
-    A->>M: add_playbook if parsed (firewall-guarded)
-    A->>A: reset counters, disconnect old session
-    A->>A: _make_client(resume=None)
-    Note over A: fresh thread re-injects digest + memory
-    A->>SDK: reconnect
-```
+## 6. Investment committee (`cio/committee/`)
 
-Because the digest is written **before** the fork, a crash mid-fork loses nothing.
-Worst case is some un-digested conversational nuance — still recoverable from
-`conv_turns` via search. Financial data is untouched (it is not in the transcript).
-
-### 4.3 Reboot recovery
+`/committee SYMBOL` (Telegram) or `python -m cio.committee SYMBOL` (CLI) runs a
+simulated buy-side process and writes a 13-section markdown report to `data/reports/`.
 
 ```mermaid
-sequenceDiagram
-    participant S as systemd (Restart=always)
-    participant B as bot.main / _post_init
-    participant DB as cfo.db (durable)
-    S->>B: process start
-    B->>DB: reindex embeddings if vec_reindex_needed
-    B->>B: scheduler.start (daily digest + catch-up)
-    B->>DB: all_chats()
-    loop each known chat
-        B->>B: CFOAgent(resume=session_id, chat_id).warm()
-        Note over B,DB: resume transcript + inject memory (eager, no first-msg lag)
+flowchart TD
+    BD["bundle.gather_bundle<br/>price + fundamentals + 38 TA + ETF flag"] --> SP
+    subgraph SP["Round 1 — 8 specialists (parallel)"]
+        M[market]; E[equity]; I[industry]; V[valuation]
+        Q[quant]; ETF[etf*]; R[risk]; C[catalyst]
     end
+    SP --> DEB["Round 2-3 — debate<br/>bear vs bull + risk vs valuation,<br/>then revised votes"]
+    DEB --> CON["moderator consensus<br/>+ deterministic vote tally"]
+    CON --> CIO["CIO final decision<br/>(Strong Buy … Strong Sell, scenarios)"]
+    CIO --> REP["report.build_report<br/>13 sections + §11 confidence band"]
 ```
 
-All durable state (portfolio, notes, profile, digests, subscriptions, per-chat
-`session_id`) survives in SQLite. Stale `session_id` degrades gracefully to a fresh
-session. Redelivered Telegram messages are safe: CSV ingest is idempotent.
+### 6.1 Pipeline (`engine.py`)
+`gather_bundle` → **Round 1** specialists (each emits role fields + `vote/confidence/
+reason`; the ETF agent runs only for ETFs) → **debate** (`debate.py`, §6.2) → moderator
+consensus + a deterministic Python vote tally → **CIO** final decision (5-band rating,
+risk rating, horizon, bull/base/bear scenarios with probability + price target) →
+report. `run_committee` never raises; missing data degrades to a clean "no data" result.
+
+### 6.2 Debate (PRD §7.2)
+`select_debate_pairs` deterministically picks the most-bearish-vs-most-bullish pair plus
+a risk-vs-valuation pair (capped by `CIO_DEBATE_MAX_PAIRS`, default 2; skipped entirely
+when all agents agree). Each pair runs a free-text challenge → response; then **all**
+specialists may revise their vote given the transcript. Consensus, tally and CIO run on
+the **revised** votes. Private agent memory (`memory_note`) is stripped from the raw
+text so it cannot leak into the report or debate transcript.
+
+### 6.3 Model services (`models.py`, `config/committee_models.yaml`)
+Every call goes through `engine.ask_role(system, user, role_key)`, which resolves a
+per-agent **service + model** from the config file (optional; missing → built-in
+defaults) and dispatches to one of two backends:
+- **`_ask_claude`** — `claude-agent-sdk` one-shot (subscription, no key).
+- **`_ask_nim`** — NVIDIA NIM, OpenAI-compatible `chat/completions` via `httpx`, Bearer
+  `NVIDIA_API_KEY`. A missing key → returns `""` (the run degrades gracefully).
+Shipped default: 8 specialists + moderator → **NIM `minimaxai/minimax-m2.7`**; CIO →
+**Claude `claude-opus-4-8`**. The chosen service/model is logged per call
+(`agent <role> → <service>:<model>`).
+
+### 6.4 Parallel execution
+`CIO_PARALLEL` (default **on**) runs the independent groups — Round-1 specialists,
+debate cross-exam pairs, Round-3 revisions — concurrently under a semaphore
+(`CIO_MAX_CONCURRENCY`, default 8). Moderator consensus and CIO stay serial (they
+consume prior outputs). `off` = fully sequential.
+
+### 6.5 Per-agent isolated memory
+Each of the 9 agents (8 specialists + CIO) has its own MemCore namespace
+`committee:{role}` in **`committee.db`** (WAL), via `agent_memory.py`:
+- **recall_block** injects the agent's *own* hot block + a symbol-scoped RRF recall
+  (`include_global=False`), bumping hit counts to drive promotion.
+- **save_note** persists the agent's `memory_note` through the figures firewall (a
+  figure is rejected, logged, never stored).
+- **reflect** promotes that scope's hot notes after each run.
+Isolation is proven: a note in `committee:risk` never surfaces for `committee:valuation`,
+`global`, or any `chat:*`.
 
 ---
 
-## 5. Financial data flow
-
-```mermaid
-flowchart LR
-    CSV["CSV upload"] --> ING["portfolio.ingest_transactions_csv<br/>sha256 dedup + atomic txn"]
-    ING --> TX[("transactions")]
-    PRICE["set AAPL 230"] --> PR[("prices")]
-    TX --> POS["positions / realized_pl / summary<br/>(average-cost, derived)"]
-    PR --> POS
-    POS --> ANS["agent answer / chart / digest"]
-```
-
-- **Average-cost**: a BUY blends into the running average; a SELL realizes P&L
-  against it without changing the average; DIV adds to dividends.
-- **Idempotent ingest**: identical CSV bytes are rejected (`DuplicateImport`); the
-  rows and the hash commit in one transaction, so a crash rolls back both and a
-  replay re-imports cleanly.
-- Numbers are **always recomputed** here — never read from memory.
-
----
-
-## 6. Correctness & security guarantees
+## 7. Correctness & security guarantees
 
 | Concern | Mechanism |
 |---|---|
-| Stale numbers | Figures firewall: memory/playbooks refuse monetary values; figures recomputed from `transactions`/`prices` |
+| Stale numbers | Figures firewall: memory/playbooks/agent-notes refuse monetary values; figures recomputed from `transactions`/`prices` |
+| **Unauthorized access** | `CIO_ALLOWED_CHATS` access gate (`ApplicationHandlerStop`, group −1) drops updates from any non-allowlisted chat; unset logs a startup warning |
+| **Path traversal / pickle sink** | `safe_symbol()` + realpath containment on the stock cache path; `_safe_name()` on report filenames — a hostile symbol cannot escape the cache/report dir or load an arbitrary pickle |
+| Tool blast radius | `disallowed_tools`: Bash/Write/Edit/WebFetch/WebSearch off (conversational agent); committee agents run with `allowed_tools=[]` (no tools, reason over injected DATA only) |
+| SQL injection | All queries parameterized; the one dynamic-column statement (`set_profile`) whitelists columns against `_PROFILE_FIELDS` |
+| Secrets | `TELEGRAM_BOT_TOKEN` / `NVIDIA_API_KEY` from env only; `.env` gitignored; the key *name* (not value) is the only thing logged |
 | Duplicate import on replay | Content-hash idempotency ledger, atomic with row inserts |
 | Transcript blowup (24/7) | Rolling sessions (digest + reseed) + importance-decay eviction |
-| Fact loss at compaction | PreCompact hook + nudge + auto-capture |
 | Reboot data loss | All durable state in SQLite; eager resume; graceful stale-session fallback |
-| Tool blast radius | `disallowed_tools`: Bash/Write/Edit/WebFetch/WebSearch off; only portfolio/memory/chart tools + Read |
-| Auditability | Every note carries `source` (user/agent/auto/legacy) + timestamps + `importance`/`hits` |
-| Offline / no key | Pro auth; embeddings/search fully local (fastembed + sqlite-vec) |
+| Dependency CVEs | `pip-audit`: no known-vulnerable dependencies at audit time |
+| Auditability | Every note carries `source` (user/agent/auto/committee/legacy) + timestamps + `importance`/`hits` |
+
+**Residual notes.** The stock cache uses joblib *pickle* files; the traversal guard
+plus app-only writes bound the risk, but a switch to a non-executable cache format
+(parquet/csv) would remove pickle deserialization entirely. NIM's `base_url` comes from
+the local (trusted) config, not user input, so it is not an SSRF vector.
 
 ---
 
-## 7. Configuration (environment)
+## 8. Configuration (environment)
+
+All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 
 | Var | Default | Purpose |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | Bot token (required) |
-| `CFO_MODEL` | SDK default | Pin the Claude model |
-| `CFO_DIGEST_HOUR` / `_MINUTE` | `8` / `0` | Daily digest time (`off` to disable) |
-| `CFO_ROLL_TURNS` / `_TOKENS` | `40` / `16000` | Rolling-session checkpoint thresholds |
-| `CFO_NUDGE_TURNS` | `8` | Persist-reminder cadence |
-| `CFO_MAX_NOTES` | `500` | Per-scope note cap (eviction) |
-| `CFO_PROMOTE_HITS` | `3` | Hit count that promotes a warm note to hot |
+| `CIO_ALLOWED_CHATS` | unset (open) | Comma-separated chat ids allowed to use the bot — **set this** |
+| `NVIDIA_API_KEY` | — | NVIDIA NIM key (required for `service: nim` agents) |
+| `CIO_MODELS_CONFIG` | `config/committee_models.yaml` | Per-agent service/model map |
+| `CIO_PARALLEL` | `on` | Committee parallel vs sequential execution |
+| `CIO_MAX_CONCURRENCY` | `8` | Parallel agent semaphore |
+| `CIO_DEBATE` / `CIO_DEBATE_MAX_PAIRS` | `on` / `2` | Debate toggle + pair cap |
+| `CIO_COMMITTEE_DB` | `data/committee.db` | Per-agent memory db path |
+| `CIO_AGENT_MEM_BUDGET` | `400` | Token budget for per-agent memory injection |
+| `CIO_MODEL` | SDK default | Pin the conversational / Claude default model |
+| `CIO_DIGEST_HOUR` / `_MINUTE` | `8` / `0` | Daily digest time (`off` to disable) |
+| `CIO_PRICE_REFRESH_HOUR` / `_MINUTE` | `17` / `0` | EOD price refresh (`off` to disable) |
+| `CIO_ROLL_TURNS` / `_TOKENS` | `40` / `16000` | Rolling-session checkpoint thresholds |
+| `CIO_NUDGE_TURNS` | `8` | Persist-reminder cadence |
+| `CIO_MAX_NOTES` | `500` | Per-scope note cap (eviction) |
+| `CIO_PROMOTE_HITS` | `3` | Hit count that promotes a warm note to hot |
+| `CIO_STOCK_CACHE_DIR` | `data/stock_cache` | Stock OHLCV cache dir |
 
 ---
 
-## 8. Verification
+## 9. Verification
 
-`tests/test_memcore.py` — 13 checks, **offline** (`HF_HUB_OFFLINE=1`): schema +
-`vec0`, figures firewall, scope isolation, injection budget (hard bound), hybrid
-recall (vector hit where FTS misses), eviction + protection, rolling cadence,
-playbooks, parser, promote-to-hot, reflection-loop wiring, cold-boot continuity,
-offline embedding. Live-verified: rolling reseed, PreCompact-hooked connect, and
-playbook distillation emitting a parseable procedure.
+`pytest` — **145 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
+firewall, scope isolation, injection budget, hybrid recall, eviction, promotion, rolling
+cadence, playbooks, cold-boot); stock subsystem + panel; committee (bundle, 8 roles,
+consensus/tally, 13-section report, confidence band, debate pair-selection + rounds,
+model routing claude/NIM, parallel-vs-sequential peak, NIM-without-key degrade); per-agent
+memory (isolation, firewall, injection, promotion); **security** (symbol sanitization,
+cache-path containment, report-filename sanitizer, access gate). Dependency scan via
+`pip-audit` (no known vulnerabilities). Committee live-verified end-to-end against AAPL/NVDA
+(NIM specialists + Opus CIO).
 
-Run: `PYTHONPATH=. .venv/bin/python tests/test_memcore.py`
+Run: `.venv/bin/python -m pytest -q`
 
 ---
 
@@ -343,10 +349,11 @@ Run: `PYTHONPATH=. .venv/bin/python tests/test_memcore.py`
 
 - **Model**: `BAAI/bge-base-en-v1.5`, 768-dim, ONNX via fastembed, cached under
   `data/models/` (gitignored; `recall.warmup()` fetches once → offline-stable).
-- **Storage**: `sqlite-vec` `vec0` virtual tables, `float[768]`; vectors serialized
-  with `sqlite_vec.serialize_float32`. The extension is loaded on every `connect`.
-- **Dim migration**: `db._drop_stale_vec` detects an `embed_dim` change, drops the
-  `vec0` tables (schema recreates them), and flags `vec_reindex_needed`;
-  `recall.reindex_all` re-embeds all notes and turns.
-- **Fusion**: Reciprocal Rank Fusion, `K = 60`, over the FTS and vector rank lists
-  for notes and turns independently, then merged and truncated to `k`.
+- **Storage**: `sqlite-vec` `vec0` virtual tables, `float[768]`; vectors serialized with
+  `sqlite_vec.serialize_float32`. The extension loads on every `connect`.
+- **Dim migration**: `db._drop_stale_vec` detects an `embed_dim` change, drops the `vec0`
+  tables (recreated by schema), flags `vec_reindex_needed`; `recall.reindex_all` re-embeds.
+- **Fusion**: Reciprocal Rank Fusion, `K = 60`, over FTS and vector rank lists, merged and
+  truncated to `k`.
+- **Committee db**: `journal_mode=WAL` (set once per process), so several agents can write
+  their notes concurrently without the default rollback-journal write-lock contention.
