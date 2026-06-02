@@ -227,8 +227,10 @@ handoff/
 VERSION
 scripts/hourly_log_report.env
 
-# CFO Agent runtime data
+# CIO Agent runtime data (local db files + backups; never committed)
 data/cfo.db
+data/*.db
+data/*.db.bak
 data/charts/
 data/uploads/
 
