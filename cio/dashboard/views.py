@@ -7,10 +7,17 @@ from __future__ import annotations
 
 from html import escape
 
+from cio import timeutil
+
 
 def esc(value) -> str:
     """HTML-escape any value (None → '')."""
     return escape("" if value is None else str(value))
+
+
+def esc_ts(value) -> str:
+    """HTML-escape a stored UTC timestamp, displayed in the local zone (CIO_TZ)."""
+    return escape(timeutil.utc_to_local(value))
 
 
 _CSS = """
@@ -65,7 +72,7 @@ def render_overview(usage_today, runs, turns, level: int, token_q: str = "") -> 
 
     run_rows = "".join(
         f"<tr><td><a href='/committee/{esc(r['run_id'])}{token_q}'>{esc(r['symbol'])}</a></td>"
-        f"<td>{esc(r['started'])}</td><td class='num'>{esc(r['calls'])}</td>"
+        f"<td>{esc_ts(r['started'])}</td><td class='num'>{esc(r['calls'])}</td>"
         f"<td class='num'>{esc(r['tokens'])}</td></tr>"
         for r in runs
     ) or "<tr><td class='empty' colspan='4'>no committee runs captured</td></tr>"
@@ -73,13 +80,13 @@ def render_overview(usage_today, runs, turns, level: int, token_q: str = "") -> 
     turn_rows = "".join(
         f"<tr><td class='{esc(t['role'])}'>{esc(t['role'])}</td>"
         f"<td class='msg'>{esc((t['content'] or '')[:200])}</td>"
-        f"<td>{esc(t['ts'])}</td></tr>"
+        f"<td>{esc_ts(t['ts'])}</td></tr>"
         for t in turns
     ) or "<tr><td class='empty' colspan='3'>no Telegram turns captured</td></tr>"
 
     body = (
         "<h1>Overview</h1>"
-        "<h2>Tokens used today (UTC)</h2>"
+        "<h2>Tokens used today (local)</h2>"
         f"<table><tr><th>Service</th><th>Tokens</th></tr>{rows}</table>"
         "<h2>Recent committee runs</h2>"
         f"<table><tr><th>Symbol</th><th>Started</th><th>Calls</th><th>Tokens</th></tr>{run_rows}</table>"
@@ -99,7 +106,7 @@ def render_usage(usage_rows, level: int) -> str:
     ) or "<tr><td class='empty' colspan='4'>no usage recorded</td></tr>"
     body = (
         "<h1>Token usage — per service per day</h1>"
-        f"<table><tr><th>Day (UTC)</th><th>Service</th><th>Tokens</th><th></th></tr>{rows}</table>"
+        f"<table><tr><th>Day (local)</th><th>Service</th><th>Tokens</th><th></th></tr>{rows}</table>"
     )
     return _page("Token usage", body, level)
 
@@ -109,7 +116,7 @@ def render_telegram(turns, level: int) -> str:
         f"<tr><td class='num'>{esc(t['chat_id'])}</td>"
         f"<td class='{esc(t['role'])}'>{esc(t['role'])}</td>"
         f"<td class='msg'>{esc(t['content'])}</td>"
-        f"<td>{esc(t['ts'])}</td></tr>"
+        f"<td>{esc_ts(t['ts'])}</td></tr>"
         for t in turns
     ) or "<tr><td class='empty' colspan='4'>no Telegram turns captured (level 3 disables this)</td></tr>"
     body = (
@@ -122,7 +129,7 @@ def render_telegram(turns, level: int) -> str:
 def render_committee_list(runs, level: int, token_q: str = "") -> str:
     rows = "".join(
         f"<tr><td><a href='/committee/{esc(r['run_id'])}{token_q}'>{esc(r['run_id'])}</a></td>"
-        f"<td>{esc(r['symbol'])}</td><td>{esc(r['started'])}</td>"
+        f"<td>{esc(r['symbol'])}</td><td>{esc_ts(r['started'])}</td>"
         f"<td class='num'>{esc(r['calls'])}</td><td class='num'>{esc(r['tokens'])}</td></tr>"
         for r in runs
     ) or "<tr><td class='empty' colspan='5'>no committee runs captured</td></tr>"
@@ -142,7 +149,7 @@ def render_committee_run(run_id: str, calls, level: int) -> str:
     for c in calls:
         head = (
             f"{esc(c['role_key'])} · {esc(c['service'])}:{esc(c['model']) or '(default)'} "
-            f"· {esc(c['tokens'])} tok · {esc(c['ts'])}"
+            f"· {esc(c['tokens'])} tok · {esc_ts(c['ts'])}"
         )
         resp = c["response"] or ""
         blocks.append(

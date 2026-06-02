@@ -20,6 +20,22 @@ LANG_ALIASES: frozenset[str] = frozenset({
     "zh", "tc", "zh-tw", "zh_tw", "中文", "繁中", "繁體", "繁體中文",
 })
 
+def _to_traditional(text: str) -> str:
+    """
+    Force Simplified→Traditional (Taiwan) with OpenCC s2twp.
+
+    Idempotent on text that is already Traditional, so it is safe to always apply
+    as a guarantee regardless of which model produced *text*. If OpenCC is missing
+    or conversion fails, return *text* unchanged (translation is never lost).
+    """
+    try:
+        import opencc  # pip: opencc-python-reimplemented
+        return opencc.OpenCC("s2twp").convert(text)
+    except Exception as exc:
+        log.warning("_to_traditional: OpenCC unavailable/failed (%s); returning text as-is", exc)
+        return text
+
+
 _TRANSLATOR_SYSTEM = (
     "You are a professional financial translator. "
     "Translate the following investment-committee report from English into "
@@ -72,4 +88,5 @@ async def translate_report(md: str, lang: str) -> str:
         log.warning("translate_report: got empty result from ask_role; returning original md")
         return md
 
-    return result
+    # Guarantee Traditional (Taiwan) output even if the model emitted Simplified.
+    return _to_traditional(result)

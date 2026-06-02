@@ -1,7 +1,7 @@
 """
 usage.py — Daily token-budget accounting for committee backends.
 
-Tracks cumulative token usage per service per UTC day in the committee.db
+Tracks cumulative token usage per service per LOCAL day (CIO_TZ) in the committee.db
 SQLite database.  Used by the CIO fallback chain to enforce daily limits
 on openai and claude before falling back to NIM.
 
@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
 
 from cio import db as _db
+from cio import timeutil as _timeutil
 
 log = logging.getLogger(__name__)
 
@@ -25,8 +25,8 @@ DB_PATH: Path = _db.DB_PATH.parent / "committee.db"
 
 
 def _today() -> str:
-    """Return today's UTC date as an ISO string (YYYY-MM-DD)."""
-    return datetime.now(timezone.utc).date().isoformat()
+    """Return today's date (YYYY-MM-DD) on the LOCAL day boundary (CIO_TZ)."""
+    return _timeutil.today_local()
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:

@@ -350,8 +350,11 @@ SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock
 
 Rules:
 - NEVER invent numbers. Get every figure from the tools. If data is missing, say so.
-- Prices are entered manually (no live feed). If a position has no price, tell the user
-  to send e.g. "set AAPL 230" and they will get a price.
+- LIVE PRICES ARE AVAILABLE. For any "what's the price / how much is X" question, call
+  stock_quote (Yahoo Finance, cached) and answer with the real quote. Use
+  refresh_prices to update all open positions with live closes before valuing the
+  portfolio. set_price is only a MANUAL OVERRIDE for symbols Yahoo can't price
+  (e.g. private/illiquid holdings) — do NOT tell the user "no live feed".
 - Be concise and direct. Lead with the number that answers the question.
 - Use allocation_chart / pl_chart when a visual helps or the user asks to "see" something.
 - If the user sends an image path, use the Read tool to view it (e.g. a receipt or broker
@@ -452,22 +455,47 @@ class CIOAgent:
                 self._on_session_id(session_id)
 
     async def _run_query(self, prompt: str) -> tuple[str, list[str]]:
-        """One locked turn against the current client; returns (text, images)."""
+        """One locked turn against the current client; returns (text, images).
+
+        Also records the turn's Claude token usage so the dev dashboard reflects
+        real chat consumption (input+output from each AssistantMessage.usage)."""
         async with _LOCK:
             global _ACTIVE_SCOPE
             _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
             _PENDING.clear()
             await self._client.query(prompt)
             parts: list[str] = []
+            tokens = 0
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     self._note_session(msg.session_id)
                     for blk in msg.content:
                         if isinstance(blk, TextBlock):
                             parts.append(blk.text)
+                    try:
+                        u = msg.usage
+                        if u is not None:
+                            tokens += (getattr(u, "input_tokens", 0) or 0) + \
+                                      (getattr(u, "output_tokens", 0) or 0)
+                    except Exception:
+                        pass
+            text = "\n".join(parts).strip()
+            self._record_usage(tokens, prompt, text)
             images = list(_PENDING)
             _PENDING.clear()
-            return "\n".join(parts).strip(), images
+            return text, images
+
+    @staticmethod
+    def _record_usage(tokens: int, prompt: str, text: str) -> None:
+        """Add this turn's Claude tokens to the daily usage table. Never raises.
+        Falls back to a local estimate when the SDK reports no usage."""
+        try:
+            if tokens <= 0:
+                tokens = context.count_tokens(prompt) + context.count_tokens(text)
+            from .committee import usage as _usage
+            _usage.record("claude", tokens)
+        except Exception:
+            pass
 
     async def ask(self, prompt: str) -> tuple[str, list[str]]:
         """Send a turn; return (assistant_text, image_paths). May trigger a

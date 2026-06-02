@@ -161,6 +161,24 @@ class TestTranslateReport:
 
         assert result == canned_tc
 
+    def test_simplified_model_output_is_forced_to_traditional(self, monkeypatch):
+        """A model that emits Simplified Chinese is OpenCC-converted to Traditional."""
+        import cio.committee.engine as engine_mod
+
+        simplified = "# 投资报告\n\n苹果公司的软件和网络服务收入增长。"
+
+        async def _fake_simplified(system_prompt, user_prompt, role_key=None, **kwargs):
+            return simplified
+
+        monkeypatch.setattr(engine_mod, "ask_role", _fake_simplified)
+
+        from cio.committee.translate import translate_report
+
+        result = _run(translate_report("# Report", "tc"))
+        # Traditional forms must appear; Simplified forms must be gone.
+        assert "投資報告" in result and "蘋果" in result
+        assert "投资" not in result and "苹果" not in result and "软件" not in result
+
     def test_ask_role_returns_empty_falls_back_to_original(self, monkeypatch):
         """ask_role returning '' → translate_report falls back to the original md."""
         import cio.committee.engine as engine_mod
@@ -199,10 +217,11 @@ class TestTranslateReport:
 # ---------------------------------------------------------------------------
 
 class TestResolveTranslator:
-    def test_resolve_translator_returns_nim_minimax(self):
-        """resolve('translator') must return ('nim', 'minimaxai/minimax-m2.7')."""
+    def test_resolve_translator_returns_claude(self):
+        """resolve('translator') must return Claude — reliable on long markdown and
+        strong Traditional Chinese (output is also OpenCC-forced to Traditional)."""
         from cio.committee.models import resolve
 
         service, model = resolve("translator")
-        assert service == "nim"
-        assert model == "minimaxai/minimax-m2.7"
+        assert service == "claude"
+        assert model == "claude-sonnet-4-6"
