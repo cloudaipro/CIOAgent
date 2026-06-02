@@ -2,7 +2,7 @@
 python -m cio.committee SYMBOL
 
 Dev/smoke tool: runs the full committee pipeline and writes a markdown report
-to docs/reports/{SYMBOL}_{date}.md. Prints the output path when done.
+to data/reports/{SYMBOL}_{date}.md. Prints the output path when done.
 """
 import asyncio
 import sys
@@ -22,7 +22,7 @@ def main():
     result = asyncio.run(run_committee(symbol))
     report_md = build_report(symbol, result)
 
-    out_dir = Path(__file__).resolve().parent.parent.parent / "docs" / "reports"
+    out_dir = Path(__file__).resolve().parent.parent.parent / "data" / "reports"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{result.resolved or symbol}_{date.today().isoformat()}.md"
     out_path.write_text(report_md, encoding="utf-8")

@@ -33,6 +33,7 @@ logging.basicConfig(
 log = logging.getLogger("cio.bot")
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
+REPORTS_DIR = Path(__file__).resolve().parent.parent / "data" / "reports"
 TG_LIMIT = 4096
 
 # One conversational agent per chat, created lazily.
@@ -159,9 +160,8 @@ async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         # ── 5. Build + upload report ──────────────────────────────────────
         md = build_report(sym, result)
         date_str = datetime.date.today().isoformat()
-        report_dir = UPLOAD_DIR / "committee_reports"
-        report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = report_dir / f"{sym}_committee_{date_str}.md"
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = REPORTS_DIR / f"{sym}_committee_{date_str}.md"
         report_path.write_text(md, encoding="utf-8")
         with open(report_path, "rb") as fh:
             await update.message.reply_document(
