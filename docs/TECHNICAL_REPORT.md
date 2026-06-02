@@ -8,12 +8,15 @@ research report. It runs 24/7 with a tiered, self-improving memory layer (MemCor
 
 The conversational agent is built on `claude-agent-sdk` using **Claude Code Pro
 authentication — no `ANTHROPIC_API_KEY`**. Embeddings and search are fully local. The
-committee's specialist agents are pluggable per-role between the **Claude subscription**
-and **NVIDIA NIM** (OpenAI-compatible, e.g. `minimax-m2.7`).
+committee's agents are pluggable per-role across three backends — the **Claude
+subscription**, **NVIDIA NIM** (OpenAI-compatible, e.g. `minimax-m2.7`), and the
+**OpenAI API** — and the CIO runs a daily-token-budget fallback chain across them. The
+final report is delivered as a **PDF**, with an on-request **Traditional Chinese** version.
 
-- **Stack**: Python 3.12, `claude-agent-sdk`, `python-telegram-bot`, `httpx` (NIM),
-  pandas / numpy (`<2.3`), `pandas_ta` + a vendored TA engine, SQLite (+ `sqlite-vec`),
-  `fastembed` (ONNX), `tiktoken`, APScheduler, matplotlib, `yfinance`, PyYAML.
+- **Stack**: Python 3.12, `claude-agent-sdk`, `openai`, `python-telegram-bot`,
+  `httpx` (NIM), `weasyprint` + `markdown` (PDF), pandas / numpy (`<2.3`),
+  `pandas_ta` + a vendored TA engine, SQLite (+ `sqlite-vec`), `fastembed` (ONNX),
+  `tiktoken`, APScheduler, matplotlib, `yfinance`, PyYAML.
 - **Source of truth**: the `transactions` and `prices` tables. All portfolio figures
   are *derived* and recomputed, never cached.
 - **Process model**: one long-lived asyncio process (the Telegram bot) that owns one
@@ -43,14 +46,16 @@ flowchart TD
     CTX --> MEM
     COMM --> STK
     COMM --> AMEM["committee/agent_memory.py<br/>per-agent MemCore"]
-    COMM --> MODELS["committee/models.py<br/>claude | NVIDIA NIM router"]
-    AMEM --> CDB[("data/committee.db<br/>WAL")]
+    COMM --> MODELS["committee/models.py + engine.ask_role<br/>claude | NIM | OpenAI router + CIO chain"]
+    COMM --> PDF["committee/render_pdf.py + translate.py<br/>PDF + 繁體中文"]
+    AMEM --> CDB[("data/committee.db<br/>WAL: per-agent memory + token_usage")]
     PORT --> DB[("cio/db.py<br/>data/cio.db")]
     MEM --> DB
     RECALL --> DB
     SCHED["cio/scheduler.py<br/>digest + price refresh"] --> PORT
     AGENT -. "Pro auth, subprocess" .-> CLAUDE["claude CLI / SDK"]
     MODELS -. "Bearer key, httpx" .-> NIM["NVIDIA NIM API"]
+    MODELS -. "openai SDK" .-> OAI["OpenAI API"]
 ```
 
 | Module | Responsibility |
@@ -104,7 +109,8 @@ erDiagram
 - `notes_fts` / `turns_fts` — FTS5 keyword indexes (trigger-synced).
 - `mem_vec` / `turn_vec` — `sqlite-vec` `vec0` tables, `float[768]` embeddings.
 - In **`committee.db`**: the same `mem_notes` / `mem_vec` / `notes_fts` tables, scoped
-  `committee:{role}` — one logical namespace per agent (see §6.4).
+  `committee:{role}` — one logical namespace per agent (see §6.6) — plus `token_usage`
+  (`service`, `day`, `tokens`) for the CIO fallback chain's daily budget (§6.4).
 
 **Runtime:** `chats` (per-chat SDK `session_id`), `meta` (`embed_dim`, migration flags).
 
@@ -219,8 +225,9 @@ idempotent so redelivered messages are safe.
 
 ## 6. Investment committee (`cio/committee/`)
 
-`/committee SYMBOL` (Telegram) or `python -m cio.committee SYMBOL` (CLI) runs a
-simulated buy-side process and writes a 13-section markdown report to `data/reports/`.
+`/committee SYMBOL [zh]` (Telegram) or `python -m cio.committee SYMBOL [zh]` (CLI) runs a
+simulated buy-side process and delivers a 13-section **PDF** report (or `.md` on render
+failure) to `data/reports/`; add `zh` for a **Traditional Chinese** version (§6.7).
 
 ```mermaid
 flowchart TD
@@ -253,21 +260,36 @@ text so it cannot leak into the report or debate transcript.
 ### 6.3 Model services (`models.py`, `config/committee_models.yaml`)
 Every call goes through `engine.ask_role(system, user, role_key)`, which resolves a
 per-agent **service + model** from the config file (optional; missing → built-in
-defaults) and dispatches to one of two backends:
+defaults) and dispatches via `_dispatch` to one of three backends:
 - **`_ask_claude`** — `claude-agent-sdk` one-shot (subscription, no key).
 - **`_ask_nim`** — NVIDIA NIM, OpenAI-compatible `chat/completions` via `httpx`, Bearer
-  `NVIDIA_API_KEY`. A missing key → returns `""` (the run degrades gracefully).
-Shipped default: 8 specialists + moderator → **NIM `minimaxai/minimax-m2.7`**; CIO →
-**Claude `claude-opus-4-8`**. The chosen service/model is logged per call
-(`agent <role> → <service>:<model>`).
+  `NVIDIA_API_KEY`.
+- **`_ask_openai`** — OpenAI API via the `openai` SDK (`OPENAI_API_KEY`, default model
+  `gpt-5.5-2026-04-23`).
+Each backend returns `(text, tokens)` — real usage from the API (`usage.total_tokens`,
+`AssistantMessage.usage`), estimated via `tiktoken` only when omitted. A missing key →
+`("", 0)` so the run degrades gracefully. Shipped default: 8 specialists + moderator +
+translator → **NIM `minimaxai/minimax-m2.7`**; CIO → a **fallback chain** (§6.4). The
+chosen service/model is logged per call (`agent <role> → <service>:<model>`).
 
-### 6.4 Parallel execution
+### 6.4 CIO fallback chain (daily token budget)
+The CIO is configured with a `chain` (not a single service). `ask_role` walks it in order,
+skipping any link whose **daily token use** (`usage.py`, per-service, UTC-day bucketed in
+`committee.db`) is at or above its `daily_limit`, and falling through to the next link on an
+empty result (error / missing key). Shipped chain:
+1. **OpenAI** `gpt-5.5-2026-04-23` — `daily_limit: 200000`
+2. **Claude Opus** `claude-opus-4-8` — `daily_limit: 200000`
+3. **NVIDIA NIM** `minimaxai/minimax-m2.7` — last resort, no limit
+Limits, models, and order are all editable in `config/committee_models.yaml`. The counter
+resets naturally at UTC midnight. Only the CIO uses a chain; other roles are single-service.
+
+### 6.5 Parallel execution
 `CIO_PARALLEL` (default **on**) runs the independent groups — Round-1 specialists,
 debate cross-exam pairs, Round-3 revisions — concurrently under a semaphore
 (`CIO_MAX_CONCURRENCY`, default 8). Moderator consensus and CIO stay serial (they
 consume prior outputs). `off` = fully sequential.
 
-### 6.5 Per-agent isolated memory
+### 6.6 Per-agent isolated memory
 Each of the 9 agents (8 specialists + CIO) has its own MemCore namespace
 `committee:{role}` in **`committee.db`** (WAL), via `agent_memory.py`:
 - **recall_block** injects the agent's *own* hot block + a symbol-scoped RRF recall
@@ -277,6 +299,15 @@ Each of the 9 agents (8 specialists + CIO) has its own MemCore namespace
 - **reflect** promotes that scope's hot notes after each run.
 Isolation is proven: a note in `committee:risk` never surfaces for `committee:valuation`,
 `global`, or any `chat:*`.
+
+### 6.7 Report output — PDF + Traditional Chinese
+`build_report` produces the 13-section markdown; `render_pdf.markdown_to_pdf` converts it
+(`markdown` → HTML → **WeasyPrint**) to a PDF with a single CJK CSS font stack
+(`Noto Sans CJK TC`) that renders English and Chinese alike (fonts embedded/subset). When
+the user adds a language token (`zh`/`tc`/`中文`/`繁中`), `translate.translate_report` first
+translates the report into Traditional Chinese via `ask_role(role_key="translator")` (default
+NIM minimax). Two safety nets: a failed translation keeps the English markdown, and a failed
+PDF render falls back to sending the `.md`.
 
 ---
 
@@ -289,7 +320,7 @@ Isolation is proven: a note in `committee:risk` never surfaces for `committee:va
 | **Path traversal / pickle sink** | `safe_symbol()` + realpath containment on the stock cache path; `_safe_name()` on report filenames — a hostile symbol cannot escape the cache/report dir or load an arbitrary pickle |
 | Tool blast radius | `disallowed_tools`: Bash/Write/Edit/WebFetch/WebSearch off (conversational agent); committee agents run with `allowed_tools=[]` (no tools, reason over injected DATA only) |
 | SQL injection | All queries parameterized; the one dynamic-column statement (`set_profile`) whitelists columns against `_PROFILE_FIELDS` |
-| Secrets | `TELEGRAM_BOT_TOKEN` / `NVIDIA_API_KEY` from env only; `.env` gitignored; the key *name* (not value) is the only thing logged |
+| Secrets | `TELEGRAM_BOT_TOKEN` / `NVIDIA_API_KEY` / `OPENAI_API_KEY` from env only; `.env` gitignored; the key *name* (not value) is the only thing logged |
 | Duplicate import on replay | Content-hash idempotency ledger, atomic with row inserts |
 | Transcript blowup (24/7) | Rolling sessions (digest + reseed) + importance-decay eviction |
 | Reboot data loss | All durable state in SQLite; eager resume; graceful stale-session fallback |
@@ -312,7 +343,8 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `TELEGRAM_BOT_TOKEN` | — | Bot token (required) |
 | `CIO_ALLOWED_CHATS` | unset (open) | Comma-separated chat ids allowed to use the bot — **set this** |
 | `NVIDIA_API_KEY` | — | NVIDIA NIM key (required for `service: nim` agents) |
-| `CIO_MODELS_CONFIG` | `config/committee_models.yaml` | Per-agent service/model map |
+| `OPENAI_API_KEY` | — | OpenAI key (CIO chain's first link; absent → CIO falls to Opus) |
+| `CIO_MODELS_CONFIG` | `config/committee_models.yaml` | Per-agent service/model map + CIO chain + daily limits |
 | `CIO_PARALLEL` | `on` | Committee parallel vs sequential execution |
 | `CIO_MAX_CONCURRENCY` | `8` | Parallel agent semaphore |
 | `CIO_DEBATE` / `CIO_DEBATE_MAX_PAIRS` | `on` / `2` | Debate toggle + pair cap |
@@ -331,15 +363,17 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 
 ## 9. Verification
 
-`pytest` — **145 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
+`pytest` — **187 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
 firewall, scope isolation, injection budget, hybrid recall, eviction, promotion, rolling
 cadence, playbooks, cold-boot); stock subsystem + panel; committee (bundle, 8 roles,
 consensus/tally, 13-section report, confidence band, debate pair-selection + rounds,
-model routing claude/NIM, parallel-vs-sequential peak, NIM-without-key degrade); per-agent
-memory (isolation, firewall, injection, promotion); **security** (symbol sanitization,
-cache-path containment, report-filename sanitizer, access gate). Dependency scan via
-`pip-audit` (no known vulnerabilities). Committee live-verified end-to-end against AAPL/NVDA
-(NIM specialists + Opus CIO).
+model routing claude/NIM/OpenAI, **CIO fallback-chain selection at each budget state**,
+parallel-vs-sequential peak, missing-key degrade); per-agent memory (isolation, firewall,
+injection, promotion); **PDF/translation** (real WeasyPrint renders incl. a 繁體中文 doc,
+lang parsing, translate no-op/fallback); **security** (symbol sanitization, cache-path
+containment, report-filename sanitizer, access gate). Dependency scan via `pip-audit` (no
+known vulnerabilities). Committee live-verified end-to-end against AAPL/NVDA (NIM
+specialists + Opus CIO) and rendered to a real CJK-embedded PDF.
 
 Run: `.venv/bin/python -m pytest -q`
 

@@ -1,33 +1,43 @@
-# CIO Agent
+# CIO Agent — AI Investment Committee
 
-A personal CIO chat agent for a solo operator. Talk to it on **Telegram**; it
-answers questions about your **stock portfolio**, imports CSVs, and sends charts.
+A personal CIO agent for a solo operator. Talk to it on **Telegram**; it answers
+questions about your **stock portfolio**, imports CSVs, sends charts, fetches live
+quotes / runs 38 technical strategies, and — on demand — convenes a **multi-agent
+investment committee** (`/committee SYMBOL`) that researches a stock and returns an
+institutional-grade **PDF** report (with an optional **Traditional Chinese** version).
 
-Runs on your **Claude Pro subscription** via `claude-agent-sdk` — **no
-ANTHROPIC_API_KEY needed**. The Claude Code CLI must be installed and logged in
-(`claude` on your PATH, already authenticated).
+The conversational agent runs on your **Claude Pro subscription** via `claude-agent-sdk`
+— **no ANTHROPIC_API_KEY needed** (the `claude` CLI must be installed and logged in). The
+committee's agents are pluggable across three model backends — **Claude**, **NVIDIA NIM**
+(`minimax`), and **OpenAI** — and the final CIO decision runs a daily-token-budget
+fallback chain across them.
 
 ## Architecture
 
 ```
-Telegram  ──►  cio/bot.py     I/O: text, photos, CSV uploads, chart replies
+Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee
                   │
-                  ▼
-              cio/agent.py    Claude agent (Pro auth) + in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 20 in-process MCP tools
+                  │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
+                  │     cio/charts.py     matplotlib → PNG
+                  │     cio/memory.py     MemCore store: tiered notes, profile, eviction
+                  │     cio/context.py    session-start memory injection (token-budgeted)
+                  │     cio/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
+                  │     cio/stock/*       yfinance quotes, cache, 38 TA strategies, panel
+                  │     cio/scheduler.py  APScheduler: daily digest + EOD price refresh
+                  │     cio/db.py         SQLite (transactions = source of truth)
                   │
-                  ▼
-            cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
-            cio/charts.py     matplotlib → PNG
-            cio/memory.py     MemCore store: tiered notes, profile, playbooks, eviction
-            cio/context.py    session-start memory injection (token-budgeted)
-            cio/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
-            cio/scheduler.py  APScheduler: daily portfolio digest
-            cio/db.py         SQLite schema (transactions = source of truth)
+                  └─► cio/committee/*   investment committee pipeline:
+                        bundle → 8 specialists → debate → consensus → CIO → report
+                        models.py  per-agent model router (claude | NIM | OpenAI) + CIO chain
+                        agent_memory.py  isolated per-agent memory (committee.db, WAL)
+                        render_pdf.py / translate.py  PDF + 繁體中文
 ```
 
 - **Cost basis**: average-cost method. Positions & P&L are *derived* from the
   `transactions` table, so they're always consistent.
-- **Prices**: entered manually (no live feed yet) — `set AAPL 230`.
+- **Prices**: set manually (`set AAPL 230`) or refreshed live from Yahoo Finance
+  (on-demand `refresh_prices` tool + a scheduled EOD job).
 - **Images out**: chart tools drop PNGs into an outbox the bot sends as photos.
 - **Images in**: send a broker screenshot/receipt; the agent uses the Read tool
   (vision) to extract figures.
@@ -63,6 +73,24 @@ A tiered, auditable memory layer designed to be **≥ Hermes & OpenClaw** (see
 Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 `memory_get`, `save_playbook` / `list_playbooks`.
 
+## Investment committee (`/committee`)
+
+`/committee SYMBOL` runs a simulated buy-side process and returns a 13-section **PDF**
+research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** version.
+
+- **Pipeline**: gather data (price / fundamentals / 38 TA signals) → **8 specialist
+  agents** (market, equity, industry, valuation, quant, ETF, risk, catalyst) vote →
+  **debate** (bear-vs-bull + risk-vs-valuation cross-examination, then revised votes) →
+  **moderator consensus** + deterministic tally → **CIO** final decision (Strong Buy …
+  Strong Sell, with bull/base/bear scenarios). Specialists run in parallel.
+- **Per-agent memory**: each of the 9 agents keeps its **own isolated** persistent memory
+  (scope `committee:{role}` in `data/committee.db`), so they accrue private lessons
+  without sharing context — all behind the same figures firewall.
+- **Model services** (`config/committee_models.yaml`): each agent maps to `claude`, `nim`,
+  or `openai`. The CIO runs a **fallback chain** — OpenAI `gpt-5.5-2026-04-23` (daily
+  200k tokens) → Claude Opus (daily 200k) → NVIDIA NIM — switching automatically as each
+  day's token budget is spent. Limits and models are editable in the config.
+
 ## Setup
 
 ```bash
@@ -73,6 +101,17 @@ cp .env.example .env          # paste your @BotFather token into TELEGRAM_BOT_TO
 .venv/bin/python -m cio.bot   # starts polling
 ```
 
+In `.env`:
+- `TELEGRAM_BOT_TOKEN` (required).
+- **`CIO_ALLOWED_CHATS`** — comma-separated Telegram chat id(s) allowed to use the bot.
+  **Set this**: unset means the bot answers anyone who finds it. Send `/start` to read
+  your chat id (the bot echoes it), then add it here.
+- `NVIDIA_API_KEY` — required for committee agents on NIM (`build.nvidia.com`).
+- `OPENAI_API_KEY` — the CIO chain's first link; if absent the CIO falls back to Opus.
+
+The committee report PDF needs WeasyPrint's system libraries (pango/cairo/gdk-pixbuf/
+harfbuzz) — already present on most Linux desktops.
+
 ## Use (in Telegram)
 
 - `how's my portfolio?` · `what's my top gainer?` · `show my allocation`
@@ -80,6 +119,7 @@ cp .env.example .env          # paste your @BotFather token into TELEGRAM_BOT_TO
 - Upload a transactions CSV: `txn_date,symbol,action,quantity,price[,fees,currency,notes]`
   (`action` ∈ BUY/SELL/DIV)
 - Send a photo of a broker screen/receipt to have it read
+- `/committee SYMBOL` — full AI investment-committee PDF report (`/committee AAPL zh` for 繁體中文)
 - `/subscribe` — get a daily portfolio digest · `/unsubscribe` — stop it
 
 ## Run 24/7 (systemd)
@@ -126,5 +166,5 @@ Sample data: `data/sample_transactions.csv`.
 ## Roadmap
 
 - Accounting domain (ledgers, COGS, P&L) and inventory stock — share `db.py`.
-- Optional live price feed.
+- Richer committee data (macro/SEC/news feeds; currently yfinance + LLM reasoning).
 - FIFO cost-basis option.
