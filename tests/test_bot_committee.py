@@ -139,6 +139,7 @@ class TestCmdCommitteeGoodResult:
     def test_good_result_sends_document_and_summary(self, tmp_path, monkeypatch):
         """Good result → reply_document called once + summary reply_text with recommendation."""
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
 
         good_result = FakeResult()
 
@@ -147,6 +148,16 @@ class TestCmdCommitteeGoodResult:
 
         monkeypatch.setattr("cio.committee.run_committee", _good)
         monkeypatch.setattr("cio.committee.build_report", lambda sym, r: "# Committee Report for AAPL\n\nContent here.")
+
+        # Monkeypatch markdown_to_pdf to write a fake PDF file (avoids real WeasyPrint in this test)
+        def _fake_pdf(md, out_path, title=""):
+            from pathlib import Path
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"%PDF-1.4 fake")
+            return str(p)
+
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf)
 
         from cio.bot import cmd_committee
 
@@ -158,7 +169,7 @@ class TestCmdCommitteeGoodResult:
         assert len(update.message._documents) == 1
         doc = update.message._documents[0]
         assert "AAPL" in doc["filename"]
-        assert doc["filename"].endswith(".md")
+        assert doc["filename"].endswith(".pdf")
 
         # Summary text message contains the final recommendation
         replies = update.message._replies
@@ -169,6 +180,16 @@ class TestCmdCommitteeGoodResult:
     def test_ack_message_sent_before_run(self, tmp_path, monkeypatch):
         """The ack message (committee convening notice) is sent before the report."""
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+
+        def _fake_pdf(md, out_path, title=""):
+            from pathlib import Path
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"%PDF-1.4 fake")
+            return str(p)
+
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf)
 
         call_order: list[str] = []
 
@@ -232,6 +253,16 @@ class TestCmdCommitteeGoodResult:
     def test_symbol_uppercased(self, tmp_path, monkeypatch):
         """Symbol from args is uppercased before use."""
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+
+        def _fake_pdf(md, out_path, title=""):
+            from pathlib import Path
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"%PDF-1.4 fake")
+            return str(p)
+
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf)
 
         received_sym: list[str] = []
 
@@ -253,6 +284,16 @@ class TestCmdCommitteeGoodResult:
     def test_summary_under_700_chars(self, tmp_path, monkeypatch):
         """The summary text message must be under 700 characters."""
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+
+        def _fake_pdf(md, out_path, title=""):
+            from pathlib import Path
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"%PDF-1.4 fake")
+            return str(p)
+
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf)
 
         async def _good(sym):
             return FakeResult()
@@ -282,6 +323,16 @@ class TestCmdCommitteeGuardedFields:
     def test_missing_cio_fields_render_na(self, tmp_path, monkeypatch):
         """When cio/vote_tally fields are absent, summary shows 'N/A' not an exception."""
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+
+        def _fake_pdf(md, out_path, title=""):
+            from pathlib import Path
+            p = Path(out_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"%PDF-1.4 fake")
+            return str(p)
+
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf)
 
         sparse_result = FakeResult(cio={}, vote_tally={}, consensus={})
 
@@ -304,3 +355,134 @@ class TestCmdCommitteeGuardedFields:
 
         all_text = " ".join(update.message._replies)
         assert "N/A" in all_text
+
+
+# ---------------------------------------------------------------------------
+# New: PDF output + TC language tests
+# ---------------------------------------------------------------------------
+
+def _fake_pdf_writer(md, out_path, title=""):
+    """Write a minimal fake PDF so open(pdf_path, 'rb') succeeds."""
+    from pathlib import Path
+    p = Path(out_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"%PDF-1.4 fake")
+    return str(p)
+
+
+class TestCmdCommitteePdfOutput:
+    def test_good_result_sends_pdf_not_md(self, tmp_path, monkeypatch):
+        """/committee AAPL → reply_document receives a .pdf file, not .md."""
+        monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf_writer)
+
+        async def _good(sym):
+            return FakeResult()
+
+        monkeypatch.setattr("cio.committee.run_committee", _good)
+        monkeypatch.setattr("cio.committee.build_report", lambda sym, r: "# Report")
+
+        from cio.bot import cmd_committee
+
+        update = _make_update()
+        ctx = FakeCtx(args=["AAPL"])
+        _run(cmd_committee(update, ctx))
+
+        assert len(update.message._documents) == 1
+        doc = update.message._documents[0]
+        assert doc["filename"].endswith(".pdf"), f"Expected .pdf, got: {doc['filename']}"
+        assert "zh" not in doc["filename"], "English report must not have '_zh' suffix"
+
+    def test_tc_lang_sends_pdf_with_zh_suffix(self, tmp_path, monkeypatch):
+        """/committee AAPL zh → .pdf with _zh suffix; translate_report called with lang='tc'."""
+        monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf_writer)
+
+        translate_calls: list[tuple] = []
+
+        async def _fake_translate(md, lang):
+            translate_calls.append((md, lang))
+            return md  # no-op content change for the test
+
+        monkeypatch.setattr("cio.committee.translate.translate_report", _fake_translate)
+
+        async def _good(sym):
+            return FakeResult()
+
+        monkeypatch.setattr("cio.committee.run_committee", _good)
+        monkeypatch.setattr("cio.committee.build_report", lambda sym, r: "# Report")
+
+        from cio.bot import cmd_committee
+
+        update = _make_update()
+        ctx = FakeCtx(args=["AAPL", "zh"])
+        _run(cmd_committee(update, ctx))
+
+        # translate_report must have been called with lang='tc'
+        assert len(translate_calls) == 1, "translate_report should be called once"
+        assert translate_calls[0][1] == "tc", f"Expected lang='tc', got {translate_calls[0][1]!r}"
+
+        # PDF must exist and have _zh suffix
+        assert len(update.message._documents) == 1
+        doc = update.message._documents[0]
+        assert doc["filename"].endswith(".pdf")
+        assert "_zh" in doc["filename"], f"Expected '_zh' in filename: {doc['filename']}"
+
+    def test_pdf_render_failure_falls_back_to_md(self, tmp_path, monkeypatch):
+        """When markdown_to_pdf raises, bot sends .md fallback and does not crash."""
+        monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+
+        def _boom_pdf(md, out_path, title=""):
+            raise RuntimeError("WeasyPrint not available")
+
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _boom_pdf)
+
+        async def _good(sym):
+            return FakeResult()
+
+        monkeypatch.setattr("cio.committee.run_committee", _good)
+        monkeypatch.setattr("cio.committee.build_report", lambda sym, r: "# Report\n\nContent.")
+
+        from cio.bot import cmd_committee
+
+        update = _make_update()
+        ctx = FakeCtx(args=["AAPL"])
+
+        try:
+            _run(cmd_committee(update, ctx))
+        except Exception as e:
+            import pytest
+            pytest.fail(f"cmd_committee raised on PDF failure: {e}")
+
+        # Should have sent SOME document (the .md fallback)
+        assert len(update.message._documents) == 1
+        doc = update.message._documents[0]
+        assert doc["filename"].endswith(".md"), f"Fallback should be .md, got: {doc['filename']}"
+
+    def test_tc_summary_mentions_tc_label(self, tmp_path, monkeypatch):
+        """Summary ack text mentions 繁體中文 when lang=tc."""
+        monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
+        monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
+        monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _fake_pdf_writer)
+
+        async def _good(sym):
+            return FakeResult()
+
+        async def _noop_translate(md, lang):
+            return md
+
+        monkeypatch.setattr("cio.committee.run_committee", _good)
+        monkeypatch.setattr("cio.committee.build_report", lambda sym, r: "# Report")
+        monkeypatch.setattr("cio.committee.translate.translate_report", _noop_translate)
+
+        from cio.bot import cmd_committee
+
+        update = _make_update()
+        ctx = FakeCtx(args=["AAPL", "繁中"])
+        _run(cmd_committee(update, ctx))
+
+        all_text = " ".join(update.message._replies)
+        assert "繁體中文" in all_text, f"Expected '繁體中文' in replies: {all_text[:200]}"

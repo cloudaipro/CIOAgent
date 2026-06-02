@@ -31,8 +31,9 @@ _BUILTIN: dict[str, Any] = {
         "etf":       {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
         "risk":      {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
         "catalyst":  {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "moderator": {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "cio":       {"service": "claude", "model": "claude-opus-4-8"},
+        "moderator":  {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
+        "cio":        {"service": "claude", "model": "claude-opus-4-8"},
+        "translator": {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
     },
     "nim": {
         "base_url": "https://integrate.api.nvidia.com/v1",

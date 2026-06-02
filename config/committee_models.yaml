@@ -10,6 +10,7 @@ agents:
   etf:       {service: nim,    model: minimaxai/minimax-m2.7}
   risk:      {service: nim,    model: minimaxai/minimax-m2.7}
   catalyst:  {service: nim,    model: minimaxai/minimax-m2.7}
-  moderator: {service: nim,    model: minimaxai/minimax-m2.7}
-  cio:       {service: claude, model: claude-opus-4-8}   # Opus 4.8 (final decision-maker)
+  moderator:  {service: nim,    model: minimaxai/minimax-m2.7}
+  cio:        {service: claude, model: claude-opus-4-8}   # Opus 4.8 (final decision-maker)
+  translator: {service: nim,    model: minimaxai/minimax-m2.7}  # TC translation (minimax: strong Chinese)
 nim: {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}

@@ -113,7 +113,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
         "• Send a broker screenshot or receipt photo and I'll read it\n"
         "• /subscribe for a daily portfolio digest (/unsubscribe to stop)\n"
-        "• /committee SYMBOL — full AI investment-committee report"
+        "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)"
     )
 
 
@@ -157,13 +157,18 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        # ── 1. Parse symbol ───────────────────────────────────────────────
+        # ── 1. Parse symbol + optional language ──────────────────────────
         if not ctx.args:
             await update.message.reply_text(
-                "Usage: /committee SYMBOL  (e.g. /committee AAPL or /committee 2330.TW)"
+                "Usage: /committee SYMBOL [zh]  "
+                "(e.g. /committee AAPL or /committee 2330.TW zh)"
             )
             return
         sym = ctx.args[0].upper()
+
+        from .committee.translate import normalize_lang
+        lang = normalize_lang(ctx.args[1] if len(ctx.args) > 1 else None)
+        lang_label = " (繁體中文)" if lang == "tc" else ""
 
         # ── 2. Acknowledge ────────────────────────────────────────────────
         await update.message.reply_text(
@@ -189,18 +194,32 @@ async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        # ── 5. Build + upload report ──────────────────────────────────────
+        # ── 5. Build markdown (+ translate when tc) ───────────────────────
         md = build_report(sym, result)
         date_str = datetime.date.today().isoformat()
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-        report_path = REPORTS_DIR / f"{_safe_name(sym)}_committee_{date_str}.md"
-        report_path.write_text(md, encoding="utf-8")
-        with open(report_path, "rb") as fh:
-            await update.message.reply_document(
-                fh, filename=report_path.name
-            )
+        lang_suffix = "_zh" if lang == "tc" else ""
 
-        # ── 6. Short summary message ──────────────────────────────────────
+        from .committee.translate import translate_report
+        md = await translate_report(md, lang)
+
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # ── 6. Render PDF (preferred); .md only on render failure ─────────
+        pdf_path = REPORTS_DIR / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.pdf"
+        report_title = f"Investment Committee Report: {sym}{lang_label}"
+        try:
+            from .committee.render_pdf import markdown_to_pdf
+            markdown_to_pdf(md, pdf_path, title=report_title)
+            with open(pdf_path, "rb") as fh:
+                await update.message.reply_document(fh, filename=pdf_path.name)
+        except Exception:
+            log.exception("PDF render failed for %s; falling back to .md", sym)
+            md_path = REPORTS_DIR / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.md"
+            md_path.write_text(md, encoding="utf-8")
+            with open(md_path, "rb") as fh:
+                await update.message.reply_document(fh, filename=md_path.name)
+
+        # ── 7. Short summary message ──────────────────────────────────────
         from .committee.report import confidence_band
 
         cio = result.cio or {}
@@ -217,7 +236,7 @@ async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         agree = consensus.get("agreement_score") or "N/A"
 
         summary = (
-            f"📋 *{sym} Committee Summary*\n\n"
+            f"📋 *{sym} Committee Summary{lang_label}*\n\n"
             f"*Recommendation:* {final_rec}\n"
             f"*Confidence:* {conf_str} — {band}\n"
             f"*Vote Tally:* BUY {buy_c} | HOLD {hold_c} | SELL {sell_c}\n"
