@@ -163,6 +163,33 @@ asyncio.run(m())"
 
 Sample data: `data/sample_transactions.csv`.
 
+## Developer dashboard
+
+A localhost-only, read-only web view to verify the agent is behaving correctly.
+
+```bash
+.venv/bin/python -m cio.dashboard          # http://127.0.0.1:8787
+```
+
+Pages:
+
+- **Token usage** — OpenAI / Claude / NIM tokens per service per UTC day (from `committee.db`).
+- **Telegram** — full conversation history (every user/assistant turn).
+- **Committee** — each run drills into every LLM call: the exact content **sent**
+  (system + user prompt) and the content **returned**, per role, in order.
+
+Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:
+
+| Level | Committee transcript | Telegram history |
+|------:|----------------------|------------------|
+| 1 | full, pruned to last `CIO_TRANSCRIPT_KEEP_RUNS` (200) | on |
+| 2 | full, kept forever | on |
+| 3 | full, pruned | off (committee only) |
+
+Bind/auth: `CIO_DASH_HOST` / `CIO_DASH_PORT`, and an optional `CIO_DASH_TOKEN`
+shared secret (append `?token=…` once; a session cookie carries it after). Keep
+the bind on `127.0.0.1` — it serves your own financial data.
+
 ## Roadmap
 
 - Accounting domain (ledgers, COGS, P&L) and inventory stock — share `db.py`.

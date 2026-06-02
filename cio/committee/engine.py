@@ -9,8 +9,10 @@ parallel by default (CIO_PARALLEL=on); moderator + CIO stay serial.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,10 +21,27 @@ import yaml
 from .bundle import gather_bundle, format_bundle
 from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
 from . import agent_memory
+from . import transcript as _transcript
 from . import usage as _usage
 from .models import resolve as _resolve_model, nim_settings, openai_settings, resolve_chain as _resolve_chain
 
 log = logging.getLogger(__name__)
+
+# Correlates every ask_role call inside one run_committee() into a single run, so
+# the dev dashboard can show a symbol's full sent/returned transcript in order.
+# A ContextVar (not a global) keeps concurrent runs and parallel calls isolated.
+_RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("cio_run_id", default=None)
+_RUN_SYMBOL: contextvars.ContextVar[str | None] = contextvars.ContextVar("cio_run_symbol", default=None)
+
+
+def _capture(service: str | None, model: str | None, system_prompt: str,
+             user_prompt: str, text: str, tok: int, role_key: str | None) -> None:
+    """Record one sent/returned LLM call for the dev dashboard. Never raises."""
+    _transcript.record(
+        role_key=role_key, service=service, model=model,
+        system_prompt=system_prompt, user_prompt=user_prompt, response=text,
+        tokens=tok, run_id=_RUN_ID.get(), symbol=_RUN_SYMBOL.get(),
+    )
 
 # ---------------------------------------------------------------------------
 # Parallel / concurrency config
@@ -302,6 +321,7 @@ async def ask_role(
                  effective_model or "(default)")
         text, tok = await _dispatch(service, system_prompt, user_prompt, effective_model)
         _usage.record(service, tok)
+        _capture(service, effective_model, system_prompt, user_prompt, text, tok, role_key)
         return text
 
     # --- No role_key: legacy path → claude ---
@@ -309,6 +329,7 @@ async def ask_role(
         log.info("agent ? → claude:(default)")
         text, tok = await _ask_claude(system_prompt, user_prompt, model)
         _usage.record("claude", tok)
+        _capture("claude", model, system_prompt, user_prompt, text, tok, role_key)
         return text
 
     # --- Chain-aware dispatch ---
@@ -325,6 +346,7 @@ async def ask_role(
         log.info("agent %s → %s:%s", role_key, svc, mdl or "(default)")
         text, tok = await _dispatch(svc, system_prompt, user_prompt, mdl)
         _usage.record(svc, tok)
+        _capture(svc, mdl, system_prompt, user_prompt, text, tok, role_key)
 
         if text:
             return text
@@ -499,6 +521,11 @@ async def run_committee(
     """
     # Resolve parallel flag
     use_parallel = PARALLEL if parallel is None else parallel
+
+    # Tag every LLM call in this run so the dev dashboard can group the full
+    # sent/returned transcript. ContextVar propagates into the parallel tasks.
+    _RUN_ID.set(uuid.uuid4().hex[:12])
+    _RUN_SYMBOL.set(symbol)
 
     # Step 1 — data
     bundle = gather_bundle(symbol)

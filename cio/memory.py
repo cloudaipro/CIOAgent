@@ -226,6 +226,52 @@ def promote_hot(scope: str, hits_threshold: int = PROMOTE_HITS, db_path=db.DB_PA
     return n
 
 
+# ----- conversation turns (COLD store + dev-dashboard history) --------------
+
+def log_turn(chat_id: int | None, session_id: str | None, user_text: str,
+             assistant_text: str, db_path=db.DB_PATH) -> None:
+    """Append a user/assistant exchange to the COLD ``conv_turns`` store.
+
+    Feeds two things: the dev dashboard's Telegram history view, and the cold
+    layer of hybrid recall (the FTS index stays in sync via table triggers).
+    Gated by capture level (off at level 3). Best-effort; never raises so a
+    logging hiccup can't break a chat turn."""
+    from . import devcapture
+    if not devcapture.telegram_enabled():
+        return
+    try:
+        conn = db.connect(db_path)
+        with conn:
+            for role, content in (("user", user_text), ("assistant", assistant_text)):
+                if content and content.strip():
+                    conn.execute(
+                        "INSERT INTO conv_turns (chat_id,session_id,role,content) "
+                        "VALUES (?,?,?,?)",
+                        (chat_id, session_id, role, content),
+                    )
+        conn.close()
+    except Exception:
+        import logging
+        logging.getLogger("cio.memory").warning("log_turn failed", exc_info=True)
+
+
+def conv_history(chat_id: int | None = None, limit: int = 200, db_path=db.DB_PATH) -> list[dict]:
+    """Recent conversation turns, newest first. All chats when chat_id is None."""
+    conn = db.connect(db_path)
+    if chat_id is None:
+        rows = conn.execute(
+            "SELECT id,chat_id,session_id,role,content,ts FROM conv_turns "
+            "ORDER BY id DESC LIMIT ?", (limit,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id,chat_id,session_id,role,content,ts FROM conv_turns "
+            "WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ----- session digests (rolling-session checkpoints) ------------------------
 
 def add_digest(chat_id: int | None, session_id: str | None, summary: str,

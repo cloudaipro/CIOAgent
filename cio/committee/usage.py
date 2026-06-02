@@ -94,6 +94,27 @@ def record(service: str, tokens: int, day: str | None = None, db_path: Path | No
         log.warning("usage.record failed: %s", exc)
 
 
+def recent(days: int = 30, db_path: Path | None = None) -> list[dict]:
+    """
+    Return per-service per-day token totals, newest day first (for the dev
+    dashboard). Limited to the most recent *days* distinct days. Never raises.
+    """
+    effective_path = db_path if db_path is not None else DB_PATH
+    try:
+        conn = _connect(effective_path)
+        rows = conn.execute(
+            "SELECT service, day, tokens FROM token_usage "
+            "WHERE day IN (SELECT DISTINCT day FROM token_usage ORDER BY day DESC LIMIT ?) "
+            "ORDER BY day DESC, service",
+            (days,),
+        ).fetchall()
+        conn.close()
+        return [{"service": r[0], "day": r[1], "tokens": int(r[2])} for r in rows]
+    except Exception as exc:
+        log.warning("usage.recent failed: %s", exc)
+        return []
+
+
 def over_budget(service: str, limit: int | None, db_path: Path | None = None) -> bool:
     """
     Return True if *service* has hit or exceeded *limit* tokens today (UTC).

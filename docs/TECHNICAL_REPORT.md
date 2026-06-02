@@ -108,9 +108,13 @@ erDiagram
 - `user_profile`, `session_digests`, `conv_turns`, `playbooks`.
 - `notes_fts` / `turns_fts` — FTS5 keyword indexes (trigger-synced).
 - `mem_vec` / `turn_vec` — `sqlite-vec` `vec0` tables, `float[768]` embeddings.
+- `conv_turns` — COLD store of every Telegram user/assistant turn (`bot._run` →
+  `memory.log_turn`); feeds hybrid recall and the dev dashboard (§7). Gated by capture level.
 - In **`committee.db`**: the same `mem_notes` / `mem_vec` / `notes_fts` tables, scoped
   `committee:{role}` — one logical namespace per agent (see §6.6) — plus `token_usage`
-  (`service`, `day`, `tokens`) for the CIO fallback chain's daily budget (§6.4).
+  (`service`, `day`, `tokens`) for the CIO fallback chain's daily budget (§6.4), and
+  `committee_transcript` (every LLM call's sent prompt + returned text, grouped by `run_id`)
+  for the dev dashboard (§7).
 
 **Runtime:** `chats` (per-chat SDK `session_id`), `meta` (`embed_dim`, migration flags).
 
@@ -178,7 +182,7 @@ playbook.
 - **`data.py`** — `load_or_download_stock_data` fetches OHLCV from yfinance and caches
   one joblib pickle per symbol under `data/stock_cache/`. **Cache paths are sanitized**
   (`safe_symbol` + realpath containment) so a hostile ticker cannot traverse the dir or
-  name an arbitrary pickle (see §7). `fundamentals()` pulls PE/PB/yield/EPS/ROE/margin/
+  name an arbitrary pickle (see §8). `fundamentals()` pulls PE/PB/yield/EPS/ROE/margin/
   market-cap/52-week/quarterly-revenue + `quoteType` (ETF detection). `normalize_symbol`
   resolves a bare 4-digit code to `.TW`/`.TWO`.
 - **`engine/`** — a vendored strategy engine: 38 technical strategies + indicators,
@@ -311,7 +315,45 @@ PDF render falls back to sending the `.md`.
 
 ---
 
-## 7. Correctness & security guarantees
+## 7. Developer dashboard (`cio/dashboard/`)
+
+A localhost-only, read-only web view for the operator to **verify the agent is
+correct** — what each model received, what it returned, token spend, and chat
+history. Stdlib `http.server.ThreadingHTTPServer` (no web framework, zero new
+deps), bound `127.0.0.1`. Launch: `python -m cio.dashboard`.
+
+**Routes** (server-rendered HTML, no client JS):
+- `/usage` — tokens per backend per UTC day (`usage.recent` over `committee.db.token_usage`).
+- `/telegram` — full conversation history (`memory.conv_history` over `cio.db.conv_turns`).
+- `/committee` → `/committee/<run_id>` — every LLM call of a run: content **sent**
+  (system + user prompt) and content **returned**, per role, in order.
+- `/` — overview of all three.
+
+**Capture funnels** (one per source, so nothing is missed and nothing is double-counted):
+- Committee transcript: `engine.ask_role` is the single LLM entry point; a `_capture()`
+  call sits beside each `usage.record`, tagged by a `_RUN_ID` ContextVar set at the top of
+  `run_committee` (propagates into the parallel tasks). Before this, committee prompts/
+  responses were persisted nowhere — `_raw` on opinion dicts is not durable.
+- Telegram turns: `bot._run` is the single funnel for text/photo/document turns →
+  `memory.log_turn` writes the user + assistant rows to `conv_turns` (which also,
+  finally, populates the COLD recall layer that was defined but unwritten).
+
+**Capture level** — `CIO_CAPTURE_LEVEL` (default `1`, clamped 1–3, in `cio/devcapture.py`):
+
+| Level | Committee transcript | Telegram history |
+|------:|----------------------|------------------|
+| 1 | full, pruned to last `CIO_TRANSCRIPT_KEEP_RUNS` (200) | on |
+| 2 | full, kept forever | on |
+| 3 | full, pruned | off (committee only) |
+
+All capture is best-effort and never raises — a logging hiccup cannot break a chat
+or a committee run. Pruning runs inline on insert (level 1/3). Auth: loopback bind
+needs none; an optional `CIO_DASH_TOKEN` adds a `?token=…` gate that sets a session
+cookie so nav stays clean.
+
+---
+
+## 8. Correctness & security guarantees
 
 | Concern | Mechanism |
 |---|---|
@@ -322,7 +364,8 @@ PDF render falls back to sending the `.md`.
 | SQL injection | All queries parameterized; the one dynamic-column statement (`set_profile`) whitelists columns against `_PROFILE_FIELDS` |
 | Secrets | `TELEGRAM_BOT_TOKEN` / `NVIDIA_API_KEY` / `OPENAI_API_KEY` from env only; `.env` gitignored; the key *name* (not value) is the only thing logged |
 | Duplicate import on replay | Content-hash idempotency ledger, atomic with row inserts |
-| Transcript blowup (24/7) | Rolling sessions (digest + reseed) + importance-decay eviction |
+| Transcript blowup (24/7) | Rolling sessions (digest + reseed) + importance-decay eviction; dev-dashboard committee transcript pruned to `CIO_TRANSCRIPT_KEEP_RUNS` (level 1/3) |
+| Dashboard exposure | Read-only; binds `127.0.0.1` by default; optional `CIO_DASH_TOKEN` cookie gate; warns if bound off-loopback without a token |
 | Reboot data loss | All durable state in SQLite; eager resume; graceful stale-session fallback |
 | Dependency CVEs | `pip-audit`: no known-vulnerable dependencies at audit time |
 | Auditability | Every note carries `source` (user/agent/auto/committee/legacy) + timestamps + `importance`/`hits` |
@@ -334,7 +377,7 @@ the local (trusted) config, not user input, so it is not an SSRF vector.
 
 ---
 
-## 8. Configuration (environment)
+## 9. Configuration (environment)
 
 All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 
@@ -358,10 +401,14 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `CIO_MAX_NOTES` | `500` | Per-scope note cap (eviction) |
 | `CIO_PROMOTE_HITS` | `3` | Hit count that promotes a warm note to hot |
 | `CIO_STOCK_CACHE_DIR` | `data/stock_cache` | Stock OHLCV cache dir |
+| `CIO_CAPTURE_LEVEL` | `1` | Dev-dashboard capture scope 1–3 (§7) |
+| `CIO_TRANSCRIPT_KEEP_RUNS` | `200` | Committee runs retained when pruning (level 1/3) |
+| `CIO_DASH_HOST` / `CIO_DASH_PORT` | `127.0.0.1` / `8787` | Dashboard bind |
+| `CIO_DASH_TOKEN` | unset | Optional dashboard shared-secret gate |
 
 ---
 
-## 9. Verification
+## 10. Verification
 
 `pytest` — **187 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
 firewall, scope isolation, injection budget, hybrid recall, eviction, promotion, rolling

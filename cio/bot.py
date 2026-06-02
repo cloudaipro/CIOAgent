@@ -79,12 +79,15 @@ async def _reply(update: Update, text: str, images: list[str]) -> None:
 async def _run(update: Update, prompt: str) -> None:
     chat_id = update.effective_chat.id
     await update.effective_chat.send_action(ChatAction.TYPING)
+    agent = _agent(chat_id)
     try:
-        text, images = await _agent(chat_id).ask(prompt)
+        text, images = await agent.ask(prompt)
     except Exception as e:  # never let the bot die on one bad turn
         log.exception("agent error")
         await update.message.reply_text(f"⚠️ Agent error: {e}")
         return
+    # Persist the exchange for the dev dashboard + cold-store recall (best-effort).
+    memory.log_turn(chat_id, agent._session_id, prompt, text)
     await _reply(update, text or "(no response)", images)
 
 
