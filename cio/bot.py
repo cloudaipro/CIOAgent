@@ -102,8 +102,12 @@ async def _gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    log.info("/start from chat %s", chat_id)
     await update.message.reply_text(
         "📊 CIO agent online.\n\n"
+        f"🪪 Your chat id: {chat_id}\n"
+        "   (put this in CIO_ALLOWED_CHATS in .env to lock the bot to you)\n\n"
         "• Ask anything: \"how's my portfolio?\", \"top gainer?\", \"show allocation\"\n"
         "• Set a price: \"set AAPL 230\"\n"
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
