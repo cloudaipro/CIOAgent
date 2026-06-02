@@ -90,6 +90,12 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   or `openai`. The CIO runs a **fallback chain** — OpenAI `gpt-5.5-2026-04-23` (daily
   200k tokens) → Claude Opus (daily 200k) → NVIDIA NIM — switching automatically as each
   day's token budget is spent. Limits and models are editable in the config.
+- **Output-token caps** are configurable per backend (env overrides yaml):
+  `CIO_OPENAI_MAX_TOKENS` / `nim.max_tokens` `CIO_NIM_MAX_TOKENS` (default 2048), and the
+  OpenAI param name `CIO_OPENAI_TOKEN_PARAM` (gpt-5.x = `max_completion_tokens`, older
+  models = `max_tokens`). Claude's agentic SDK has no output cap — only
+  `CIO_CLAUDE_MAX_THINKING_TOKENS` (thinking budget). If a NIM reasoning model returns
+  empty (`finish_reason=length`), raise `CIO_NIM_MAX_TOKENS`.
 
 ## Setup
 

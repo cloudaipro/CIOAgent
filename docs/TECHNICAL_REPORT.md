@@ -276,6 +276,23 @@ Each backend returns `(text, tokens)` — real usage from the API (`usage.total_
 translator → **NIM `minimaxai/minimax-m2.7`**; CIO → a **fallback chain** (§6.4). The
 chosen service/model is logged per call (`agent <role> → <service>:<model>`).
 
+**Output-token caps are configurable per backend** (priority **env > yaml > default**,
+resolved by `models._int_setting`):
+- OpenAI — value `CIO_OPENAI_MAX_TOKENS` / `openai.max_tokens` (2048), **and the param
+  name** `CIO_OPENAI_TOKEN_PARAM` / `openai.token_param`: gpt-5.x requires
+  `max_completion_tokens` (and only the default temperature, so no temperature override),
+  older chat models want `max_tokens`.
+- NIM — `CIO_NIM_MAX_TOKENS` / `nim.max_tokens` (2048).
+- Claude — the agentic SDK has **no** plain output cap; its only token knob,
+  `max_thinking_tokens`, is exposed via `CIO_CLAUDE_MAX_THINKING_TOKENS` /
+  `claude.max_thinking_tokens` (unset → SDK default).
+
+**Backend robustness.** `_ask_nim` parses tolerantly: reasoning models (minimax) may omit
+`content` or return `null` and carry the answer in `reasoning_content`; when the cap is
+spent on reasoning the response is `finish_reason="length"` with empty content. It recovers
+`reasoning_content`, else returns `("", 0)` with a warning that names `finish_reason` (a cue
+to raise `CIO_NIM_MAX_TOKENS`) — a malformed shape never raises.
+
 ### 6.4 CIO fallback chain (daily token budget)
 The CIO is configured with a `chain` (not a single service). `ask_role` walks it in order,
 skipping any link whose **daily token use** (`usage.py`, per-service, UTC-day bucketed in
