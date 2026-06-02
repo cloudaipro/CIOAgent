@@ -387,6 +387,10 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `CIO_ALLOWED_CHATS` | unset (open) | Comma-separated chat ids allowed to use the bot — **set this** |
 | `NVIDIA_API_KEY` | — | NVIDIA NIM key (required for `service: nim` agents) |
 | `OPENAI_API_KEY` | — | OpenAI key (CIO chain's first link; absent → CIO falls to Opus) |
+| `CIO_OPENAI_TOKEN_PARAM` | `max_completion_tokens` | OpenAI output-cap param name (`max_tokens` for older models); also `openai.token_param` in yaml |
+| `CIO_OPENAI_MAX_TOKENS` | `2048` | OpenAI output-cap value; also `openai.max_tokens` in yaml |
+| `CIO_NIM_MAX_TOKENS` | `2048` | NIM output-cap value; also `nim.max_tokens` in yaml |
+| `CIO_CLAUDE_MAX_THINKING_TOKENS` | SDK default | Claude thinking-token budget (no plain output cap in the agentic SDK); also `claude.max_thinking_tokens` in yaml |
 | `CIO_MODELS_CONFIG` | `config/committee_models.yaml` | Per-agent service/model map + CIO chain + daily limits |
 | `CIO_PARALLEL` | `on` | Committee parallel vs sequential execution |
 | `CIO_MAX_CONCURRENCY` | `8` | Parallel agent semaphore |

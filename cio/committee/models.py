@@ -115,10 +115,26 @@ def resolve(role_key: str) -> tuple[str, str | None]:
     return str(service), model
 
 
+def _int_setting(env_name: str, yaml_val, default: int) -> int:
+    """Resolve an int knob: env var > yaml value > default. Bad value → default."""
+    raw = os.getenv(env_name)
+    if raw is None:
+        raw = yaml_val
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        log.warning("%s: bad int %r; using %d", env_name, raw, default)
+        return default
+
+
 def nim_settings() -> dict:
     """
-    Return NIM connection settings: {base_url, api_key_env}.
+    Return NIM connection settings: {base_url, api_key_env, max_output_tokens}.
 
+    The output cap is configurable, priority env > yaml > default(2048):
+      env CIO_NIM_MAX_TOKENS, yaml nim.max_tokens.
     Falls back to hard-coded defaults if config is missing those keys.
     """
     cfg = load_config()
@@ -126,20 +142,58 @@ def nim_settings() -> dict:
     return {
         "base_url": nim.get("base_url", "https://integrate.api.nvidia.com/v1"),
         "api_key_env": nim.get("api_key_env", "NVIDIA_API_KEY"),
+        "max_output_tokens": _int_setting("CIO_NIM_MAX_TOKENS", nim.get("max_tokens"), 2048),
     }
+
+
+def claude_settings() -> dict:
+    """
+    Return Claude (claude-agent-sdk) settings: {max_thinking_tokens}.
+
+    The agentic SDK has no plain output `max_tokens` param; its only token knob is
+    the thinking-token budget. Configurable, priority env > yaml, default None
+    (= SDK default, unchanged behaviour):
+      env CIO_CLAUDE_MAX_THINKING_TOKENS, yaml claude.max_thinking_tokens.
+    """
+    cfg = load_config()
+    cl: dict = cfg.get("claude", {})
+    raw = os.getenv("CIO_CLAUDE_MAX_THINKING_TOKENS")
+    if raw is None:
+        raw = cl.get("max_thinking_tokens")
+    val: int | None = None
+    if raw is not None:
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            log.warning("claude_settings: bad max_thinking_tokens %r; ignoring", raw)
+    return {"max_thinking_tokens": val}
 
 
 def openai_settings() -> dict:
     """
-    Return OpenAI connection settings: {base_url, api_key_env}.
+    Return OpenAI connection settings:
+        {base_url, api_key_env, max_output_tokens, token_param}.
 
+    ``token_param`` is the name of the output-cap parameter: gpt-5.x wants
+    ``max_completion_tokens``; older chat models want ``max_tokens``. Both that
+    name and the cap value are configurable, priority: env > yaml > default.
+      env:  CIO_OPENAI_TOKEN_PARAM, CIO_OPENAI_MAX_TOKENS
+      yaml: openai.token_param, openai.max_tokens
     Falls back to hard-coded defaults if config is missing those keys.
     """
     cfg = load_config()
     oa: dict = cfg.get("openai", {})
+
+    token_param = os.getenv("CIO_OPENAI_TOKEN_PARAM") or oa.get("token_param", "max_completion_tokens")
+    if token_param not in ("max_completion_tokens", "max_tokens"):
+        log.warning("openai_settings: unknown token_param %r; using max_completion_tokens", token_param)
+        token_param = "max_completion_tokens"
+
     return {
         "base_url": oa.get("base_url", "https://api.openai.com/v1"),
         "api_key_env": oa.get("api_key_env", "OPENAI_API_KEY"),
+        "max_output_tokens": _int_setting("CIO_OPENAI_MAX_TOKENS", oa.get("max_tokens"), 2048),
+        "token_param": token_param,
     }
 
 

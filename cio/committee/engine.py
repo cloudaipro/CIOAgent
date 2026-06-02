@@ -23,7 +23,13 @@ from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
 from . import agent_memory
 from . import transcript as _transcript
 from . import usage as _usage
-from .models import resolve as _resolve_model, nim_settings, openai_settings, resolve_chain as _resolve_chain
+from .models import (
+    resolve as _resolve_model,
+    nim_settings,
+    openai_settings,
+    claude_settings,
+    resolve_chain as _resolve_chain,
+)
 
 log = logging.getLogger(__name__)
 
@@ -117,14 +123,16 @@ async def _ask_openai(system_prompt: str, user_prompt: str, model: str | None = 
     effective_model = model or "gpt-5.5-2026-04-23"
     try:
         client = AsyncOpenAI(api_key=key, base_url=settings["base_url"])
+        # Output cap is configurable: gpt-5.x wants `max_completion_tokens` and only
+        # accepts the default temperature (so no temperature override); older chat
+        # models want `max_tokens`. Both name and value come from openai_settings().
         resp = await client.chat.completions.create(
             model=effective_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.4,
-            max_tokens=2048,
+            **{settings["token_param"]: settings["max_output_tokens"]},
         )
         text = (resp.choices[0].message.content or "").strip()
         tok = resp.usage.total_tokens if resp.usage else 0
@@ -158,13 +166,20 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
 
     resolved_model = model or os.getenv("CIO_MODEL") or None
 
-    opts = ClaudeAgentOptions(
+    opt_kwargs: dict = dict(
         system_prompt=system_prompt,
         permission_mode="bypassPermissions",
         allowed_tools=[],
         disallowed_tools=["Bash", "Write", "Edit", "WebFetch", "WebSearch"],
         model=resolved_model,
     )
+    # The agentic SDK has no plain output max_tokens; its token knob is the
+    # thinking-token budget. Only set it when configured (else SDK default).
+    max_thinking = claude_settings().get("max_thinking_tokens")
+    if max_thinking is not None:
+        opt_kwargs["max_thinking_tokens"] = max_thinking
+
+    opts = ClaudeAgentOptions(**opt_kwargs)
 
     try:
         client = ClaudeSDKClient(options=opts)
@@ -233,7 +248,7 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
             {"role": "user", "content": user_prompt},
         ],
         "temperature": 0.4,
-        "max_tokens": 2048,
+        "max_tokens": settings["max_output_tokens"],
         "stream": False,
     }
     headers = {
@@ -246,7 +261,20 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             data = resp.json()
-        text = data["choices"][0]["message"]["content"].strip()
+        # Tolerant extraction: reasoning models (e.g. minimax) may omit `content`
+        # or return None and carry the answer in `reasoning_content`; the cap being
+        # spent on reasoning yields finish_reason="length" with empty content.
+        try:
+            choice = data["choices"][0]
+        except (KeyError, IndexError, TypeError):
+            log.warning("_ask_nim: unexpected response shape: %s", str(data)[:300])
+            return ("", 0)
+        msg = choice.get("message") or {}
+        text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        if not text:
+            log.warning("_ask_nim: empty content (finish_reason=%s) — raise CIO_NIM_MAX_TOKENS?",
+                        choice.get("finish_reason"))
+            return ("", 0)
         if _is_limit_notice(text):
             log.warning("_ask_nim hit a limit notice; treating as empty")
             return ("", 0)

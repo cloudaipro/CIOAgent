@@ -18,5 +18,11 @@ agents:
       - {service: claude, model: claude-opus-4-8,          daily_limit: 200000}
       - {service: nim,    model: minimaxai/minimax-m2.7}   # last resort, no daily_limit
   translator: {service: nim,    model: minimaxai/minimax-m2.7}  # TC translation (minimax: strong Chinese)
-nim:    {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}
-openai: {base_url: "https://api.openai.com/v1",           api_key_env: OPENAI_API_KEY}
+# nim.max_tokens = output cap value (env CIO_NIM_MAX_TOKENS overrides).
+nim:    {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY, max_tokens: 20480}
+# claude (claude-agent-sdk) has no plain output max_tokens; only a thinking-token
+# budget. Set claude.max_thinking_tokens (env CIO_CLAUDE_MAX_THINKING_TOKENS) to cap it.
+# claude: {max_thinking_tokens: 8000}
+# token_param: gpt-5.x wants max_completion_tokens; older chat models want max_tokens.
+# max_tokens here is the output-cap VALUE. Env CIO_OPENAI_TOKEN_PARAM / CIO_OPENAI_MAX_TOKENS override.
+openai: {base_url: "https://api.openai.com/v1",           api_key_env: OPENAI_API_KEY, token_param: max_completion_tokens, max_tokens: 20480}
