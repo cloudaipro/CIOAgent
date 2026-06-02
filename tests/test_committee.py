@@ -1262,12 +1262,17 @@ class TestModelsConfig:
         from cio.committee.models import load_config
         load_config.cache_clear()
 
-    def test_resolve_cio_returns_claude(self):
-        """Default YAML maps cio → ('claude', 'claude-opus-4-8')."""
-        from cio.committee.models import resolve
-        service, model = resolve("cio")
-        assert service == "claude"
-        assert model == "claude-opus-4-8"
+    def test_resolve_chain_cio_returns_three_links(self):
+        """Default YAML maps cio → a 3-link chain: openai → claude → nim."""
+        from cio.committee.models import resolve_chain
+        chain = resolve_chain("cio")
+        assert len(chain) == 3
+        assert chain[0]["service"] == "openai"
+        assert chain[1]["service"] == "claude"
+        assert chain[2]["service"] == "nim"
+        assert chain[0].get("daily_limit") == 200000
+        assert chain[1].get("daily_limit") == 200000
+        assert "daily_limit" not in chain[2]
 
     def test_resolve_market_returns_nim(self):
         """Default YAML maps market → ('nim', 'minimaxai/minimax-m2.7')."""
@@ -1313,6 +1318,15 @@ class TestModelsConfig:
         assert "api_key_env" in s
         assert s["base_url"].startswith("https://")
 
+    def test_openai_settings_has_required_keys(self):
+        """openai_settings() always returns base_url and api_key_env."""
+        from cio.committee.models import openai_settings
+        s = openai_settings()
+        assert "base_url" in s
+        assert "api_key_env" in s
+        assert s["base_url"].startswith("https://")
+        assert s["api_key_env"] == "OPENAI_API_KEY"
+
     def test_custom_yaml_parsed(self, tmp_path):
         """A custom YAML file with cio→nim is parsed and respected."""
         from cio.committee.models import load_config, resolve
@@ -1331,7 +1345,12 @@ class TestModelsConfig:
 
 
 class TestAskRoleRouting:
-    """ask_role routes to the correct backend based on role_key config."""
+    """ask_role routes to the correct backend based on role_key config.
+
+    Updated for Step 8: all _ask_* backends now return (text, tokens) tuples;
+    CIO now starts at openai (chain head) not claude; usage.record is mocked to
+    avoid DB writes.
+    """
 
     def _run(self, coro):
         return asyncio.run(coro)
@@ -1344,41 +1363,55 @@ class TestAskRoleRouting:
         from cio.committee.models import load_config
         load_config.cache_clear()
 
-    def test_role_key_cio_routes_to_claude(self, monkeypatch):
-        """ask_role with role_key='cio' hits _ask_claude."""
+    def _noop_record(self, monkeypatch):
+        """Suppress DB writes from usage.record in routing tests."""
+        monkeypatch.setattr("cio.committee.engine._usage.record", lambda *a, **kw: None)
+        monkeypatch.setattr("cio.committee.engine._usage.over_budget", lambda *a, **kw: False)
+
+    def test_role_key_cio_routes_to_openai_first(self, monkeypatch):
+        """ask_role with role_key='cio' hits _ask_openai (chain head) when budget is fresh."""
+        openai_calls = []
         claude_calls = []
         nim_calls = []
 
+        async def fake_openai(sp, up, model=None):
+            openai_calls.append((sp, up))
+            return ("openai-response", 100)
+
         async def fake_claude(sp, up, model=None):
             claude_calls.append((sp, up))
-            return "claude-response"
+            return ("claude-response", 100)
 
         async def fake_nim(sp, up, model=None):
             nim_calls.append((sp, up))
-            return "nim-response"
+            return ("nim-response", 100)
 
+        self._noop_record(monkeypatch)
+        monkeypatch.setattr("cio.committee.engine._ask_openai", fake_openai)
         monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
         monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
 
         from cio.committee.engine import ask_role
         result = self._run(ask_role("sys", "user", role_key="cio"))
-        assert result == "claude-response"
-        assert len(claude_calls) == 1
+        assert result == "openai-response"
+        assert len(openai_calls) == 1
+        assert len(claude_calls) == 0
         assert len(nim_calls) == 0
 
     def test_role_key_market_routes_to_nim(self, monkeypatch):
-        """ask_role with role_key='market' hits _ask_nim."""
+        """ask_role with role_key='market' hits _ask_nim (single-link chain)."""
         claude_calls = []
         nim_calls = []
 
         async def fake_claude(sp, up, model=None):
             claude_calls.append((sp, up))
-            return "claude-response"
+            return ("claude-response", 100)
 
         async def fake_nim(sp, up, model=None):
             nim_calls.append((sp, up))
-            return "nim-response"
+            return ("nim-response", 100)
 
+        self._noop_record(monkeypatch)
         monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
         monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
 
@@ -1394,11 +1427,12 @@ class TestAskRoleRouting:
 
         async def fake_claude(sp, up, model=None):
             claude_calls.append((sp, up))
-            return "forced-claude"
+            return ("forced-claude", 100)
 
         async def fake_nim(sp, up, model=None):
             raise AssertionError("_ask_nim should not be called")
 
+        self._noop_record(monkeypatch)
         monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
         monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
 
@@ -1413,11 +1447,12 @@ class TestAskRoleRouting:
 
         async def fake_claude(sp, up, model=None):
             claude_calls.append(True)
-            return "default-claude"
+            return ("default-claude", 100)
 
         async def fake_nim(sp, up, model=None):
             raise AssertionError("_ask_nim should not be called for role_key=None")
 
+        self._noop_record(monkeypatch)
         monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
         monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
 
@@ -1434,14 +1469,17 @@ class TestNIMBackend:
         return asyncio.run(coro)
 
     def test_nim_returns_content_with_key(self, monkeypatch):
-        """_ask_nim parses response when API key is set."""
+        """_ask_nim parses response when API key is set; returns (text, tokens) tuple."""
         monkeypatch.setenv("NVIDIA_API_KEY", "fake-test-key")
 
         import httpx
 
         class FakeResponse:
             def json(self):
-                return {"choices": [{"message": {"content": "hi from nim"}}]}
+                return {
+                    "choices": [{"message": {"content": "hi from nim"}}],
+                    "usage": {"total_tokens": 42},
+                }
             def raise_for_status(self):
                 pass
 
@@ -1456,23 +1494,22 @@ class TestNIMBackend:
         monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: FakeAsyncClient())
 
         from cio.committee.engine import _ask_nim
-        result = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
-        assert result == "hi from nim"
+        text, tok = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
+        assert text == "hi from nim"
+        assert tok == 42
 
     def test_nim_returns_empty_without_key(self, monkeypatch):
-        """_ask_nim returns '' and does NOT call httpx when NVIDIA_API_KEY is unset."""
+        """_ask_nim returns ('', 0) and does NOT call httpx when NVIDIA_API_KEY is unset."""
         monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
-
-        async def _should_not_post(*args, **kwargs):
-            raise AssertionError("httpx.AsyncClient.post should not be called without API key")
 
         # We don't even need to monkeypatch post — just verify empty return
         from cio.committee.engine import _ask_nim
-        result = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
-        assert result == ""
+        text, tok = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
+        assert text == ""
+        assert tok == 0
 
     def test_nim_returns_empty_on_http_error(self, monkeypatch):
-        """_ask_nim returns '' gracefully on HTTP error."""
+        """_ask_nim returns ('', 0) gracefully on HTTP error."""
         monkeypatch.setenv("NVIDIA_API_KEY", "fake-test-key")
 
         import httpx
@@ -1492,11 +1529,12 @@ class TestNIMBackend:
         monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: ErrorAsyncClient())
 
         from cio.committee.engine import _ask_nim
-        result = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
-        assert result == ""
+        text, tok = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
+        assert text == ""
+        assert tok == 0
 
     def test_nim_limit_notice_returns_empty(self, monkeypatch):
-        """_ask_nim returns '' when the NIM response text is a limit notice."""
+        """_ask_nim returns ('', 0) when the NIM response text is a limit notice."""
         monkeypatch.setenv("NVIDIA_API_KEY", "fake-test-key")
 
         class FakeResponse:
@@ -1516,8 +1554,9 @@ class TestNIMBackend:
         monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: FakeAsyncClient())
 
         from cio.committee.engine import _ask_nim
-        result = self._run(_ask_nim("system", "user"))
-        assert result == ""
+        text, tok = self._run(_ask_nim("system", "user"))
+        assert text == ""
+        assert tok == 0
 
 
 class TestParallelExecution:

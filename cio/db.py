@@ -66,6 +66,16 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
+-- Daily token-budget counters per backend service (UTC day).
+-- Used by the CIO fallback chain to enforce per-service daily limits.
+-- Natural reset: a new day key is a new row; old rows are inert.
+CREATE TABLE IF NOT EXISTS token_usage (
+    service TEXT NOT NULL,
+    day     TEXT NOT NULL,
+    tokens  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (service, day)
+);
+
 -- Known Telegram chats. `subscribed` controls the daily digest; `session_id`
 -- lets a restarted bot resume the same SDK conversation thread per chat.
 CREATE TABLE IF NOT EXISTS chats (

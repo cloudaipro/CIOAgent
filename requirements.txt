@@ -1,5 +1,6 @@
 claude-agent-sdk>=0.2.87
 httpx
+openai
 pyyaml
 python-telegram-bot>=22.0
 pandas>=2.0

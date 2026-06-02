@@ -19,7 +19,8 @@ import yaml
 from .bundle import gather_bundle, format_bundle
 from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
 from . import agent_memory
-from .models import resolve as _resolve_model, nim_settings
+from . import usage as _usage
+from .models import resolve as _resolve_model, nim_settings, openai_settings, resolve_chain as _resolve_chain
 
 log = logging.getLogger(__name__)
 
@@ -72,14 +73,62 @@ def _is_limit_notice(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# OpenAI backend
+# ---------------------------------------------------------------------------
+
+async def _ask_openai(system_prompt: str, user_prompt: str, model: str | None = None) -> tuple[str, int]:
+    """
+    One-shot LLM query via OpenAI API.
+
+    Lazy-imports openai inside the function.  If OPENAI_API_KEY is unset →
+    returns ("", 0) immediately without constructing a client or making any
+    network call.  Any other error → ("", 0) (graceful, never raises).
+    """
+    from openai import AsyncOpenAI  # lazy import — only here
+
+    settings = openai_settings()
+    key = os.getenv(settings["api_key_env"])
+    if not key:
+        log.warning(
+            "_ask_openai: %s not set; skipping OpenAI call (returning empty)",
+            settings["api_key_env"],
+        )
+        return ("", 0)
+
+    effective_model = model or "gpt-5.5-2026-04-23"
+    try:
+        client = AsyncOpenAI(api_key=key, base_url=settings["base_url"])
+        resp = await client.chat.completions.create(
+            model=effective_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
+            max_tokens=2048,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        tok = resp.usage.total_tokens if resp.usage else 0
+        if _is_limit_notice(text):
+            log.warning("_ask_openai hit a limit notice; treating as empty")
+            return ("", 0)
+        return (text, tok or 0)
+    except Exception as e:
+        log.warning("_ask_openai failed: %s", e)
+        return ("", 0)
+
+
+# ---------------------------------------------------------------------------
 # Claude backend
 # ---------------------------------------------------------------------------
 
-async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = None) -> tuple[str, int]:
     """
     One-shot LLM query using the subscription claude-agent-sdk client.
 
-    Returns the assistant text, or "" on any failure (offline-safe).
+    Returns (text, tokens).  text="" on any failure (offline-safe).
+    Tokens are summed from AssistantMessage.usage (input+output); if usage
+    is absent, estimated via context.count_tokens.
     """
     from claude_agent_sdk import (
         AssistantMessage,
@@ -103,33 +152,46 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
         await client.connect()
         await client.query(user_prompt)
         parts: list[str] = []
+        total_tokens = 0
         async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
                 for blk in msg.content:
                     if isinstance(blk, TextBlock):
                         parts.append(blk.text)
+                # Sum usage from each AssistantMessage; guard for missing attr.
+                try:
+                    u = msg.usage
+                    if u is not None:
+                        total_tokens += (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "output_tokens", 0) or 0)
+                except Exception:
+                    pass
         await client.disconnect()
         collected = "\n".join(parts).strip()
         if _is_limit_notice(collected):
             log.warning("_ask_claude hit a limit notice; treating as empty")
-            return ""
-        return collected
+            return ("", 0)
+        # Estimate tokens if the SDK did not report any
+        if total_tokens <= 0:
+            from cio.context import count_tokens
+            total_tokens = count_tokens(system_prompt + user_prompt + collected)
+        return (collected, total_tokens)
     except Exception as e:
         log.warning("_ask_claude failed: %s", e)
-        return ""
+        return ("", 0)
 
 
 # ---------------------------------------------------------------------------
 # NIM backend (NVIDIA NIM, OpenAI-compatible via httpx)
 # ---------------------------------------------------------------------------
 
-async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = None) -> tuple[str, int]:
     """
     One-shot LLM query via NVIDIA NIM (OpenAI-compatible REST API).
 
     Reads the API key from the env var named by nim_settings()["api_key_env"].
-    If the key is absent → log.warning + return "" (graceful, never raises).
-    On any HTTP/parse error → log.warning + return "".
+    If the key is absent → log.warning + return ("", 0) (graceful, never raises).
+    On any HTTP/parse error → log.warning + return ("", 0).
+    Returns (text, tokens); tokens from response["usage"]["total_tokens"] or estimated.
     """
     import httpx
 
@@ -140,7 +202,7 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
             "_ask_nim: %s not set; skipping NIM call (returning empty)",
             settings["api_key_env"],
         )
-        return ""
+        return ("", 0)
 
     nim_model = model or "minimaxai/minimax-m2.7"
     url = settings["base_url"].rstrip("/") + "/chat/completions"
@@ -168,11 +230,38 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
         text = data["choices"][0]["message"]["content"].strip()
         if _is_limit_notice(text):
             log.warning("_ask_nim hit a limit notice; treating as empty")
-            return ""
-        return text
+            return ("", 0)
+        # Real usage from response; fall back to estimate if absent.
+        tok = 0
+        try:
+            tok = int(data["usage"]["total_tokens"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        if tok <= 0:
+            from cio.context import count_tokens
+            tok = count_tokens(system_prompt + user_prompt + text)
+        return (text, tok)
     except Exception as e:
         log.warning("_ask_nim failed: %s", e)
-        return ""
+        return ("", 0)
+
+
+# ---------------------------------------------------------------------------
+# _dispatch — low-level backend router
+# ---------------------------------------------------------------------------
+
+async def _dispatch(
+    service: str,
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None,
+) -> tuple[str, int]:
+    """Route one call to the correct backend; return (text, tokens)."""
+    if service == "openai":
+        return await _ask_openai(system_prompt, user_prompt, model)
+    if service == "nim":
+        return await _ask_nim(system_prompt, user_prompt, model)
+    return await _ask_claude(system_prompt, user_prompt, model)
 
 
 # ---------------------------------------------------------------------------
@@ -187,37 +276,62 @@ async def ask_role(
     model: str | None = None,
 ) -> str:
     """
-    Route one LLM call to the correct backend.
+    Route one LLM call to the correct backend, with chain-aware fallback for CIO.
 
     Resolution order:
-      1. Explicit ``service``/``model`` args win.
-      2. Config resolution via ``role_key`` (models.resolve).
-      3. Fall back to ("claude", None) when role_key is None (legacy callers).
+      1. Explicit ``service`` arg → single dispatch (legacy / override path).
+         Records usage; returns text.
+      2. ``role_key`` resolves to a chain via ``resolve_chain``.
+         Iterates links in order:
+           a. If the link is over its daily budget → skip (log).
+           b. Else dispatch; record usage.
+           c. If text is non-empty → return it.
+           d. Empty result (key missing / API error) → try next link.
+      3. role_key is None → single dispatch to claude (no-key legacy path).
 
-    Returns the assistant text, or "" on any failure (offline-safe).
+    Returns the assistant text, or "" when every link is exhausted.
     """
-    if service is None:
-        if role_key is not None:
-            service, resolved_model = _resolve_model(role_key)
-        else:
-            service, resolved_model = "claude", None
-    else:
-        # service was explicit; model may still need resolving
+    # --- Explicit service override: single dispatch, record, return. ---
+    if service is not None:
         if model is None and role_key is not None:
             _, resolved_model = _resolve_model(role_key)
         else:
             resolved_model = model
+        effective_model = model if model is not None else resolved_model
+        log.info("agent %s → %s:%s (explicit)", role_key or "?", service,
+                 effective_model or "(default)")
+        text, tok = await _dispatch(service, system_prompt, user_prompt, effective_model)
+        _usage.record(service, tok)
+        return text
 
-    # Explicit model arg always wins over config-resolved
-    effective_model = model if model is not None else resolved_model
+    # --- No role_key: legacy path → claude ---
+    if role_key is None:
+        log.info("agent ? → claude:(default)")
+        text, tok = await _ask_claude(system_prompt, user_prompt, model)
+        _usage.record("claude", tok)
+        return text
 
-    # Console visibility: which agent is using which service/model this call.
-    log.info("agent %s → %s:%s", role_key or "?", service,
-             effective_model or "(claude default)")
+    # --- Chain-aware dispatch ---
+    chain = _resolve_chain(role_key)
+    for link in chain:
+        svc = link["service"]
+        mdl = link.get("model")
+        limit = link.get("daily_limit")  # None means no cap
 
-    if service == "nim":
-        return await _ask_nim(system_prompt, user_prompt, effective_model)
-    return await _ask_claude(system_prompt, user_prompt, effective_model)
+        if _usage.over_budget(svc, limit):
+            log.info("budget: %s at daily limit; falling through", svc)
+            continue
+
+        log.info("agent %s → %s:%s", role_key, svc, mdl or "(default)")
+        text, tok = await _dispatch(svc, system_prompt, user_prompt, mdl)
+        _usage.record(svc, tok)
+
+        if text:
+            return text
+        # Empty result (key absent / API error) → try next link.
+        log.info("agent %s: %s returned empty; falling through", role_key, svc)
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
