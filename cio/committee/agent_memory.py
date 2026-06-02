@@ -30,6 +30,26 @@ MEM_BUDGET: int = int(os.getenv("CIO_AGENT_MEM_BUDGET", "400"))
 # self-initializes any path (schema/vec/migration), so this file auto-creates.
 DB_PATH = Path(os.getenv("CIO_COMMITTEE_DB") or (db.DB_PATH.parent / "committee.db"))
 
+# WAL = concurrent readers + one writer without blocking — better for the parallel
+# committee, where several agents write their notes near-simultaneously. journal_mode
+# is a PERSISTENT property of the db file, so setting it once sticks for every later
+# connection. Guarded per path (handles tests that swap DB_PATH) so it runs once.
+_wal_done: set[str] = set()
+
+
+def _ensure_wal() -> None:
+    """Idempotently put the committee db in WAL mode. Never raises."""
+    p = str(DB_PATH)
+    if p in _wal_done:
+        return
+    try:
+        conn = db.connect(DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.close()
+    except Exception as exc:
+        log.warning("agent_memory: could not enable WAL on %s: %s", DB_PATH, exc)
+    _wal_done.add(p)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,6 +76,7 @@ def recall_block(role_key: str, symbol: str, k: int = 5,
     Returns '' on any error so a failure never breaks a committee run.
     """
     try:
+        _ensure_wal()
         scope = scope_for(role_key)
 
         # 1. Hot notes (injected at session start equivalent)
@@ -123,6 +144,7 @@ def save_note(role_key: str, value: str, symbol: str,
     if not value or not value.strip():
         return None
     try:
+        _ensure_wal()
         return memory.remember(
             value,
             scope=scope_for(role_key),
@@ -153,6 +175,7 @@ def reflect(role_key: str) -> int:
     Returns the count promoted.  Never raises.
     """
     try:
+        _ensure_wal()
         return memory.promote_hot(scope_for(role_key), db_path=DB_PATH)
     except Exception as exc:
         log.warning("agent_memory.reflect failed for %s: %s", role_key, exc)
