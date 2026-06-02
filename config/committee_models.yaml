@@ -17,6 +17,6 @@ agents:
       - {service: openai, model: gpt-5.5-2026-04-23,      daily_limit: 200000}
       - {service: claude, model: claude-opus-4-8,          daily_limit: 200000}
       - {service: nim,    model: minimaxai/minimax-m2.7}   # last resort, no daily_limit
-  translator: {service: openai,    model: gpt-5.5-2026-04-23}  # TC translation (minimax: strong Chinese)
+  translator: {service: nim,    model: minimaxai/minimax-m2.7}  # TC translation (minimax: strong Chinese)
 nim:    {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}
 openai: {base_url: "https://api.openai.com/v1",           api_key_env: OPENAI_API_KEY}
