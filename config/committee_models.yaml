@@ -1,0 +1,15 @@
+# Per-agent model service for the investment committee.
+# service: "claude" = claude-agent-sdk (subscription, no key) | "nim" = NVIDIA NIM (needs NVIDIA_API_KEY)
+defaults: {service: nim, model: minimaxai/minimax-m2.7}
+agents:
+  market:    {service: nim,    model: minimaxai/minimax-m2.7}
+  equity:    {service: nim,    model: minimaxai/minimax-m2.7}
+  industry:  {service: nim,    model: minimaxai/minimax-m2.7}
+  valuation: {service: nim,    model: minimaxai/minimax-m2.7}
+  quant:     {service: nim,    model: minimaxai/minimax-m2.7}
+  etf:       {service: nim,    model: minimaxai/minimax-m2.7}
+  risk:      {service: nim,    model: minimaxai/minimax-m2.7}
+  catalyst:  {service: nim,    model: minimaxai/minimax-m2.7}
+  moderator: {service: nim,    model: minimaxai/minimax-m2.7}
+  cio:       {service: claude, model: null}   # null => claude-agent-sdk default model
+nim: {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY}

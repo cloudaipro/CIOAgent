@@ -2,7 +2,9 @@
 engine.py — Committee orchestration engine.
 
 Single LLM entry point: ask_role (monkeypatchable for tests).
-All specialists run sequentially; no asyncio.gather (subscription limit).
+Supports two backends: claude-agent-sdk ("claude") and NVIDIA NIM ("nim").
+Round-1 specialists, debate cross-exam pairs, and round-3 revisions run in
+parallel by default (CIO_PARALLEL=on); moderator + CIO stay serial.
 """
 from __future__ import annotations
 
@@ -17,11 +19,41 @@ import yaml
 from .bundle import gather_bundle, format_bundle
 from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
 from . import agent_memory
+from .models import resolve as _resolve_model, nim_settings
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# LLM entry point — THE single point tests can monkeypatch
+# Parallel / concurrency config
+# ---------------------------------------------------------------------------
+
+PARALLEL = os.getenv("CIO_PARALLEL", "on").lower() not in ("off", "0", "false", "no")
+MAX_CONC = int(os.getenv("CIO_MAX_CONCURRENCY", "8"))
+
+
+async def _gather_bounded(coros, parallel: bool) -> list:
+    """
+    Run *coros* in order.  When parallel=True, runs under a bounded semaphore
+    (MAX_CONC) via asyncio.gather preserving result order.  When parallel=False,
+    awaits sequentially.  Never raises (coros are expected to catch internally).
+    """
+    if not parallel:
+        results = []
+        for coro in coros:
+            results.append(await coro)
+        return results
+
+    sem = asyncio.Semaphore(MAX_CONC)
+
+    async def _bounded(coro):
+        async with sem:
+            return await coro
+
+    return list(await asyncio.gather(*[_bounded(c) for c in coros]))
+
+
+# ---------------------------------------------------------------------------
+# Limit-notice detection
 # ---------------------------------------------------------------------------
 
 def _is_limit_notice(text: str) -> bool:
@@ -39,12 +71,15 @@ def _is_limit_notice(text: str) -> bool:
         "rate limit", "resets ", "try again later"))
 
 
-async def ask_role(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+# ---------------------------------------------------------------------------
+# Claude backend
+# ---------------------------------------------------------------------------
+
+async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
     """
     One-shot LLM query using the subscription claude-agent-sdk client.
 
     Returns the assistant text, or "" on any failure (offline-safe).
-    No mcp_servers; no tools — specialists reason over the injected DATA block only.
     """
     from claude_agent_sdk import (
         AssistantMessage,
@@ -53,12 +88,7 @@ async def ask_role(system_prompt: str, user_prompt: str, model: str | None = Non
         TextBlock,
     )
 
-    resolved_model = (
-        model
-        or os.getenv("CIO_COMMITTEE_MODEL")
-        or os.getenv("CIO_MODEL")
-        or None
-    )
+    resolved_model = model or os.getenv("CIO_MODEL") or None
 
     opts = ClaudeAgentOptions(
         system_prompt=system_prompt,
@@ -81,12 +111,109 @@ async def ask_role(system_prompt: str, user_prompt: str, model: str | None = Non
         await client.disconnect()
         collected = "\n".join(parts).strip()
         if _is_limit_notice(collected):
-            log.warning("ask_role hit a limit notice; treating as empty")
+            log.warning("_ask_claude hit a limit notice; treating as empty")
             return ""
         return collected
     except Exception as e:
-        log.warning("ask_role failed: %s", e)
+        log.warning("_ask_claude failed: %s", e)
         return ""
+
+
+# ---------------------------------------------------------------------------
+# NIM backend (NVIDIA NIM, OpenAI-compatible via httpx)
+# ---------------------------------------------------------------------------
+
+async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+    """
+    One-shot LLM query via NVIDIA NIM (OpenAI-compatible REST API).
+
+    Reads the API key from the env var named by nim_settings()["api_key_env"].
+    If the key is absent → log.warning + return "" (graceful, never raises).
+    On any HTTP/parse error → log.warning + return "".
+    """
+    import httpx
+
+    settings = nim_settings()
+    key = os.getenv(settings["api_key_env"])
+    if not key:
+        log.warning(
+            "_ask_nim: %s not set; skipping NIM call (returning empty)",
+            settings["api_key_env"],
+        )
+        return ""
+
+    nim_model = model or "minimaxai/minimax-m2.7"
+    url = settings["base_url"].rstrip("/") + "/chat/completions"
+
+    payload = {
+        "model": nim_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.4,
+        "max_tokens": 2048,
+        "stream": False,
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        text = data["choices"][0]["message"]["content"].strip()
+        if _is_limit_notice(text):
+            log.warning("_ask_nim hit a limit notice; treating as empty")
+            return ""
+        return text
+    except Exception as e:
+        log.warning("_ask_nim failed: %s", e)
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# ask_role — single entry point (monkeypatchable)
+# ---------------------------------------------------------------------------
+
+async def ask_role(
+    system_prompt: str,
+    user_prompt: str,
+    role_key: str | None = None,
+    service: str | None = None,
+    model: str | None = None,
+) -> str:
+    """
+    Route one LLM call to the correct backend.
+
+    Resolution order:
+      1. Explicit ``service``/``model`` args win.
+      2. Config resolution via ``role_key`` (models.resolve).
+      3. Fall back to ("claude", None) when role_key is None (legacy callers).
+
+    Returns the assistant text, or "" on any failure (offline-safe).
+    """
+    if service is None:
+        if role_key is not None:
+            service, resolved_model = _resolve_model(role_key)
+        else:
+            service, resolved_model = "claude", None
+    else:
+        # service was explicit; model may still need resolving
+        if model is None and role_key is not None:
+            _, resolved_model = _resolve_model(role_key)
+        else:
+            resolved_model = model
+
+    # Explicit model arg always wins over config-resolved
+    effective_model = model if model is not None else resolved_model
+
+    if service == "nim":
+        return await _ask_nim(system_prompt, user_prompt, effective_model)
+    return await _ask_claude(system_prompt, user_prompt, effective_model)
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +228,6 @@ def parse_yaml_block(text: str) -> dict:
     Never raises.
     """
     try:
-        # Find all yaml fenced blocks
         import re
         blocks = re.findall(r"```yaml\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
         if not blocks:
@@ -138,11 +264,10 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
     mem = agent_memory.recall_block(role["key"], symbol)
     system_prompt = role["system_prompt"] + ("\n\n" + mem if mem else "")
 
-    raw = await ask_role(system_prompt, user_prompt)
+    raw = await ask_role(system_prompt, user_prompt, role_key=role["key"])
     parsed = parse_yaml_block(raw)
 
     # Strip memory_note from _raw so it never propagates to the report renderer
-    # (debate section renders _raw verbatim; memory_note is the agent's private store).
     import re as _re
     raw_clean = _re.sub(r"\nmemory_note:.*", "", raw)
 
@@ -237,18 +362,26 @@ class CommitteeResult:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeResult:
+async def run_committee(
+    symbol: str,
+    debate: bool | None = None,
+    parallel: bool | None = None,
+) -> CommitteeResult:
     """
     Run the full committee pipeline for *symbol*:
       1. gather_bundle
-      2. specialists (sequential) — Round 1
+      2. specialists (parallel or sequential) — Round 1
       3. debate (Round 2 cross-exam + Round 3 revisions) — optional, bounded
-      4. moderator consensus on Round 3 votes
-      5. CIO final decision on Round 3 votes
+      4. moderator consensus on Round 3 votes  [serial]
+      5. CIO final decision on Round 3 votes   [serial]
 
     debate=None reads CIO_DEBATE env var (default "on").
+    parallel=None reads CIO_PARALLEL env var (default "on" / parallel).
     Returns CommitteeResult; never raises.
     """
+    # Resolve parallel flag
+    use_parallel = PARALLEL if parallel is None else parallel
+
     # Step 1 — data
     bundle = gather_bundle(symbol)
     if bundle.get("resolved") is None:
@@ -265,16 +398,18 @@ async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeRes
     bundle_text = format_bundle(bundle)
     is_etf = bundle.get("is_etf", False)
 
-    # Step 2 — specialists (sequential)
-    opinions: list[dict] = []
-    for role in SPECIALISTS:
-        if role["key"] == "etf" and not is_etf:
-            continue  # Skip ETF specialist for non-ETF securities
+    # Step 2 — specialists (parallel or sequential)
+    active_roles = [
+        role for role in SPECIALISTS
+        if not (role["key"] == "etf" and not is_etf)
+    ]
+
+    async def _run_specialist_safe(role: dict) -> dict:
         try:
-            opinion = await run_specialist(role, bundle_text, resolved)
+            return await run_specialist(role, bundle_text, resolved)
         except Exception as e:
             log.warning("Specialist %s failed: %s", role["key"], e)
-            opinion = {
+            fallback = {
                 "key": role["key"],
                 "title": role["title"],
                 "vote": "HOLD",
@@ -283,8 +418,13 @@ async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeRes
                 "_raw": "",
             }
             for f in role["fields"]:
-                opinion[f] = None
-        opinions.append(opinion)
+                fallback[f] = None
+            return fallback
+
+    opinions: list[dict] = await _gather_bounded(
+        [_run_specialist_safe(role) for role in active_roles],
+        parallel=use_parallel,
+    )
 
     # Step 3 — debate (Round 2 cross-exam + Round 3 revisions)
     if debate is None:
@@ -299,11 +439,13 @@ async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeRes
         if len(unique_base) > 1:
             from .debate import run_debate
             roles_by_key = {r["key"]: r for r in SPECIALISTS}
-            debate_result = await run_debate(opinions, bundle_text, resolved, roles_by_key)
+            debate_result = await run_debate(
+                opinions, bundle_text, resolved, roles_by_key, parallel=use_parallel
+            )
             opinions = debate_result.get("round3_opinions", opinions)
         # else: all same vote — debate_result stays skipped
 
-    # Step 4 — consensus (moderator LLM + deterministic tally) on final (Round 3) votes
+    # Step 4 — consensus (moderator LLM + deterministic tally) on final (Round 3) votes [serial]
     vote_tally = _compute_vote_tally(opinions)
 
     opinions_summary = "\n\n".join(
@@ -316,12 +458,10 @@ async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeRes
         f"Required output fields: committee_recommendation, agreement_score, "
         f"majority_view, minority_view, key_disagreements"
     )
-    mod_raw = await ask_role(MODERATOR_SYSTEM, moderator_prompt)
+    mod_raw = await ask_role(MODERATOR_SYSTEM, moderator_prompt, role_key="moderator")
     consensus = parse_yaml_block(mod_raw)
 
-    # Step 4 — CIO (strongest available model)
-    cio_model = os.getenv("CIO_FINAL_MODEL") or os.getenv("CIO_MODEL") or None
-
+    # Step 5 — CIO (serial; uses config for model/service)
     cio_prompt = (
         f"Symbol: {resolved}\n\n"
         f"DATA SUMMARY:\n{bundle_text}\n\n"
@@ -333,7 +473,7 @@ async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeRes
     # Inject CIO's own scoped memory block
     cio_mem = agent_memory.recall_block("cio", resolved)
     cio_system = CIO_SYSTEM + ("\n\n" + cio_mem if cio_mem else "")
-    cio_raw = await ask_role(cio_system, cio_prompt, model=cio_model)
+    cio_raw = await ask_role(cio_system, cio_prompt, role_key="cio")
     cio = parse_yaml_block(cio_raw)
 
     # Save CIO's durable takeaway (figures firewall enforced inside save_note)
@@ -342,9 +482,7 @@ async def run_committee(symbol: str, debate: bool | None = None) -> CommitteeRes
         agent_memory.save_note("cio", cio_note.strip(), resolved)
 
     # Post-pipeline reflect: promote frequently-recalled warm notes to hot
-    # for all agents that ran this round (failures must not fail the run)
-    roles_that_ran = [role["key"] for role in SPECIALISTS
-                      if not (role["key"] == "etf" and not is_etf)]
+    roles_that_ran = [role["key"] for role in active_roles]
     roles_that_ran.append("cio")
     for rk in roles_that_ran:
         try:

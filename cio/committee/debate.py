@@ -5,7 +5,8 @@ Round 1 opinions come from engine.py specialists (already built).
 Round 2: targeted cross-examination — challenger rebuts opponent, opponent defends.
 Round 3: all specialists may revise their vote/confidence/reason.
 
-All LLM calls go through engine.ask_role.  Sequential only (no asyncio.gather).
+All LLM calls go through engine.ask_role.  Cross-exam PAIRS and round-3 revisions
+run in parallel by default (mirroring the engine's CIO_PARALLEL setting).
 Bounded: max_pairs (default 2) cross-exams + ≤8 revision calls.
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ log = logging.getLogger(__name__)
 # engine.py imports debate lazily (inside run_committee body), so this top-level
 # import is safe once the package is initialised.
 # ---------------------------------------------------------------------------
-from cio.committee.engine import ask_role, parse_yaml_block  # noqa: E402
+from cio.committee.engine import ask_role, parse_yaml_block, _gather_bounded  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,8 @@ async def run_cross_exam(
     live in *roles_by_key* (opinions do not carry them) — resolve via the opinion
     "key". Returns {challenger_key, challenger_title, target_key, target_title,
              challenge, response}.  Never raises.
+
+    Challenge and response are serial within the pair (response depends on challenge).
     """
     challenger, target = pair
     roles_by_key = roles_by_key or {}
@@ -145,7 +148,7 @@ async def run_cross_exam(
             f"Deliver a pointed rebuttal (≤120 words) citing DATA where possible. "
             f"Free text — no yaml needed."
         )
-        challenge = await ask_role(_sys(challenger), challenge_prompt)
+        challenge = await ask_role(_sys(challenger), challenge_prompt, role_key=challenger.get("key"))
     except Exception as e:
         log.warning("Challenge call failed (%s→%s): %s", challenger.get("key"), target.get("key"), e)
         challenge = ""
@@ -157,7 +160,7 @@ async def run_cross_exam(
             f"{challenge}\n\n"
             f"Defend or concede (≤120 words). Free text — no yaml needed."
         )
-        response = await ask_role(_sys(target), response_prompt)
+        response = await ask_role(_sys(target), response_prompt, role_key=target.get("key"))
     except Exception as e:
         log.warning("Response call failed (%s defends): %s", target.get("key"), e)
         response = ""
@@ -204,7 +207,7 @@ async def revise_opinion(
     )
 
     try:
-        raw = await ask_role(role["system_prompt"], revision_prompt)
+        raw = await ask_role(role["system_prompt"], revision_prompt, role_key=role.get("key"))
     except Exception as e:
         log.warning("revise_opinion failed for %s: %s", role.get("key"), e)
         return round1_opinion
@@ -240,14 +243,15 @@ async def run_debate(
     bundle_text: str,
     symbol: str,
     roles_by_key: dict[str, dict],
+    parallel: bool = True,
 ) -> dict:
     """
     Orchestrate the bounded debate:
       1. select_debate_pairs
       2. If no pairs → skip.
-      3. Sequential run_cross_exam for each pair → exchanges.
+      3. Cross-exam PAIRS run in parallel (each pair internally serial).
       4. Build debate_text transcript.
-      5. Sequential revise_opinion for each Round 1 opinion → round3_opinions.
+      5. Round-3 revisions run in parallel.
       6. Return result dict.
 
     Never raises.  On sub-failure keeps the Round 1 opinion for that role.
@@ -263,11 +267,11 @@ async def run_debate(
             "skipped": True,
         }
 
-    # Round 2: sequential cross-examination
-    exchanges: list[dict] = []
-    for pair in pairs:
-        exchange = await run_cross_exam(pair, bundle_text, symbol, roles_by_key)
-        exchanges.append(exchange)
+    # Round 2: cross-exam pairs — pairs are independent; each pair is internally serial
+    exchanges: list[dict] = await _gather_bounded(
+        [run_cross_exam(pair, bundle_text, symbol, roles_by_key) for pair in pairs],
+        parallel=parallel,
+    )
 
     # Build debate transcript
     transcript_parts: list[str] = []
@@ -291,17 +295,18 @@ async def run_debate(
         for ch, tg in pairs
     ]
 
-    # Round 3: sequential revisions — all Round 1 specialists react
-    round3_opinions: list[dict] = []
-    for op in round1_opinions:
+    # Round 3: revisions — all Round 1 specialists in parallel
+    async def _revise_safe(op: dict) -> dict:
         key = op.get("key", "")
         role = roles_by_key.get(key)
         if role is None:
-            # No role definition found — keep Round 1 verbatim
-            round3_opinions.append(op)
-            continue
-        revised = await revise_opinion(role, op, debate_text, bundle_text, symbol)
-        round3_opinions.append(revised)
+            return op
+        return await revise_opinion(role, op, debate_text, bundle_text, symbol)
+
+    round3_opinions: list[dict] = await _gather_bounded(
+        [_revise_safe(op) for op in round1_opinions],
+        parallel=parallel,
+    )
 
     return {
         "pairs": pairs_info,

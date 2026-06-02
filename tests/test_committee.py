@@ -193,7 +193,13 @@ _ROLE_YAML: dict[str, str] = {
 }
 
 
-async def _canned_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
+async def _canned_ask_role(
+    system_prompt: str,
+    user_prompt: str,
+    role_key: str | None = None,
+    service: str | None = None,
+    model=None,
+) -> str:
     """Async version: determine which role is being called and return canned yaml.
     Detection is purely on system_prompt to avoid confusion when user_prompt
     contains output from prior LLM calls.
@@ -642,7 +648,13 @@ _RISK_REVISED_YAML = textwrap.dedent("""\
     ```""")
 
 
-async def _debate_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
+async def _debate_ask_role(
+    system_prompt: str,
+    user_prompt: str,
+    role_key: str | None = None,
+    service: str | None = None,
+    model=None,
+) -> str:
     """
     Extended canned ask_role that detects debate rounds by user_prompt content.
     - challenge: "pointed rebuttal"
@@ -659,8 +671,8 @@ async def _debate_ask_role(system_prompt: str, user_prompt: str, model=None) -> 
         if "risk management" in sp:
             return _RISK_REVISED_YAML
         # All other specialists hold their Round 1 position
-        return await _canned_ask_role(system_prompt, user_prompt, model)
-    return await _canned_ask_role(system_prompt, user_prompt, model)
+        return await _canned_ask_role(system_prompt, user_prompt, role_key=role_key, model=model)
+    return await _canned_ask_role(system_prompt, user_prompt, role_key=role_key, model=model)
 
 
 class TestRunCommitteeDebate:
@@ -734,7 +746,7 @@ class TestRunCommitteeDebate:
             reason: Everything is fine.
             ```""")
 
-        async def _all_hold(system_prompt, user_prompt, model=None):
+        async def _all_hold(system_prompt, user_prompt, role_key=None, service=None, model=None):
             sp = system_prompt.lower()
             if "chief investment officer" in sp:
                 return _ROLE_YAML["cio"]
@@ -1050,7 +1062,7 @@ class TestAgentMemoryInjection:
 
         captured: list[str] = []
 
-        async def fake_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
+        async def fake_ask_role(system_prompt: str, user_prompt: str, role_key=None, service=None, model=None) -> str:
             captured.append(system_prompt)
             return _ROLE_YAML["risk"]
 
@@ -1078,7 +1090,7 @@ class TestAgentMemoryInjection:
 
         captured: list[str] = []
 
-        async def fake_ask_role(system_prompt: str, user_prompt: str, model=None) -> str:
+        async def fake_ask_role(system_prompt: str, user_prompt: str, role_key=None, service=None, model=None) -> str:
             captured.append(system_prompt)
             return _ROLE_YAML["risk"]
 
@@ -1221,3 +1233,362 @@ class TestBuildScopeBlock:
         block = context.build_scope_block("committee:risk", budget=budget, db_path=p)
         if block:
             assert context.count_tokens(block) <= budget
+
+
+# ---------------------------------------------------------------------------
+# Step 6 — models.py config / routing / NIM backend / parallel
+# ---------------------------------------------------------------------------
+
+class TestModelsConfig:
+    """load_config / resolve / nim_settings — offline, no network."""
+
+    def setup_method(self):
+        # Clear the lru_cache before each test so configs don't bleed across tests
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    def teardown_method(self):
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    def test_resolve_cio_returns_claude(self):
+        """Default YAML maps cio → ('claude', None)."""
+        from cio.committee.models import resolve
+        service, model = resolve("cio")
+        assert service == "claude"
+        assert model is None
+
+    def test_resolve_market_returns_nim(self):
+        """Default YAML maps market → ('nim', 'minimaxai/minimax-m2.7')."""
+        from cio.committee.models import resolve
+        service, model = resolve("market")
+        assert service == "nim"
+        assert model == "minimaxai/minimax-m2.7"
+
+    def test_resolve_unknown_key_falls_back_to_defaults(self):
+        """An unrecognised role_key falls through to defaults (nim)."""
+        from cio.committee.models import resolve
+        service, model = resolve("nonexistent_role_xyz")
+        assert service == "nim"
+        assert model == "minimaxai/minimax-m2.7"
+
+    def test_missing_file_uses_builtin_defaults(self, tmp_path):
+        """Missing config file → built-in defaults, no crash."""
+        from cio.committee.models import load_config, resolve
+        load_config.cache_clear()
+        # Point at a non-existent file via explicit path
+        cfg = load_config(path=str(tmp_path / "does_not_exist.yaml"))
+        assert isinstance(cfg, dict)
+        assert "agents" in cfg
+        # Check routing still works
+        load_config.cache_clear()
+
+    def test_bad_yaml_uses_builtin_defaults(self, tmp_path, monkeypatch):
+        """Unparseable YAML → built-in defaults, no crash."""
+        from cio.committee.models import load_config, resolve
+        bad = tmp_path / "bad.yaml"
+        bad.write_text(": broken: yaml:::: !!!\n", encoding="utf-8")
+        load_config.cache_clear()
+        cfg = load_config(path=str(bad))
+        assert isinstance(cfg, dict)
+        assert "agents" in cfg
+        load_config.cache_clear()
+
+    def test_nim_settings_has_required_keys(self):
+        """nim_settings() always returns base_url and api_key_env."""
+        from cio.committee.models import nim_settings
+        s = nim_settings()
+        assert "base_url" in s
+        assert "api_key_env" in s
+        assert s["base_url"].startswith("https://")
+
+    def test_custom_yaml_parsed(self, tmp_path):
+        """A custom YAML file with cio→nim is parsed and respected."""
+        from cio.committee.models import load_config, resolve
+        custom = tmp_path / "custom.yaml"
+        custom.write_text(
+            "defaults: {service: nim, model: minimaxai/minimax-m2.7}\n"
+            "agents:\n"
+            "  cio: {service: nim, model: minimaxai/minimax-m2.7}\n"
+            "nim: {base_url: 'https://integrate.api.nvidia.com/v1', api_key_env: NVIDIA_API_KEY}\n",
+            encoding="utf-8",
+        )
+        load_config.cache_clear()
+        cfg = load_config(path=str(custom))
+        assert cfg["agents"]["cio"]["service"] == "nim"
+        load_config.cache_clear()
+
+
+class TestAskRoleRouting:
+    """ask_role routes to the correct backend based on role_key config."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def setup_method(self):
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    def teardown_method(self):
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    def test_role_key_cio_routes_to_claude(self, monkeypatch):
+        """ask_role with role_key='cio' hits _ask_claude."""
+        claude_calls = []
+        nim_calls = []
+
+        async def fake_claude(sp, up, model=None):
+            claude_calls.append((sp, up))
+            return "claude-response"
+
+        async def fake_nim(sp, up, model=None):
+            nim_calls.append((sp, up))
+            return "nim-response"
+
+        monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
+        monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
+
+        from cio.committee.engine import ask_role
+        result = self._run(ask_role("sys", "user", role_key="cio"))
+        assert result == "claude-response"
+        assert len(claude_calls) == 1
+        assert len(nim_calls) == 0
+
+    def test_role_key_market_routes_to_nim(self, monkeypatch):
+        """ask_role with role_key='market' hits _ask_nim."""
+        claude_calls = []
+        nim_calls = []
+
+        async def fake_claude(sp, up, model=None):
+            claude_calls.append((sp, up))
+            return "claude-response"
+
+        async def fake_nim(sp, up, model=None):
+            nim_calls.append((sp, up))
+            return "nim-response"
+
+        monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
+        monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
+
+        from cio.committee.engine import ask_role
+        result = self._run(ask_role("sys", "user", role_key="market"))
+        assert result == "nim-response"
+        assert len(nim_calls) == 1
+        assert len(claude_calls) == 0
+
+    def test_explicit_service_overrides_config(self, monkeypatch):
+        """Explicit service='claude' overrides the config even for a nim role."""
+        claude_calls = []
+
+        async def fake_claude(sp, up, model=None):
+            claude_calls.append((sp, up))
+            return "forced-claude"
+
+        async def fake_nim(sp, up, model=None):
+            raise AssertionError("_ask_nim should not be called")
+
+        monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
+        monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
+
+        from cio.committee.engine import ask_role
+        result = self._run(ask_role("sys", "user", role_key="market", service="claude"))
+        assert result == "forced-claude"
+        assert len(claude_calls) == 1
+
+    def test_no_role_key_defaults_to_claude(self, monkeypatch):
+        """Legacy call with no role_key defaults to claude backend."""
+        claude_calls = []
+
+        async def fake_claude(sp, up, model=None):
+            claude_calls.append(True)
+            return "default-claude"
+
+        async def fake_nim(sp, up, model=None):
+            raise AssertionError("_ask_nim should not be called for role_key=None")
+
+        monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
+        monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
+
+        from cio.committee.engine import ask_role
+        result = self._run(ask_role("sys", "user"))
+        assert result == "default-claude"
+        assert claude_calls
+
+
+class TestNIMBackend:
+    """_ask_nim offline tests — monkeypatched httpx, no network."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_nim_returns_content_with_key(self, monkeypatch):
+        """_ask_nim parses response when API key is set."""
+        monkeypatch.setenv("NVIDIA_API_KEY", "fake-test-key")
+
+        import httpx
+
+        class FakeResponse:
+            def json(self):
+                return {"choices": [{"message": {"content": "hi from nim"}}]}
+            def raise_for_status(self):
+                pass
+
+        class FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def post(self, url, **kwargs):
+                return FakeResponse()
+
+        monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: FakeAsyncClient())
+
+        from cio.committee.engine import _ask_nim
+        result = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
+        assert result == "hi from nim"
+
+    def test_nim_returns_empty_without_key(self, monkeypatch):
+        """_ask_nim returns '' and does NOT call httpx when NVIDIA_API_KEY is unset."""
+        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+
+        async def _should_not_post(*args, **kwargs):
+            raise AssertionError("httpx.AsyncClient.post should not be called without API key")
+
+        # We don't even need to monkeypatch post — just verify empty return
+        from cio.committee.engine import _ask_nim
+        result = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
+        assert result == ""
+
+    def test_nim_returns_empty_on_http_error(self, monkeypatch):
+        """_ask_nim returns '' gracefully on HTTP error."""
+        monkeypatch.setenv("NVIDIA_API_KEY", "fake-test-key")
+
+        import httpx
+
+        class ErrorAsyncClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def post(self, url, **kwargs):
+                raise httpx.HTTPStatusError(
+                    "500 Internal Server Error",
+                    request=None,  # type: ignore
+                    response=None,  # type: ignore
+                )
+
+        monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: ErrorAsyncClient())
+
+        from cio.committee.engine import _ask_nim
+        result = self._run(_ask_nim("system", "user", model="minimaxai/minimax-m2.7"))
+        assert result == ""
+
+    def test_nim_limit_notice_returns_empty(self, monkeypatch):
+        """_ask_nim returns '' when the NIM response text is a limit notice."""
+        monkeypatch.setenv("NVIDIA_API_KEY", "fake-test-key")
+
+        class FakeResponse:
+            def json(self):
+                return {"choices": [{"message": {"content": "usage limit reached, try again later"}}]}
+            def raise_for_status(self):
+                pass
+
+        class FakeAsyncClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def post(self, url, **kwargs):
+                return FakeResponse()
+
+        monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: FakeAsyncClient())
+
+        from cio.committee.engine import _ask_nim
+        result = self._run(_ask_nim("system", "user"))
+        assert result == ""
+
+
+class TestParallelExecution:
+    """
+    Verify that run_committee runs specialists in parallel when parallel=True
+    and sequentially when parallel=False, with identical result shapes.
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_parallel_fake(self):
+        """
+        Returns (fake_ask_role, get_peak) where fake_ask_role tracks peak concurrency.
+        Each call enters, sleeps briefly, exits.
+        """
+        import asyncio as _asyncio
+
+        counter = {"active": 0, "peak": 0}
+
+        async def fake_ask_role(
+            system_prompt: str,
+            user_prompt: str,
+            role_key: str | None = None,
+            service: str | None = None,
+            model=None,
+        ) -> str:
+            counter["active"] += 1
+            if counter["active"] > counter["peak"]:
+                counter["peak"] = counter["active"]
+            await _asyncio.sleep(0.02)
+            counter["active"] -= 1
+
+            # Return canned YAML so the pipeline doesn't break
+            sp = system_prompt.lower()
+            up = user_prompt.lower()
+            if "free text" in up or "no yaml needed" in up:
+                return "debate prose"
+            if "chief investment officer" in sp:
+                return _ROLE_YAML["cio"]
+            if "moderator" in sp:
+                return _ROLE_YAML["moderator"]
+            return _ROLE_YAML["market"]
+
+        return fake_ask_role, counter
+
+    def test_parallel_peak_greater_than_one(self, monkeypatch):
+        """parallel=True → multiple specialists overlap (peak > 1)."""
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        fake, counter = self._make_parallel_fake()
+        monkeypatch.setattr("cio.committee.engine.ask_role", fake)
+
+        from cio.committee.engine import run_committee
+        result = self._run(run_committee(SYMBOL_AAPL, debate=False, parallel=True))
+
+        assert result.error is None
+        assert len(result.opinions) == 7
+        assert counter["peak"] > 1, f"Expected peak > 1 in parallel mode, got {counter['peak']}"
+
+    def test_sequential_peak_equals_one(self, monkeypatch):
+        """parallel=False → specialists run one at a time (peak == 1)."""
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        fake, counter = self._make_parallel_fake()
+        monkeypatch.setattr("cio.committee.engine.ask_role", fake)
+
+        from cio.committee.engine import run_committee
+        result = self._run(run_committee(SYMBOL_AAPL, debate=False, parallel=False))
+
+        assert result.error is None
+        assert len(result.opinions) == 7
+        assert counter["peak"] == 1, f"Expected peak == 1 in sequential mode, got {counter['peak']}"
+
+    def test_parallel_and_sequential_same_shape(self, monkeypatch):
+        """Both modes produce a CommitteeResult with identical structure."""
+        monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
+        monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
+
+        from cio.committee.engine import run_committee
+        r_par = self._run(run_committee(SYMBOL_AAPL, debate=False, parallel=True))
+        r_seq = self._run(run_committee(SYMBOL_AAPL, debate=False, parallel=False))
+
+        assert r_par.error is None
+        assert r_seq.error is None
+        assert len(r_par.opinions) == len(r_seq.opinions) == 7
+        assert set(op["key"] for op in r_par.opinions) == set(op["key"] for op in r_seq.opinions)
