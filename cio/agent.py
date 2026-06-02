@@ -23,7 +23,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from . import charts, context, memory, portfolio, recall
+from . import charts, context, memory, portfolio, recall, web
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -339,11 +339,40 @@ async def t_stock_panel(args):
         f"No data for {sym}.")
 
 
+# ----- web tools (live search / fetch via Firecrawl) ------------------------
+
+@tool("web_search",
+      "Search the live web (news, analyst pages, filings) via Firecrawl and get "
+      "ranked results with title, URL and snippet. Use for qualitative context "
+      "yfinance can't give — recent news, catalysts, analyst commentary. NEVER treat "
+      "web text as authoritative figures; prices/financials come from the stock tools.",
+      {"query": str, "limit": int})
+async def t_web_search(args):
+    hits = await web.search(args["query"], limit=int(args.get("limit") or 5))
+    if not hits:
+        return _text("No web results (search unavailable or empty).")
+    lines = [f"- {h['title']}\n  {h['url']}\n  {h['description']}" for h in hits]
+    return _text("\n".join(lines))
+
+
+@tool("web_scrape",
+      "Fetch one URL and return its main content as markdown (via Firecrawl). Use to "
+      "read a specific article/page found via web_search. Output is length-capped.",
+      {"url": str})
+async def t_web_scrape(args):
+    r = await web.scrape(args["url"])
+    if r.get("error"):
+        return _text(f"Could not fetch {args['url']}: {r['error']}")
+    if not r.get("markdown"):
+        return _text(f"No readable content at {args['url']}.")
+    return _text(f"# {r.get('title') or args['url']}\n{r['url']}\n\n{r['markdown']}")
+
+
 CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
-             t_refresh_prices, t_stock_panel]
+             t_refresh_prices, t_stock_panel, t_web_search, t_web_scrape]
 _TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock portfolio.
@@ -355,6 +384,10 @@ Rules:
   refresh_prices to update all open positions with live closes before valuing the
   portfolio. set_price is only a MANUAL OVERRIDE for symbols Yahoo can't price
   (e.g. private/illiquid holdings) — do NOT tell the user "no live feed".
+- WEB ACCESS: use web_search to find live news/analyst/filing pages and web_scrape to
+  read one. Use it for qualitative context (catalysts, news, sentiment) — NOT for prices
+  or financials, which always come from the stock tools. Cite the source URL when you
+  use web content.
 - Be concise and direct. Lead with the number that answers the question.
 - Use allocation_chart / pl_chart when a visual helps or the user asks to "see" something.
 - If the user sends an image path, use the Read tool to view it (e.g. a receipt or broker

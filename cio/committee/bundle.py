@@ -160,7 +160,8 @@ def format_bundle(bundle: dict) -> str:
 
     f = bundle.get("fundamentals") or {}
     lines.append(
-        f"PE: {_fmt(f.get('pe'))}  PB: {_fmt(f.get('pb'))}  "
+        f"PE: {_fmt(f.get('pe'))}  FWD_PE: {_fmt(f.get('forward_pe'))}  "
+        f"PB: {_fmt(f.get('pb'))}  "
         f"YIELD: {_fmt(f.get('yield_pct'), '%')}  EPS: {_fmt(f.get('eps'))}"
     )
     lines.append(

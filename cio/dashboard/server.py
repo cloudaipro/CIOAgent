@@ -9,6 +9,7 @@ Routes:
   /                     overview
   /usage                token usage per service per day
   /telegram             Telegram conversation history
+  /memory               per-agent / per-chat memory contents (debug)
   /committee            list committee runs
   /committee/<run_id>   full sent/returned transcript for one run
 """
@@ -19,8 +20,8 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from cio import devcapture, memory
-from cio.committee import transcript, usage
+from cio import db, devcapture, memory
+from cio.committee import agent_memory, transcript, usage
 from . import views
 
 log = logging.getLogger("cio.dashboard")
@@ -58,6 +59,25 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter than default stderr spew
         log.debug("%s - %s", self.address_string(), fmt % args)
 
+    @staticmethod
+    def _memory_sections() -> list:
+        """Gather memory contents from both stores for the memory tab.
+
+        Portfolio/conversation memory lives in db.DB_PATH; committee agents keep
+        their own isolated notes in agent_memory.DB_PATH.
+        """
+        sections = []
+        for label, dbp in (
+            ("Conversation / portfolio (chat:* · global)", db.DB_PATH),
+            ("Committee agents (committee:<role>)", agent_memory.DB_PATH),
+        ):
+            scopes = []
+            for s in memory.list_scopes(db_path=dbp):
+                notes = memory.list_notes(s["scope"], limit=200, db_path=dbp)
+                scopes.append({"scope": s["scope"], "count": s["count"], "notes": notes})
+            sections.append({"label": label, "scopes": scopes})
+        return sections
+
     # ---- routing -----------------------------------------------------------
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -80,6 +100,8 @@ class _Handler(BaseHTTPRequestHandler):
                 html = views.render_usage(usage.recent(days=30), level)
             elif path == "/telegram":
                 html = views.render_telegram(memory.conv_history(limit=200), level)
+            elif path == "/memory":
+                html = views.render_memory(self._memory_sections(), level)
             elif path == "/committee":
                 html = views.render_committee_list(transcript.list_runs(100), level)
             elif path.startswith("/committee/"):

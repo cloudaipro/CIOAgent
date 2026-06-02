@@ -138,18 +138,18 @@ def test_related_links_us():
 
 
 # ---------------------------------------------------------------------------
-# 5. stock_panel in CIO_TOOLS; count == 20
+# 5. stock_panel in CIO_TOOLS; count == 22
 # ---------------------------------------------------------------------------
 
 def test_stock_panel_in_cio_tools():
-    """'stock_panel' must be in CIO_TOOLS and the total count must be 20."""
+    """'stock_panel' must be in CIO_TOOLS and the total count must be 22."""
     import cio.agent as agent_mod
     tool_names = [t.name for t in agent_mod.CIO_TOOLS]
     assert "stock_panel" in tool_names, (
         f"'stock_panel' not found in CIO_TOOLS. Current tools: {tool_names}"
     )
-    assert len(agent_mod.CIO_TOOLS) == 20, (
-        f"Expected 20 tools in CIO_TOOLS, got {len(agent_mod.CIO_TOOLS)}: {tool_names}"
+    assert len(agent_mod.CIO_TOOLS) == 22, (
+        f"Expected 22 tools in CIO_TOOLS, got {len(agent_mod.CIO_TOOLS)}: {tool_names}"
     )
 
 

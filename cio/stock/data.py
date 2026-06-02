@@ -198,7 +198,7 @@ def normalize_symbol(symbol: str) -> str:
 
 
 _FUNDAMENTALS_FIELDS = (
-    "name", "pe", "pb", "yield_pct", "eps", "roe_pct", "margin_pct",
+    "name", "pe", "forward_pe", "pb", "yield_pct", "eps", "roe_pct", "margin_pct",
     "market_cap", "wk52_high", "wk52_low", "short_ratio", "shares_short",
     "revenue_q", "quoteType",
 )
@@ -230,6 +230,7 @@ def fundamentals(symbol: str) -> dict:
 
         result["name"] = _get("longName")
         result["pe"] = _get("trailingPE")
+        result["forward_pe"] = _get("forwardPE")   # forward P/E (next-12m est earnings)
         result["pb"] = _get("priceToBook")
         result["yield_pct"] = _get("dividendYield")     # already a percent
         result["eps"] = _get("trailingEps")

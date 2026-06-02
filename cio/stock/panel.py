@@ -166,6 +166,7 @@ def _render_fundamentals(ax, fund: dict):
     ax.set_axis_off()
     metrics = [
         ("P/E", fund.get("pe"), ".1f"),
+        ("預估P/E", fund.get("forward_pe"), ".1f"),   # forward P/E
         ("P/B", fund.get("pb"), ".2f"),
         ("殖利率", fund.get("yield_pct"), ".2f%"),
         ("EPS", fund.get("eps"), ".2f"),
@@ -270,7 +271,7 @@ def render_panel(symbol: str, out_dir=None) -> str:
     # Rows: header, price-title, price, fund-title, fund, rev-title, rev.
     gs = gridspec.GridSpec(
         nrows=7, ncols=1, figure=fig,
-        height_ratios=[0.7, 0.32, 3.0, 0.32, 1.5, 0.32, 2.0],
+        height_ratios=[0.7, 0.32, 3.0, 0.32, 2.0, 0.32, 2.0],
         hspace=0.18,
         top=0.97, bottom=0.07, left=0.08, right=0.96,
     )

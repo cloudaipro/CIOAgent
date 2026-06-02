@@ -59,6 +59,7 @@ def _page(title: str, body: str, level: int) -> str:
         "<header>"
         "<a href='/'>Overview</a><a href='/usage'>Token usage</a>"
         "<a href='/telegram'>Telegram</a><a href='/committee'>Committee</a>"
+        "<a href='/memory'>Memory</a>"
         f"<span class='lvl'>capture level {esc(level)}</span>"
         "</header><main>" + body + "</main></body></html>"
     )
@@ -138,6 +139,43 @@ def render_committee_list(runs, level: int, token_q: str = "") -> str:
         f"<table><tr><th>Run</th><th>Symbol</th><th>Started</th><th>Calls</th><th>Tokens</th></tr>{rows}</table>"
     )
     return _page("Committee", body, level)
+
+
+def render_memory(sections, level: int) -> str:
+    """Per-agent / per-chat memory contents, for debugging.
+
+    *sections* is a list of ``{"label": str, "scopes": [{"scope", "count", "notes"}]}``
+    where each note is a mem_notes row dict. One <details> per scope; HOT notes
+    (injected into prompts) flagged so you can see what each agent 'knows'.
+    """
+    blocks: list[str] = []
+    for sec in sections:
+        scopes = sec.get("scopes") or []
+        blocks.append(f"<h2>{esc(sec.get('label'))}</h2>")
+        if not scopes:
+            blocks.append("<p class='empty'>no memory in this store.</p>")
+            continue
+        for sc in scopes:
+            notes = sc.get("notes") or []
+            note_rows = "".join(
+                f"<tr><td>{esc(n.get('tier'))}</td>"
+                f"<td>{esc(n.get('key'))}</td>"
+                f"<td class='msg'>{esc(n.get('value'))}</td>"
+                f"<td class='num'>{esc(n.get('hits'))}</td>"
+                f"<td class='num'>{esc(n.get('importance'))}</td>"
+                f"<td>{esc(n.get('source'))}</td>"
+                f"<td>{esc_ts(n.get('updated_at'))}</td></tr>"
+                for n in notes
+            ) or "<tr><td class='empty' colspan='7'>no notes</td></tr>"
+            blocks.append(
+                f"<details><summary>{esc(sc.get('scope'))} "
+                f"· {esc(sc.get('count'))} note(s)</summary>"
+                "<table><tr><th>Tier</th><th>Key</th><th>Value</th><th>Hits</th>"
+                "<th>Imp</th><th>Source</th><th>Updated</th></tr>"
+                f"{note_rows}</table></details>"
+            )
+    body = "<h1>Agent memory contents</h1>" + "".join(blocks)
+    return _page("Memory", body, level)
 
 
 def render_committee_run(run_id: str, calls, level: int) -> str:

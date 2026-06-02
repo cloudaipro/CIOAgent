@@ -141,6 +141,24 @@ def list_notes(scope: str = "global", tier: str | None = None, limit: int = 50,
     return [dict(r) for r in rows]
 
 
+def list_scopes(db_path=db.DB_PATH) -> list[dict]:
+    """All scopes present in this db with their note count, busiest first.
+
+    Used by the dev dashboard's memory tab to enumerate per-agent / per-chat
+    memory namespaces. Returns [] if the table is empty or unreadable.
+    """
+    try:
+        conn = db.connect(db_path)
+        rows = conn.execute(
+            "SELECT scope, COUNT(*) AS n FROM mem_notes GROUP BY scope "
+            "ORDER BY n DESC, scope ASC"
+        ).fetchall()
+        conn.close()
+        return [{"scope": r["scope"], "count": r["n"]} for r in rows]
+    except Exception:
+        return []
+
+
 def count_notes(scope: str | None = None, db_path=db.DB_PATH) -> int:
     conn = db.connect(db_path)
     if scope:

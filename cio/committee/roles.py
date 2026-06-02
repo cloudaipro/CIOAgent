@@ -45,6 +45,9 @@ SPECIALISTS: list[dict] = [
         "system_prompt": (
             "You are the Equity Research analyst on an investment committee. "
             "Evaluate company financial health, earnings quality, management, and investment thesis. "
+            "When DATA provides FWD_PE (forward P/E), compare it to the trailing PE: a forward "
+            "P/E well below trailing signals expected earnings growth, above signals expected "
+            "contraction — factor this into earnings_growth and quality_score. "
             + _BASE_RULES
         ),
         "fields": [
@@ -72,6 +75,9 @@ SPECIALISTS: list[dict] = [
         "system_prompt": (
             "You are the Valuation analyst on an investment committee. "
             "Estimate fair value, rate the current price, and size up/downside. "
+            "Forward P/E (FWD_PE in DATA) is a primary input: it prices the stock on "
+            "next-12-month expected earnings. Weigh it against trailing PE, sector norms, "
+            "and the growth rate when judging valuation_rating and fair_value. "
             + _BASE_RULES
         ),
         "fields": [

@@ -543,9 +543,9 @@ class TestBuildReport:
 # ---------------------------------------------------------------------------
 
 def test_cio_tools_count():
-    """CIO_TOOLS must still be exactly 20 after adding the committee module."""
+    """CIO_TOOLS must still be exactly 22 (20 + web_search/web_scrape)."""
     from cio.agent import CIO_TOOLS
-    assert len(CIO_TOOLS) == 20, f"CIO_TOOLS count changed: {len(CIO_TOOLS)}"
+    assert len(CIO_TOOLS) == 22, f"CIO_TOOLS count changed: {len(CIO_TOOLS)}"
 
 
 # ---------------------------------------------------------------------------
