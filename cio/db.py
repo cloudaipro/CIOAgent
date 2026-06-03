@@ -38,6 +38,27 @@ CREATE TABLE IF NOT EXISTS prices (
 
 CREATE INDEX IF NOT EXISTS idx_txn_symbol ON transactions(symbol);
 
+-- Watchlists: the operator keeps several named lists of symbols to track, but
+-- exactly one is "active" (drives the Telegram /watchlist price snapshot). The
+-- single-active invariant is enforced in watchlist.set_active() (clears the flag
+-- on every other row in the same transaction), not by a DB constraint, since
+-- SQLite can't express "at most one row with is_active=1". Every list carries at
+-- least one NASDAQ index (^IXIC), seeded on create — see cio/watchlist.py.
+CREATE TABLE IF NOT EXISTS watchlists (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    NOT NULL UNIQUE,
+    is_active  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS watchlist_items (
+    watchlist_id INTEGER NOT NULL REFERENCES watchlists(id) ON DELETE CASCADE,
+    symbol       TEXT    NOT NULL,                 -- stored upper-cased
+    position     INTEGER NOT NULL DEFAULT 0,       -- display order (drag-to-rearrange)
+    added_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (watchlist_id, symbol)             -- re-adding a symbol is a no-op
+);
+
 -- Idempotency ledger for CSV imports. A redelivered Telegram upload (e.g. the
 -- process died mid-turn before acking, so Telegram replays the message) has
 -- identical bytes -> identical hash -> skipped, preventing duplicate rows from
@@ -208,6 +229,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_migrated_v2','1')")
 
 
+def _migrate_watchlist_position(conn: sqlite3.Connection) -> None:
+    """Add watchlist_items.position to a pre-existing table (the column was added
+    after the watchlist feature first shipped). CREATE TABLE IF NOT EXISTS won't
+    alter an existing table, so back-fill it here. Idempotent: skipped once the
+    column is present. New rows default to 0; watchlist._symbols() falls back to
+    symbol order, so an un-reordered legacy list still renders sensibly."""
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(watchlist_items)")]
+    if cols and "position" not in cols:
+        with conn:
+            conn.execute(
+                "ALTER TABLE watchlist_items ADD COLUMN position INTEGER NOT NULL DEFAULT 0"
+            )
+
+
 def _drop_stale_vec(conn: sqlite3.Connection) -> bool:
     """If the stored embedding dim differs from EMBED_DIM, drop the vec0 tables so
     the schema recreates them at the new dim. Returns True if dropped (needs
@@ -237,6 +272,7 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     dropped = _drop_stale_vec(conn)
     conn.executescript(SCHEMA)
     _migrate(conn)
+    _migrate_watchlist_position(conn)
     with conn:
         conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('embed_dim',?)",
                      (str(EMBED_DIM),))

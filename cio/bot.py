@@ -25,7 +25,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import memory, recall, scheduler
+from . import charts, memory, recall, scheduler, watchlist
 from .agent import CIOAgent
 
 load_dotenv()
@@ -205,6 +205,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• Set a price: \"set AAPL 230\"\n"
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
         "• Send a broker screenshot or receipt photo and I'll read it\n"
+        "• /watchlist — latest prices for your active watchlist\n"
         "• /subscribe for a daily portfolio digest (/unsubscribe to stop)\n"
         "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)\n"
         "• /stop — cancel whatever I'm currently working on for you"
@@ -219,6 +220,34 @@ async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     memory.set_subscribed(update.effective_chat.id, False)
     await update.message.reply_text("🔕 Unsubscribed from the daily digest.")
+
+
+async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Latest prices for the active watchlist. Deterministic (no model tokens).
+
+    Manage the lists themselves in the dashboard; this just snapshots prices.
+    The price fetch is network-bound and synchronous, so it runs in a thread to
+    keep the event loop responsive."""
+    chat_id = update.effective_chat.id
+    log.info("/watchlist from chat %s", chat_id)
+    await update.effective_chat.send_action(ChatAction.TYPING)
+    snap = await asyncio.to_thread(watchlist.prices)
+    if snap["id"] is None:
+        await update.message.reply_text(watchlist.format_prices(snap))
+        return
+    # Render the quote-board image (broker-style table). Fall back to the plain
+    # text layout if rendering fails for any reason — the user still gets prices.
+    try:
+        path = await asyncio.to_thread(charts.watchlist_table, snap,
+                                       watchlist.NASDAQ_INDEX)
+    except Exception:
+        log.exception("watchlist table render failed")
+        path = None
+    if path:
+        with open(path, "rb") as f:
+            await update.message.reply_photo(f, caption=f"📋 {snap['watchlist']}")
+    else:
+        await update.message.reply_text(watchlist.format_prices(snap))
 
 
 async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -438,6 +467,7 @@ def main() -> None:
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+    app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     app.add_handler(CommandHandler("stop", cmd_stop))
     # Long handlers run block=False so the dispatcher keeps reading updates while
     # one is in flight — that is what lets a /stop arrive and cancel it.

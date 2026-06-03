@@ -48,6 +48,28 @@ pre { white-space: pre-wrap; word-break: break-word; background: #0d1117;
       max-height: 420px; overflow: auto; }
 .sent { border-left: 3px solid #1f6feb; } .ret { border-left: 3px solid #7ee787; }
 .empty { color: #8b949e; font-style: italic; }
+input,textarea,button,select { font: inherit; background: #0d1117; color: #e6edf3;
+       border: 1px solid #30363d; border-radius: 6px; padding: 5px 8px; }
+button { cursor: pointer; background: #21262d; }
+button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+button.danger { color: #f85149; }
+form.inline { display: inline; margin: 0; }
+textarea { width: 100%; min-height: 90px; }
+.badge { background: #1f6feb; color: #fff; border-radius: 10px; padding: 1px 8px;
+         font-size: 12px; }
+.flash { background: #1b2a16; border: 1px solid #2ea043; border-radius: 6px;
+         padding: 8px 12px; margin: 0 0 16px; color: #7ee787; }
+.flash.err { background: #2a1616; border-color: #f85149; color: #f85149; }
+.card { border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin: 12px 0;
+        background: #161b22; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+ul.symlist { list-style: none; margin: 8px 0; padding: 0; }
+ul.symlist li { display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+        border: 1px solid #21262d; border-radius: 6px; margin: 4px 0;
+        background: #0d1117; cursor: grab; }
+ul.symlist li.drag { opacity: .4; } ul.symlist li.over { border-color: #1f6feb; }
+ul.symlist .grip { color: #8b949e; cursor: grab; user-select: none; }
+ul.symlist .sym { flex: 1; font-variant-numeric: tabular-nums; }
 """
 
 
@@ -59,7 +81,7 @@ def _page(title: str, body: str, level: int) -> str:
         "<header>"
         "<a href='/'>Overview</a><a href='/usage'>Token usage</a>"
         "<a href='/telegram'>Telegram</a><a href='/committee'>Committee</a>"
-        "<a href='/memory'>Memory</a>"
+        "<a href='/watchlist'>Watchlist</a><a href='/memory'>Memory</a>"
         f"<span class='lvl'>capture level {esc(level)}</span>"
         "</header><main>" + body + "</main></body></html>"
     )
@@ -176,6 +198,167 @@ def render_memory(sections, level: int) -> str:
             )
     body = "<h1>Agent memory contents</h1>" + "".join(blocks)
     return _page("Memory", body, level)
+
+
+# Minimal vanilla drag-to-reorder for the symbol list. The dashboard is otherwise
+# no-JS; this is the one script, self-contained and scoped to #symlist. On drop it
+# writes the new symbol order into the reorder form's hidden field and submits
+# (PRG redirect re-renders). Without JS the list is still readable and every other
+# action keeps working — only dragging is inert.
+_REORDER_JS = """<script>
+(function(){
+  var list=document.getElementById('symlist'),
+      form=document.getElementById('orderform'),
+      inp=document.getElementById('order_input');
+  if(!list||!form||!inp) return;
+  var drag=null;
+  function order(){return Array.prototype.map.call(list.children,
+      function(li){return li.getAttribute('data-sym');}).join(',');}
+  Array.prototype.forEach.call(list.children,function(li){
+    li.addEventListener('dragstart',function(){drag=li;li.classList.add('drag');});
+    li.addEventListener('dragend',function(){li.classList.remove('drag');});
+    li.addEventListener('dragover',function(e){
+      e.preventDefault();
+      if(!drag||drag===li) return;
+      var r=li.getBoundingClientRect(),
+          after=(e.clientY-r.top)/r.height>0.5;
+      list.insertBefore(drag, after?li.nextSibling:li);
+    });
+    li.addEventListener('drop',function(e){e.preventDefault();inp.value=order();form.submit();});
+  });
+  form.addEventListener('submit',function(){inp.value=order();});
+})();
+</script>"""
+
+
+def _hidden(wl_id, action: str) -> str:
+    """Hidden form fields shared by every watchlist mutation form."""
+    return (f"<input type='hidden' name='action' value='{esc(action)}'>"
+            f"<input type='hidden' name='wl_id' value='{esc(wl_id)}'>")
+
+
+def render_watchlist(watchlists, selected, level: int,
+                     search_q: str = "", flash: str = "", flash_err: bool = False,
+                     nasdaq_index: str = "^IXIC") -> str:
+    """Watchlist manager: create / activate / rename / delete lists, manage their
+    symbols, search, and import a CSV. Server-rendered forms POST to /watchlist;
+    no JS. *watchlists* is the list_watchlists() result; *selected* is one
+    watchlist dict (id,name,is_active,symbols) or None.
+
+    Prices are NOT shown here — they're the Telegram /watchlist feature. This page
+    only manages list membership, so it stays fast (no per-symbol network fetch).
+    """
+    flash_html = (f"<p class='flash{' err' if flash_err else ''}'>{esc(flash)}</p>"
+                  if flash else "")
+
+    # --- create + search bar ---
+    create_form = (
+        "<form method='post' action='/watchlist' class='row'>"
+        "<input type='hidden' name='action' value='create'>"
+        "<input name='name' placeholder='New watchlist name' required>"
+        "<button class='primary' type='submit'>Create</button></form>"
+    )
+    search_form = (
+        "<form method='get' action='/watchlist' class='row'>"
+        f"<input name='q' value='{esc(search_q)}' placeholder='Search name or symbol'>"
+        "<button type='submit'>Search</button>"
+        + ("<a href='/watchlist'>clear</a>" if search_q else "")
+        + "</form>"
+    )
+
+    # --- watchlist table ---
+    rows = []
+    for w in watchlists:
+        active_badge = " <span class='badge'>active</span>" if w["is_active"] else ""
+        matched = w.get("matched")
+        match_note = (f"<br><span class='empty'>matched: {esc(', '.join(matched))}</span>"
+                      if search_q and matched else "")
+        activate = "" if w["is_active"] else (
+            "<form method='post' action='/watchlist' class='inline'>"
+            f"{_hidden(w['id'], 'activate')}"
+            "<button type='submit'>Activate</button></form>")
+        delete = (
+            "<form method='post' action='/watchlist' class='inline' "
+            "onsubmit=\"return confirm('Delete this watchlist?')\">"
+            f"{_hidden(w['id'], 'delete')}"
+            "<button class='danger' type='submit'>Delete</button></form>")
+        rows.append(
+            f"<tr><td><a href='/watchlist?wl={esc(w['id'])}'>{esc(w['name'])}</a>"
+            f"{active_badge}{match_note}</td>"
+            f"<td class='num'>{esc(w['count'])}</td>"
+            f"<td class='row'>{activate} {delete}</td></tr>"
+        )
+    table_rows = "".join(rows) or (
+        "<tr><td class='empty' colspan='3'>no watchlists"
+        f"{' match your search' if search_q else ' yet — create one above'}</td></tr>")
+    list_table = (
+        "<table><tr><th>Name</th><th>Symbols</th><th>Actions</th></tr>"
+        f"{table_rows}</table>")
+
+    # --- selected watchlist detail ---
+    detail = ""
+    if selected is not None:
+        items = []
+        for s in selected["symbols"]:
+            is_idx = s == nasdaq_index
+            rm = ("<span class='empty'>required index</span>" if is_idx else
+                  "<form method='post' action='/watchlist' class='inline'>"
+                  f"{_hidden(selected['id'], 'remove_symbol')}"
+                  f"<input type='hidden' name='symbol' value='{esc(s)}'>"
+                  "<button class='danger' type='submit'>Remove</button></form>")
+            items.append(
+                f"<li draggable='true' data-sym='{esc(s)}'>"
+                f"<span class='grip' title='Drag to reorder'>&#x2630;</span>"
+                f"<span class='sym'>{esc(s)}</span>{rm}</li>")
+        if items:
+            # Draggable list + a separate order form (forms can't nest, so the
+            # per-row Remove forms live inside the <li> and the reorder form sits
+            # beside the list; JS writes the dragged order into it). No JS → the
+            # list still renders and Remove/Add still work; only drag is inert.
+            sym_table = (
+                "<p class='empty'>Drag rows to reorder · this order drives the "
+                "Telegram /watchlist output.</p>"
+                f"<ul id='symlist' class='symlist'>{''.join(items)}</ul>"
+                "<form id='orderform' method='post' action='/watchlist' class='inline'>"
+                f"{_hidden(selected['id'], 'reorder')}"
+                "<input type='hidden' id='order_input' name='order' value=''>"
+                "<button type='submit'>Save order</button></form>"
+                + _REORDER_JS)
+        else:
+            sym_table = "<p class='empty'>no symbols</p>"
+        rename_form = (
+            "<form method='post' action='/watchlist' class='row'>"
+            f"{_hidden(selected['id'], 'rename')}"
+            f"<input name='name' value='{esc(selected['name'])}' required>"
+            "<button type='submit'>Rename</button></form>")
+        add_form = (
+            "<form method='post' action='/watchlist' class='row'>"
+            f"{_hidden(selected['id'], 'add_symbol')}"
+            "<input name='symbol' placeholder='AAPL' required>"
+            "<button class='primary' type='submit'>Add symbol</button></form>")
+        import_form = (
+            "<form method='post' action='/watchlist'>"
+            f"{_hidden(selected['id'], 'import_csv')}"
+            "<textarea name='csv_text' placeholder='Paste CSV: a row of tickers "
+            "(e.g. \"AAPL\",\"MSFT\",\"NVDA\") or one symbol per line'></textarea>"
+            "<div class='row'><button class='primary' type='submit'>Import CSV</button>"
+            "<span class='empty'>existing symbols are skipped</span></div></form>")
+        active_note = (" <span class='badge'>active</span>" if selected["is_active"]
+                       else "")
+        detail = (
+            f"<div class='card'><h2>{esc(selected['name'])}{active_note}</h2>"
+            f"<h2>Symbols</h2>{sym_table}"
+            f"<h2>Add symbol</h2>{add_form}"
+            f"<h2>Import from CSV</h2>{import_form}"
+            f"<h2>Rename</h2>{rename_form}</div>")
+
+    body = (
+        "<h1>Watchlists</h1>" + flash_html
+        + f"<div class='card'><div class='row' style='justify-content:space-between'>"
+          f"{create_form}{search_form}</div></div>"
+        + list_table + detail
+    )
+    return _page("Watchlist", body, level)
 
 
 def render_committee_run(run_id: str, calls, level: int) -> str:

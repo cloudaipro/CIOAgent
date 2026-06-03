@@ -23,7 +23,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from . import charts, context, memory, portfolio, recall, web
+from . import charts, context, memory, portfolio, recall, watchlist, web
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -339,6 +339,19 @@ async def t_stock_panel(args):
         f"No data for {sym}.")
 
 
+@tool("watchlist_prices",
+      "Latest price, volume and OHLC for every symbol in the user's ACTIVE watchlist "
+      "(Yahoo Finance, cached). Use when the user asks about 'my watchlist' or 'the "
+      "stocks I'm watching'. The active list always includes the NASDAQ index ^IXIC "
+      "as a market benchmark. Watchlists are managed in the dashboard, not here.",
+      {})
+async def t_watchlist_prices(args):
+    snap = watchlist.prices()
+    if snap["id"] is None:
+        return _text("No active watchlist yet. The user can create one in the dashboard.")
+    return _text(json.dumps(snap, indent=2))
+
+
 # ----- web tools (live search / fetch via Firecrawl) ------------------------
 
 @tool("web_search",
@@ -372,7 +385,8 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
-             t_refresh_prices, t_stock_panel, t_web_search, t_web_scrape]
+             t_refresh_prices, t_stock_panel, t_watchlist_prices,
+             t_web_search, t_web_scrape]
 _TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock portfolio.

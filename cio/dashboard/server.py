@@ -12,15 +12,17 @@ Routes:
   /memory               per-agent / per-chat memory contents (debug)
   /committee            list committee runs
   /committee/<run_id>   full sent/returned transcript for one run
+  /watchlist            manage watchlists (the one write surface: GET renders,
+                        POST mutates create/activate/rename/delete/add/remove/import)
 """
 from __future__ import annotations
 
 import logging
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 
-from cio import db, devcapture, memory
+from cio import db, devcapture, memory, watchlist
 from cio.committee import agent_memory, transcript, usage
 from . import views
 
@@ -78,6 +80,24 @@ class _Handler(BaseHTTPRequestHandler):
             sections.append({"label": label, "scopes": scopes})
         return sections
 
+    def _watchlist_view(self, query: dict, level: int) -> str:
+        """Gather watchlist data for the GET render. ?q= searches; ?wl= selects a
+        list (else the active one is shown); ?msg=/?err= carry the post-redirect
+        flash."""
+        q = query.get("q", [""])[0].strip()
+        flash = query.get("msg", [""])[0]
+        flash_err = query.get("err", ["0"])[0] == "1"
+        wls = watchlist.search(q) if q else watchlist.list_watchlists()
+        selected = None
+        sel_id = query.get("wl", [None])[0]
+        if sel_id and sel_id.isdigit():
+            selected = watchlist.get(int(sel_id))
+        if selected is None and not q:
+            selected = watchlist.active()
+        return views.render_watchlist(
+            wls, selected, level, search_q=q, flash=flash, flash_err=flash_err,
+            nasdaq_index=watchlist.NASDAQ_INDEX)
+
     # ---- routing -----------------------------------------------------------
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -102,6 +122,8 @@ class _Handler(BaseHTTPRequestHandler):
                 html = views.render_telegram(memory.conv_history(limit=200), level)
             elif path == "/memory":
                 html = views.render_memory(self._memory_sections(), level)
+            elif path == "/watchlist":
+                html = self._watchlist_view(query, level)
             elif path == "/committee":
                 html = views.render_committee_list(transcript.list_runs(100), level)
             elif path.startswith("/committee/"):
@@ -117,6 +139,85 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         self._send(html, set_cookie=set_cookie)
+
+    def _redirect(self, location: str, set_cookie: str | None = None) -> None:
+        """303 See Other — Post/Redirect/Get so a browser refresh after a mutation
+        doesn't resubmit the form."""
+        self.send_response(303)
+        self.send_header("Location", location)
+        if set_cookie is not None:
+            self.send_header("Set-Cookie", set_cookie)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_POST(self) -> None:
+        """The dashboard's only write path: watchlist mutations. Each form posts an
+        `action` field; on success/failure we redirect back to /watchlist with a
+        flash message (PRG pattern). Same auth gate as GET."""
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        ok, set_cookie = self._authorized(parse_qs(parsed.query))
+        if not ok:
+            self._send("<h1>401</h1><p>token required</p>", status=401)
+            return
+        if path != "/watchlist":
+            self._send("<h1>404</h1>", status=404)
+            return
+
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        form = parse_qs(self.rfile.read(length).decode("utf-8")) if length else {}
+
+        def f(name: str) -> str:
+            return form.get(name, [""])[0].strip()
+
+        action = f("action")
+        wl_raw = f("wl_id")
+        wl_id = int(wl_raw) if wl_raw.isdigit() else None
+        sym = f("symbol").upper()
+        msg, err = "", False
+        try:
+            if action == "create":
+                wl_id = watchlist.create(f("name"))
+                msg = f"created {f('name')!r}"
+            elif action == "activate":
+                watchlist.set_active(wl_id)
+                msg = "activated"
+            elif action == "rename":
+                watchlist.rename(wl_id, f("name"))
+                msg = "renamed"
+            elif action == "delete":
+                watchlist.delete(wl_id)
+                wl_id, msg = None, "deleted"
+            elif action == "add_symbol":
+                added = watchlist.add_symbol(wl_id, sym)
+                msg = f"added {sym}" if added else f"{sym} already present"
+            elif action == "remove_symbol":
+                watchlist.remove_symbol(wl_id, sym)
+                msg = f"removed {sym}"
+            elif action == "import_csv":
+                n = watchlist.import_csv(wl_id, text=f("csv_text"))
+                msg = f"imported {n} new symbol(s)"
+            elif action == "reorder":
+                order = [s for s in f("order").split(",") if s]
+                watchlist.reorder(wl_id, order)
+                msg = "reordered"
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except watchlist.WatchlistError as exc:
+            msg, err = str(exc), True
+        except Exception as exc:  # never 500 the operator on a bad form
+            log.warning("watchlist POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {}
+        if wl_id is not None:
+            params["wl"] = wl_id
+        if msg:
+            params["msg"] = msg
+        if err:
+            params["err"] = "1"
+        target = "/watchlist" + (("?" + urlencode(params)) if params else "")
+        self._redirect(target, set_cookie)
 
 
 def serve(host: str | None = None, port: int | None = None) -> None:
