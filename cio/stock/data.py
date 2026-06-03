@@ -288,13 +288,21 @@ def latest_quote(symbol, lookback_days=10):
     if df is None or df.empty:
         return None
     row = df.iloc[-1]
+    close = float(row["Close"])
+    # Day change vs the previous trading session's close (None if only one row).
+    prev_close = float(df.iloc[-2]["Close"]) if len(df) >= 2 else None
+    change = (close - prev_close) if prev_close is not None else None
+    change_pct = (change / prev_close * 100) if prev_close not in (None, 0) else None
     return {
         "symbol": symbol,
         "date": df.index[-1].strftime("%Y-%m-%d"),
         "open": float(row["Open"]),
         "high": float(row["High"]),
         "low": float(row["Low"]),
-        "close": float(row["Close"]),
-        "price": float(row["Close"]),
+        "close": close,
+        "price": close,
+        "prev_close": prev_close,
+        "change": change,
+        "change_pct": change_pct,
         "volume": int(row["Volume"]),
     }

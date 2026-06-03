@@ -3,15 +3,15 @@
 #          "openai" = OpenAI API (needs OPENAI_API_KEY)
 defaults: {service: nim, model: minimaxai/minimax-m2.7}
 agents:
-  market:    {service: nim,    model: minimaxai/minimax-m2.7}
-  equity:    {service: nim,    model: minimaxai/minimax-m2.7}
-  industry:  {service: nim,    model: minimaxai/minimax-m2.7}
-  valuation: {service: nim,    model: minimaxai/minimax-m2.7}
-  quant:     {service: nim,    model: minimaxai/minimax-m2.7}
-  etf:       {service: nim,    model: minimaxai/minimax-m2.7}
-  risk:      {service: nim,    model: minimaxai/minimax-m2.7}
-  catalyst:  {service: nim,    model: minimaxai/minimax-m2.7}
-  moderator:  {service: nim,    model: minimaxai/minimax-m2.7}
+  market:    {service: nim,    model: moonshotai/kimi-k2.6}
+  equity:    {service: nim,    model: moonshotai/kimi-k2.6}
+  industry:  {service: nim,    model: moonshotai/kimi-k2.6}
+  valuation: {service: nim,    model: moonshotai/kimi-k2.6}
+  quant:     {service: nim,    model: moonshotai/kimi-k2.6}
+  etf:       {service: nim,    model: moonshotai/kimi-k2.6}
+  risk:      {service: nim,    model: moonshotai/kimi-k2.6}
+  catalyst:  {service: nim,    model: moonshotai/kimi-k2.6}
+  moderator:  {service: nim,    model: moonshotai/kimi-k2.6}
   cio:
     chain:
       - {service: openai, model: gpt-5.5-2026-04-23,      daily_limit: 200000}
