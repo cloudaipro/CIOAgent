@@ -13,8 +13,10 @@ Routes:
   /memory               per-agent / per-chat memory contents (debug)
   /committee            list committee runs
   /committee/<run_id>   full sent/returned transcript for one run
-  /watchlist            manage watchlists (the one write surface: GET renders,
-                        POST mutates create/activate/rename/delete/add/remove/import)
+  /watchlist            manage watchlists (GET renders, POST mutates
+                        create/activate/rename/delete/add/remove/import)
+  /portfolio            portfolio view + management (GET renders positions/P&L,
+                        POST mutates set_price/refresh_live/import_txns/import_prices)
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from cio import db, devcapture, memory, watchlist
+from cio import db, devcapture, memory, portfolio, watchlist
 from cio.committee import agent_memory, transcript, usage
 from . import views
 
@@ -127,6 +129,14 @@ class _Handler(BaseHTTPRequestHandler):
                 html = views.render_memory(self._memory_sections(), level)
             elif path == "/watchlist":
                 html = self._watchlist_view(query, level)
+            elif path == "/portfolio":
+                html = views.render_portfolio(
+                    portfolio.summary(),
+                    portfolio.positions().to_dict("records"),
+                    portfolio.realized_pl().to_dict("records"),
+                    level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/committee":
                 html = views.render_committee_list(transcript.list_runs(100), level)
             elif path.startswith("/committee/"):
@@ -154,22 +164,27 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
-        """The dashboard's only write path: watchlist mutations. Each form posts an
-        `action` field; on success/failure we redirect back to /watchlist with a
-        flash message (PRG pattern). Same auth gate as GET."""
+        """The dashboard's write paths: /watchlist and /portfolio mutations. Each
+        form posts an `action` field; on success/failure we redirect back to the
+        same page with a flash message (PRG pattern). Same auth gate as GET."""
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
         ok, set_cookie = self._authorized(parse_qs(parsed.query))
         if not ok:
             self._send("<h1>401</h1><p>token required</p>", status=401)
             return
-        if path != "/watchlist":
-            self._send("<h1>404</h1>", status=404)
-            return
 
         length = int(self.headers.get("Content-Length", 0) or 0)
         form = parse_qs(self.rfile.read(length).decode("utf-8")) if length else {}
 
+        if path == "/watchlist":
+            self._watchlist_post(form, set_cookie)
+        elif path == "/portfolio":
+            self._portfolio_post(form, set_cookie)
+        else:
+            self._send("<h1>404</h1>", status=404)
+
+    def _watchlist_post(self, form: dict, set_cookie: str | None) -> None:
         def f(name: str) -> str:
             return form.get(name, [""])[0].strip()
 
@@ -220,6 +235,59 @@ class _Handler(BaseHTTPRequestHandler):
         if err:
             params["err"] = "1"
         target = "/watchlist" + (("?" + urlencode(params)) if params else "")
+        self._redirect(target, set_cookie)
+
+    def _portfolio_post(self, form: dict, set_cookie: str | None) -> None:
+        """Portfolio mutations: set_price / refresh_live / import_txns /
+        import_prices. Pasted CSV text is written to a temp file because the
+        portfolio ingest helpers hash file bytes for idempotency."""
+        import tempfile
+
+        def f(name: str) -> str:
+            return form.get(name, [""])[0].strip()
+
+        action = f("action")
+        msg, err = "", False
+        try:
+            if action == "set_price":
+                portfolio.set_price(f("symbol"), float(f("close")),
+                                    f("price_date") or None)
+                msg = f"set {f('symbol').upper()} = {f('close')}"
+            elif action == "refresh_live":
+                res = portfolio.refresh_live_prices()
+                msg = f"refreshed {len(res['updated'])}, failed {len(res['failed'])}"
+                err = bool(res["failed"]) and not res["updated"]
+            elif action in ("import_txns", "import_prices"):
+                text = form.get("csv_text", [""])[0]
+                if not text.strip():
+                    raise ValueError("empty CSV")
+                with tempfile.NamedTemporaryFile(
+                        "w", suffix=".csv", delete=False, encoding="utf-8") as tmp:
+                    tmp.write(text)
+                    tmp_path = tmp.name
+                try:
+                    if action == "import_txns":
+                        n = portfolio.ingest_transactions_csv(tmp_path)
+                        msg = f"imported {n} transaction(s)"
+                    else:
+                        n = portfolio.ingest_prices_csv(tmp_path)
+                        msg = f"imported {n} price row(s)"
+                finally:
+                    os.unlink(tmp_path)
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except portfolio.DuplicateImport as exc:
+            msg, err = str(exc), True
+        except Exception as exc:  # never 500 the operator on a bad form/CSV
+            log.warning("portfolio POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {}
+        if msg:
+            params["msg"] = msg
+        if err:
+            params["err"] = "1"
+        target = "/portfolio" + (("?" + urlencode(params)) if params else "")
         self._redirect(target, set_cookie)
 
 
