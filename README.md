@@ -2,9 +2,10 @@
 
 A personal CIO agent for a solo operator. Talk to it on **Telegram**; it answers
 questions about your **stock portfolio**, imports CSVs, sends charts, fetches live
-quotes / runs 38 technical strategies, and — on demand — convenes a **multi-agent
-investment committee** (`/committee SYMBOL`) that researches a stock and returns an
-institutional-grade **PDF** report (with an optional **Traditional Chinese** version).
+quotes / runs 38 technical strategies, **searches the live web** (Firecrawl), and —
+on demand — convenes a **multi-agent investment committee** (`/committee SYMBOL`)
+that researches a stock and returns an institutional-grade **PDF** report (with an
+optional **Traditional Chinese** version).
 
 The conversational agent runs on your **Claude Pro subscription** via `claude-agent-sdk`
 — **no ANTHROPIC_API_KEY needed** (the `claude` CLI must be installed and logged in). The
@@ -17,13 +18,14 @@ fallback chain across them.
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 20 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 22 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/charts.py     matplotlib → PNG
                   │     cio/memory.py     MemCore store: tiered notes, profile, eviction
                   │     cio/context.py    session-start memory injection (token-budgeted)
                   │     cio/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
                   │     cio/stock/*       yfinance quotes, cache, 38 TA strategies, panel
+                  │     cio/web.py        Firecrawl-backed web search + scrape
                   │     cio/scheduler.py  APScheduler: daily digest + EOD price refresh
                   │     cio/db.py         SQLite (transactions = source of truth)
                   │
@@ -41,6 +43,9 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
 - **Images out**: chart tools drop PNGs into an outbox the bot sends as photos.
 - **Images in**: send a broker screenshot/receipt; the agent uses the Read tool
   (vision) to extract figures.
+- **Web access**: `web_search` / `web_scrape` (via a Firecrawl instance) pull live
+  news / analyst pages / filings for qualitative context. Figures still come only
+  from the portfolio/stock tools — web text is never treated as authoritative numbers.
 - **24/7 state**: durable memory, chat subscriptions, and per-chat SDK
   `session_id` live in SQLite, so a restart loses no data and each chat resumes
   its conversation thread. Financial figures are never stored as "memory" — they
@@ -78,8 +83,9 @@ Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 `/committee SYMBOL` runs a simulated buy-side process and returns a 13-section **PDF**
 research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** version.
 
-- **Pipeline**: gather data (price / fundamentals / 38 TA signals) → **8 specialist
-  agents** (market, equity, industry, valuation, quant, ETF, risk, catalyst) vote →
+- **Pipeline**: gather data (price / fundamentals incl. **forward P/E** / 38 TA signals) →
+  **8 specialist agents** (market, equity, industry, valuation, quant, ETF, risk, catalyst)
+  vote (valuation & equity weigh forward vs trailing P/E) →
   **debate** (bear-vs-bull + risk-vs-valuation cross-examination, then revised votes) →
   **moderator consensus** + deterministic tally → **CIO** final decision (Strong Buy …
   Strong Sell, with bull/base/bear scenarios). Specialists run in parallel.
@@ -114,6 +120,9 @@ In `.env`:
   your chat id (the bot echoes it), then add it here.
 - `NVIDIA_API_KEY` — required for committee agents on NIM (`build.nvidia.com`).
 - `OPENAI_API_KEY` — the CIO chain's first link; if absent the CIO falls back to Opus.
+- `CIO_FIRECRAWL_URL` — web search/scrape endpoint (defaults to a self-hosted
+  `http://localhost:3002`, no key); set `FIRECRAWL_API_KEY` for Firecrawl cloud.
+  Tune with `CIO_WEB_MAX_CHARS` (per-result cap, 6000) and `CIO_WEB_TIMEOUT` (45s).
 
 The committee report PDF needs WeasyPrint's system libraries (pango/cairo/gdk-pixbuf/
 harfbuzz) — already present on most Linux desktops.
@@ -126,7 +135,12 @@ harfbuzz) — already present on most Linux desktops.
   (`action` ∈ BUY/SELL/DIV)
 - Send a photo of a broker screen/receipt to have it read
 - `/committee SYMBOL` — full AI investment-committee PDF report (`/committee AAPL zh` for 繁體中文)
+- `/stop` — cancel whatever's currently running for you (a turn or a committee run)
 - `/subscribe` — get a daily portfolio digest · `/unsubscribe` — stop it
+
+One request runs at a time per chat: a second message sent while the agent is still
+working is refused with a notice (send `/stop` to cancel the first). Already-committed
+work before a `/stop` — DB writes, spent model credits — cannot be rolled back.
 
 ## Run 24/7 (systemd)
 
@@ -183,6 +197,9 @@ Pages:
 - **Telegram** — full conversation history (every user/assistant turn).
 - **Committee** — each run drills into every LLM call: the exact content **sent**
   (system + user prompt) and the content **returned**, per role, in order.
+- **Memory** — per-agent / per-chat memory contents for debugging: every scope across
+  both stores (`chat:*` / `global` in `cio.db`, `committee:<role>` in `committee.db`)
+  with each note's tier, key, value, hits, importance, source, and update time.
 
 Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:
 
