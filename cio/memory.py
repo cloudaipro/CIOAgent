@@ -43,8 +43,11 @@ class FiguresFirewallError(ValueError):
 # watchlist, dates, plans) are fine.
 
 _FIG_KEYWORDS = (
-    r"worth|priced?|price|trading at|valued?|value|market value|cost basis|"
-    r"balance|p&l|pnl|profit|loss|equity|return|gain|dividend"
+    r"worth|priced?|price|trading at|valued?|value|valuation|market value|cost basis|"
+    r"balance|p&l|pnl|profit|loss|equity|return|gain|dividend|"
+    # fundamentals/ratios — also numbers that go stale and must be recomputed
+    r"\broe\b|\broa\b|\broic?\b|\broi\b|margins?|\beps\b|ebitda|revenue|"
+    r"\byield\b|multiple|p/?e|\bcagr\b|\bfcf\b|payout"
 )
 _HAS_NUMBER = re.compile(r"\d")
 _CURRENCY = re.compile(r"[$€£¥]\s*\d")
@@ -52,6 +55,11 @@ _NUM_NEAR_KW = re.compile(rf"(?:{_FIG_KEYWORDS}).*?\d|\d.*?(?:{_FIG_KEYWORDS})",
 
 
 def _looks_like_figure(value: str) -> bool:
+    # Keyword-gated only: a number is blocked when it sits near a figure keyword
+    # ("27% margins", "141% ROE" → margins/roe keywords catch them). A bare number
+    # or percentage with NO figure keyword ("trim 50% on breakout") passes — the
+    # LLM sanitizer (committee.note_sanitizer) carries the semantic load now, so the
+    # regex stays a precise, low-false-positive deterministic backstop.
     if _CURRENCY.search(value):
         return True
     if _HAS_NUMBER.search(value) and _NUM_NEAR_KW.search(value):
@@ -199,6 +207,28 @@ def forget(key: str | None = None, note_id: int | None = None,
     return n > 0
 
 
+def clear_notes(scope: str | None = None, db_path=db.DB_PATH) -> int:
+    """Delete notes and their semantic-index rows. ``scope=None`` wipes EVERY note
+    in *db_path* (used by the dashboard to clear all agent memory). FTS stays in
+    sync via table triggers; ``mem_vec`` has no trigger, so it is cleared here.
+    Returns the number of notes removed. Irreversible."""
+    conn = db.connect(db_path)
+    with conn:
+        if scope is None:
+            n = conn.execute("SELECT COUNT(*) c FROM mem_notes").fetchone()["c"]
+            conn.execute("DELETE FROM mem_vec")
+            conn.execute("DELETE FROM mem_notes")
+        else:
+            ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM mem_notes WHERE scope=?", (scope,)).fetchall()]
+            n = len(ids)
+            for i in ids:
+                conn.execute("DELETE FROM mem_vec WHERE note_id=?", (i,))
+            conn.execute("DELETE FROM mem_notes WHERE scope=?", (scope,))
+    conn.close()
+    return n
+
+
 def _score(importance: float, hits: int, age_days: float) -> float:
     """Retention score: importance × usage, decayed by age (30-day half-life)."""
     return importance * (1.0 + math.log1p(hits)) * (0.5 ** (age_days / _HALFLIFE_DAYS))
@@ -273,21 +303,59 @@ def log_turn(chat_id: int | None, session_id: str | None, user_text: str,
         logging.getLogger("cio.memory").warning("log_turn failed", exc_info=True)
 
 
-def conv_history(chat_id: int | None = None, limit: int = 200, db_path=db.DB_PATH) -> list[dict]:
-    """Recent conversation turns, newest first. All chats when chat_id is None."""
+def delete_turns_on_day(day: str, db_path=db.DB_PATH) -> int:
+    """Delete every conversation turn whose LOCAL calendar day == *day* (YYYY-MM-DD),
+    matching how the dashboard groups them. Drops the semantic-index rows too; FTS
+    stays in sync via triggers. Returns the number of turns removed. Irreversible."""
+    from . import timeutil
     conn = db.connect(db_path)
-    if chat_id is None:
-        rows = conn.execute(
-            "SELECT id,chat_id,session_id,role,content,ts FROM conv_turns "
-            "ORDER BY id DESC LIMIT ?", (limit,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT id,chat_id,session_id,role,content,ts FROM conv_turns "
-            "WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit),
-        ).fetchall()
+    ids = [r["id"] for r in conn.execute("SELECT id, ts FROM conv_turns").fetchall()
+           if timeutil.local_day(r["ts"]) == day]
+    with conn:
+        for i in ids:
+            conn.execute("DELETE FROM turn_vec WHERE turn_id=?", (i,))
+            conn.execute("DELETE FROM conv_turns WHERE id=?", (i,))
+    conn.close()
+    return len(ids)
+
+
+def conv_history(chat_id: int | None = None, limit: int | None = 200,
+                 db_path=db.DB_PATH) -> list[dict]:
+    """Recent conversation turns, newest first. All chats when chat_id is None.
+    ``limit=None`` returns every turn (no cap)."""
+    conn = db.connect(db_path)
+    sql = "SELECT id,chat_id,session_id,role,content,ts FROM conv_turns"
+    args: list = []
+    if chat_id is not None:
+        sql += " WHERE chat_id=?"
+        args.append(chat_id)
+    sql += " ORDER BY id DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        args.append(limit)
+    rows = conn.execute(sql, args).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def conv_days(db_path=db.DB_PATH) -> list[dict]:
+    """Distinct LOCAL days present in conv_turns, newest first, each with its turn
+    count. Powers the Telegram page's day selector."""
+    from . import timeutil
+    conn = db.connect(db_path)
+    rows = conn.execute("SELECT ts FROM conv_turns").fetchall()
+    conn.close()
+    tally: dict[str, int] = {}
+    for r in rows:
+        tally[timeutil.local_day(r["ts"])] = tally.get(timeutil.local_day(r["ts"]), 0) + 1
+    return [{"day": d, "count": c} for d, c in sorted(tally.items(), reverse=True)]
+
+
+def conv_history_on_day(day: str, db_path=db.DB_PATH) -> list[dict]:
+    """All conversation turns on a given LOCAL day (YYYY-MM-DD), newest first."""
+    from . import timeutil
+    return [t for t in conv_history(limit=None, db_path=db_path)
+            if timeutil.local_day(t["ts"]) == day]
 
 
 # ----- session digests (rolling-session checkpoints) ------------------------

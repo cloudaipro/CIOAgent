@@ -62,6 +62,12 @@ def utc_to_local(ts: str | None) -> str:
     return dt.astimezone(local_tz()).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def local_day(ts: str | None) -> str:
+    """Local-zone calendar day (YYYY-MM-DD) for a stored UTC timestamp. Empty on
+    failure. Used to group/delete records by the day the operator actually sees."""
+    return utc_to_local(ts)[:10]
+
+
 def _trading_days_for_year(year: int) -> set[date] | None:
     """Set of Nasdaq trading dates for *year* via the NYSE calendar (Nasdaq shares
     the NYSE holiday schedule). Cached. Returns None when the calendar library is

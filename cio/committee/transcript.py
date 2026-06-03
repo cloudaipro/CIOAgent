@@ -98,6 +98,22 @@ def _prune(conn: sqlite3.Connection, keep_runs: int) -> None:
     conn.commit()
 
 
+def clear_all(db_path: Path | None = None) -> int:
+    """Delete every captured committee run (all transcript rows). Returns the number
+    of call-rows removed. Best-effort; never raises. Irreversible."""
+    path = db_path if db_path is not None else DB_PATH
+    try:
+        conn = _connect(path)
+        n = conn.execute("SELECT COUNT(*) c FROM committee_transcript").fetchone()["c"]
+        conn.execute("DELETE FROM committee_transcript")
+        conn.commit()
+        conn.close()
+        return n
+    except Exception as exc:
+        log.warning("transcript.clear_all failed: %s", exc)
+        return 0
+
+
 def list_runs(limit: int = 100, db_path: Path | None = None) -> list[dict]:
     """One summary row per run_id, newest first: run_id, symbol, started, calls, tokens."""
     path = db_path if db_path is not None else DB_PATH

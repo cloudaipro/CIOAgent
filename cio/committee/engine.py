@@ -21,6 +21,8 @@ import yaml
 from .bundle import gather_bundle, format_bundle
 from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
 from . import agent_memory
+from . import note_sanitizer
+from . import sanitizer_log
 from . import transcript as _transcript
 from . import usage as _usage
 from .models import (
@@ -410,6 +412,31 @@ def parse_yaml_block(text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Memory write — sanitize then store
+# ---------------------------------------------------------------------------
+
+async def _save_clean_note(role_key: str, note_val: str, symbol: str) -> None:
+    """LLM-sanitize an agent's takeaway (strip stale figures, keep the insight),
+    then persist it. Single chokepoint for both specialists and the CIO.
+
+    The sanitizer may return None (note was all-figure → drop) or a rewritten,
+    regex-verified note. On model unavailability it returns the original text and
+    save_note's regex firewall still has the final say. Never raises."""
+    def _audit(action: str, original: str, cleaned: str, removed: list) -> None:
+        sanitizer_log.record(role_key, symbol, action, original, cleaned, removed)
+
+    try:
+        cleaned = await note_sanitizer.sanitize(
+            note_val, symbol, ask_role, role_key=role_key, audit=_audit)
+    except Exception:
+        log.warning("save: sanitize failed for %s/%s; deferring to firewall",
+                    role_key, symbol, exc_info=True)
+        cleaned = note_val  # let the regex firewall decide
+    if cleaned and cleaned.strip():
+        agent_memory.save_note(role_key, cleaned.strip(), symbol)
+
+
+# ---------------------------------------------------------------------------
 # Specialist runner
 # ---------------------------------------------------------------------------
 
@@ -428,9 +455,12 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
         f"DATA:\n{bundle_text}"
     )
 
-    # Inject this agent's own scoped memory block (never another agent's)
+    # Inject this agent's own scoped memory block (never another agent's), plus the
+    # layer-1 figure-prevention rule so stale numbers are kept out of memory_note.
     mem = agent_memory.recall_block(role["key"], symbol)
-    system_prompt = role["system_prompt"] + ("\n\n" + mem if mem else "")
+    system_prompt = role["system_prompt"] + "\n\n" + note_sanitizer.FIGURE_RULE
+    if mem:
+        system_prompt += "\n\n" + mem
 
     raw = await ask_role(system_prompt, user_prompt, role_key=role["key"])
     parsed = parse_yaml_block(raw)
@@ -451,10 +481,10 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
     for f in role["fields"]:
         result[f] = parsed.get(f)
 
-    # Save the agent's private durable takeaway (figures firewall enforced inside)
+    # Save the agent's private durable takeaway (LLM-sanitized, then regex-firewalled)
     note_val = parsed.get("memory_note")
     if isinstance(note_val, str) and note_val.strip():
-        agent_memory.save_note(role["key"], note_val.strip(), symbol)
+        await _save_clean_note(role["key"], note_val.strip(), symbol)
 
     return result
 
@@ -643,16 +673,18 @@ async def run_committee(
         f"Required output fields: final_recommendation, confidence_score, risk_rating, "
         f"time_horizon, base_case, bull_case, bear_case, scenarios"
     )
-    # Inject CIO's own scoped memory block
+    # Inject CIO's own scoped memory block, plus the figure-prevention rule.
     cio_mem = agent_memory.recall_block("cio", resolved)
-    cio_system = CIO_SYSTEM + ("\n\n" + cio_mem if cio_mem else "")
+    cio_system = CIO_SYSTEM + "\n\n" + note_sanitizer.FIGURE_RULE
+    if cio_mem:
+        cio_system += "\n\n" + cio_mem
     cio_raw = await ask_role(cio_system, cio_prompt, role_key="cio")
     cio = parse_yaml_block(cio_raw)
 
-    # Save CIO's durable takeaway (figures firewall enforced inside save_note)
+    # Save CIO's durable takeaway (LLM-sanitized, then regex-firewalled)
     cio_note = cio.get("memory_note")
     if isinstance(cio_note, str) and cio_note.strip():
-        agent_memory.save_note("cio", cio_note.strip(), resolved)
+        await _save_clean_note("cio", cio_note.strip(), resolved)
 
     # Post-pipeline reflect: promote frequently-recalled warm notes to hot
     roles_that_ran = [role["key"] for role in active_roles]
