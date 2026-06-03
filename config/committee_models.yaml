@@ -17,6 +17,13 @@ agents:
       - {service: openai, model: gpt-5.5-2026-04-23,      daily_limit: 200000}
       - {service: claude, model: claude-opus-4-8,          daily_limit: 200000}
       - {service: nim,    model: minimaxai/minimax-m2.7}   # last resort, no daily_limit
+  # Watchlist Monitoring Agent: same chain shape as cio (premium → premium → cheap),
+  # so the pre-market briefing degrades gracefully when a backend is down/over-budget.
+  wma:
+    chain:
+      - {service: openai, model: gpt-5.5-2026-04-23,      daily_limit: 200000}
+      - {service: claude, model: claude-opus-4-8,          daily_limit: 200000}
+      - {service: nim,    model: moonshotai/kimi-k2.6}     # last resort, no daily_limit
   # TC translation: Claude is reliable on long markdown + strong Traditional Chinese.
   # Output is ALSO post-converted with OpenCC s2twp (translate.py) to GUARANTEE
   # Traditional (Taiwan) glyphs/phrasing regardless of which backend answers.

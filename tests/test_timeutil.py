@@ -45,3 +45,41 @@ def test_unparseable_returns_input(monkeypatch, bad):
 def test_iso_with_z_suffix(monkeypatch):
     tu = _reload(monkeypatch, "America/Vancouver")
     assert tu.utc_to_local("2026-06-02T16:24:43Z") == "2026-06-02 09:24:43"
+
+
+# ---------------------------------------------------------------------------
+# is_trading_day — Nasdaq calendar (with weekday fallback)
+# ---------------------------------------------------------------------------
+
+from datetime import date, datetime  # noqa: E402
+
+import cio.timeutil as _tu  # noqa: E402
+
+
+def test_is_trading_day_uses_calendar_set(monkeypatch):
+    """When the calendar resolves, membership decides — a known holiday is False."""
+    # 2026-07-03 is the observed Independence Day market close; 2026-07-06 a Monday.
+    trading = {date(2026, 7, 6), date(2026, 7, 2)}
+    monkeypatch.setattr(_tu, "_trading_days_for_year", lambda y: trading)
+    assert _tu.is_trading_day("2026-07-06") is True
+    assert _tu.is_trading_day("2026-07-03") is False   # holiday, not in set
+    assert _tu.is_trading_day(date(2026, 7, 2)) is True
+
+
+def test_is_trading_day_weekday_fallback(monkeypatch):
+    """No calendar library → Mon-Fri fallback."""
+    monkeypatch.setattr(_tu, "_trading_days_for_year", lambda y: None)
+    assert _tu.is_trading_day(date(2026, 6, 3)) is True    # Wednesday
+    assert _tu.is_trading_day(date(2026, 6, 6)) is False   # Saturday
+    assert _tu.is_trading_day(date(2026, 6, 7)) is False   # Sunday
+
+
+def test_is_trading_day_accepts_datetime_and_str(monkeypatch):
+    monkeypatch.setattr(_tu, "_trading_days_for_year", lambda y: None)
+    assert _tu.is_trading_day(datetime(2026, 6, 3, 14, 30)) is True   # Wed
+    assert _tu.is_trading_day("2026-06-06") is False                  # Sat
+
+
+def test_is_trading_day_unparseable_is_false(monkeypatch):
+    monkeypatch.setattr(_tu, "_trading_days_for_year", lambda y: None)
+    assert _tu.is_trading_day("garbage") is False

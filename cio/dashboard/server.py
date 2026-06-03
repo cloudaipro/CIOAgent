@@ -9,6 +9,7 @@ Routes:
   /                     overview
   /usage                token usage per service per day
   /telegram             Telegram conversation history
+  /subscribers          chats opted in to the digest + watchlist briefing
   /memory               per-agent / per-chat memory contents (debug)
   /committee            list committee runs
   /committee/<run_id>   full sent/returned transcript for one run
@@ -120,6 +121,8 @@ class _Handler(BaseHTTPRequestHandler):
                 html = views.render_usage(usage.recent(days=30), level)
             elif path == "/telegram":
                 html = views.render_telegram(memory.conv_history(limit=200), level)
+            elif path == "/subscribers":
+                html = views.render_subscribers(memory.list_subscribers(), level)
             elif path == "/memory":
                 html = views.render_memory(self._memory_sections(), level)
             elif path == "/watchlist":

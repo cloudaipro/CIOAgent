@@ -405,6 +405,19 @@ def subscribed_chats(db_path=db.DB_PATH) -> list[int]:
     return [r["chat_id"] for r in rows]
 
 
+def list_subscribers(db_path=db.DB_PATH) -> list[dict]:
+    """Subscribed chats (digest + watchlist briefing recipients) with chat_id and
+    updated_at (when the subscription last changed), newest first. For the dashboard
+    subscribers page."""
+    conn = db.connect(db_path)
+    rows = conn.execute(
+        "SELECT chat_id, updated_at FROM chats WHERE subscribed = 1 "
+        "ORDER BY updated_at DESC, chat_id"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_session_id(chat_id: int, db_path=db.DB_PATH) -> str | None:
     conn = db.connect(db_path)
     row = conn.execute(

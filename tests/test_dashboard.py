@@ -97,6 +97,8 @@ def live(monkeypatch):
     monkeypatch.setattr(dash_server.memory, "conv_history",
                         lambda *a, **k: [{"id": 1, "chat_id": 5, "session_id": None,
                                           "role": "user", "content": "hi", "ts": "t"}])
+    monkeypatch.setattr(dash_server.memory, "list_subscribers",
+                        lambda *a, **k: [{"chat_id": 12345, "updated_at": "2026-06-03 14:00:00"}])
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), dash_server._Handler)
     port = httpd.server_address[1]
@@ -117,10 +119,13 @@ def _get(port, path, headers=None):
 
 
 def test_routes_render(live):
-    for path in ("/", "/usage", "/telegram", "/committee", "/committee/r1"):
+    for path in ("/", "/usage", "/telegram", "/subscribers", "/committee", "/committee/r1"):
         status, body, _ = _get(live, path)
         assert status == 200, path
         assert "CIO dev dashboard" in body
+    # subscribers page lists the opted-in chat id
+    _, sub_body, _ = _get(live, "/subscribers")
+    assert "12345" in sub_body
     # committee run shows the captured exchange
     _, run_body, _ = _get(live, "/committee/r1")
     assert "RETURNED" in run_body

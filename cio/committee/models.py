@@ -39,6 +39,13 @@ _BUILTIN: dict[str, Any] = {
                 {"service": "nim",    "model": "minimaxai/minimax-m2.7"},  # last resort
             ]
         },
+        "wma": {
+            "chain": [
+                {"service": "openai", "model": "gpt-5.5-2026-04-23",    "daily_limit": 200000},
+                {"service": "claude", "model": "claude-opus-4-8",         "daily_limit": 200000},
+                {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
+            ]
+        },
         "translator": {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
     },
     "nim": {

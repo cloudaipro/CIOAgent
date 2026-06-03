@@ -16,11 +16,38 @@ from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import memory, portfolio
+from . import memory, portfolio, timeutil
 
 log = logging.getLogger("cio.scheduler")
 
 _LAST_DIGEST_KEY = "last_digest_date"  # ISO date of the last digest actually sent
+_LAST_WMA_KEY = "last_wma_date"        # ISO date of the last watchlist briefing sent
+
+_DOW = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def _is_briefing_day(days_spec: str, when: date | None = None) -> bool:
+    """Whether *when* (default today) matches a cron-style day_of_week spec
+    (e.g. 'mon-fri', 'mon,wed,fri', '*'). Used only for the boot catch-up; the
+    live job relies on APScheduler's own day_of_week filter."""
+    when = when or date.today()
+    wd = when.weekday()
+    spec = (days_spec or "").strip().lower()
+    if not spec or spec == "*":
+        return True
+    allowed: set[int] = set()
+    for part in (p.strip() for p in spec.split(",")):
+        if "-" in part:
+            a, _, b = part.partition("-")
+            if a in _DOW and b in _DOW:
+                i, j = _DOW[a], _DOW[b]
+                allowed.update(range(i, j + 1) if i <= j
+                               else list(range(i, 7)) + list(range(0, j + 1)))
+        elif part.isdigit():
+            allowed.add(int(part) % 7)
+        elif part in _DOW:
+            allowed.add(_DOW[part])
+    return wd in allowed if allowed else True
 
 
 def _format_digest() -> str:
@@ -85,6 +112,72 @@ async def daily_digest(bot) -> None:
         memory.set_meta(_LAST_DIGEST_KEY, today)
 
 
+async def _send_briefing(bot, chat_ids, briefing_md: str, summary_text: str,
+                         date_str: str) -> bool:
+    """Render the briefing PDF (text fallback) and push it to *chat_ids*.
+    Returns True if at least one chat received it. Never raises."""
+    from pathlib import Path
+    reports_dir = Path(__file__).resolve().parent.parent / "data" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    doc_path = None
+    try:
+        from .committee.render_pdf import markdown_to_pdf
+        pdf_path = reports_dir / f"watchlist_briefing_{date_str}.pdf"
+        markdown_to_pdf(briefing_md, pdf_path, title=f"Watchlist Briefing {date_str}")
+        doc_path = pdf_path
+    except Exception:
+        log.exception("WMA briefing PDF render failed; will send the .md instead")
+        try:
+            md_path = reports_dir / f"watchlist_briefing_{date_str}.md"
+            md_path.write_text(briefing_md, encoding="utf-8")
+            doc_path = md_path
+        except Exception:
+            log.exception("WMA briefing .md write failed; sending summary text only")
+
+    sent_any = False
+    for chat_id in chat_ids:
+        try:
+            await bot.send_message(chat_id=chat_id, text=summary_text)
+            if doc_path is not None:
+                with open(doc_path, "rb") as fh:
+                    await bot.send_document(chat_id=chat_id, document=fh,
+                                            filename=doc_path.name)
+            sent_any = True
+        except Exception:  # one bad chat must not block the rest
+            log.exception("WMA briefing send failed for chat %s", chat_id)
+    return sent_any
+
+
+async def watchlist_briefing(bot) -> None:
+    """Run the Watchlist Monitoring Agent over the active watchlist and push the
+    pre-market briefing to every subscribed chat. Idempotent per day (a same-day
+    reboot won't re-send). Never raises into the scheduler."""
+    today = date.today().isoformat()
+    if memory.get_meta(_LAST_WMA_KEY) == today:
+        return  # already sent today
+    if not timeutil.is_trading_day():
+        log.info("watchlist_briefing: %s is not a Nasdaq trading day; skipping", today)
+        return
+    chats = memory.subscribed_chats()
+    if not chats:
+        return
+    try:
+        from .watchlist_monitor import (
+            monitor_watchlist, build_briefing, briefing_summary, as_of_now,
+        )
+        assessments = await monitor_watchlist()
+    except Exception:
+        log.exception("watchlist_briefing: monitoring run failed")
+        return
+    if not assessments:
+        log.info("watchlist_briefing: no active watchlist / nothing to review")
+        return
+    briefing = build_briefing(assessments, as_of=as_of_now())
+    summary = briefing_summary(assessments)
+    if await _send_briefing(bot, chats, briefing, summary, today):
+        memory.set_meta(_LAST_WMA_KEY, today)
+
+
 def start(bot) -> AsyncIOScheduler:
     """Start the scheduler on the running loop. Returns it so the caller can stop it.
 
@@ -135,5 +228,33 @@ def start(bot) -> AsyncIOScheduler:
         log.info("price refresh boot one-shot queued")
     else:
         log.info("price refresh disabled (CIO_PRICE_REFRESH_HOUR=off)")
+
+    # ----- watchlist monitoring briefing (WMA) --------------------------------
+    # Default 06:00 local on stock days (Mon-Fri). CIO_WMA_HOUR=off disables.
+    # CIO_WMA_MINUTE / CIO_WMA_DAYS (cron day_of_week, e.g. "mon-fri") tune it.
+    wma_hour = os.getenv("CIO_WMA_HOUR", "6")
+    if wma_hour.lower() != "off":
+        wma_hour = int(wma_hour)
+        wma_minute = int(os.getenv("CIO_WMA_MINUTE", "0"))
+        wma_days = os.getenv("CIO_WMA_DAYS", "mon-fri")
+        sched.add_job(watchlist_briefing, "cron", day_of_week=wma_days,
+                      hour=wma_hour, minute=wma_minute, args=[bot],
+                      id="watchlist_briefing", replace_existing=True,
+                      coalesce=True, misfire_grace_time=3600)
+        log.info("watchlist briefing scheduled %s at %02d:%02d local",
+                 wma_days, wma_hour, wma_minute)
+        # Boot-time catch-up: if today is a Nasdaq trading day (and matches the
+        # configured days), its slot already passed, and we haven't sent today,
+        # fire one shortly after boot.
+        if (_is_briefing_day(wma_days)
+                and timeutil.is_trading_day()
+                and (now.hour, now.minute) >= (wma_hour, wma_minute)
+                and memory.get_meta(_LAST_WMA_KEY) != date.today().isoformat()):
+            log.info("missed today's watchlist briefing during downtime; scheduling catch-up")
+            sched.add_job(watchlist_briefing, "date",
+                          run_date=now.replace(microsecond=0) + timedelta(seconds=30),
+                          args=[bot], id="wma_catchup", replace_existing=True)
+    else:
+        log.info("watchlist briefing disabled (CIO_WMA_HOUR=off)")
 
     return sched

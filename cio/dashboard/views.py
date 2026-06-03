@@ -81,7 +81,8 @@ def _page(title: str, body: str, level: int) -> str:
         "<header>"
         "<a href='/'>Overview</a><a href='/usage'>Token usage</a>"
         "<a href='/telegram'>Telegram</a><a href='/committee'>Committee</a>"
-        "<a href='/watchlist'>Watchlist</a><a href='/memory'>Memory</a>"
+        "<a href='/watchlist'>Watchlist</a><a href='/subscribers'>Subscribers</a>"
+        "<a href='/memory'>Memory</a>"
         f"<span class='lvl'>capture level {esc(level)}</span>"
         "</header><main>" + body + "</main></body></html>"
     )
@@ -132,6 +133,22 @@ def render_usage(usage_rows, level: int) -> str:
         f"<table><tr><th>Day (local)</th><th>Service</th><th>Tokens</th><th></th></tr>{rows}</table>"
     )
     return _page("Token usage", body, level)
+
+
+def render_subscribers(subscribers, level: int) -> str:
+    """List chats opted in to the daily digest + 06:00 watchlist briefing."""
+    rows = "".join(
+        f"<tr><td class='num'>{esc(s['chat_id'])}</td>"
+        f"<td>{esc_ts(s['updated_at'])}</td></tr>"
+        for s in subscribers
+    ) or "<tr><td class='empty' colspan='2'>no subscribers yet — users opt in with /subscribe</td></tr>"
+    body = (
+        "<h1>Subscribers</h1>"
+        f"<p>{esc(len(subscribers))} chat(s) receive the daily portfolio digest and the "
+        "06:00 pre-market watchlist briefing on trading days.</p>"
+        f"<table><tr><th>Chat ID</th><th>Subscribed since</th></tr>{rows}</table>"
+    )
+    return _page("Subscribers", body, level)
 
 
 def render_telegram(turns, level: int) -> str:

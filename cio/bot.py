@@ -206,15 +206,21 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
         "• Send a broker screenshot or receipt photo and I'll read it\n"
         "• /watchlist — latest prices for your active watchlist\n"
-        "• /subscribe for a daily portfolio digest (/unsubscribe to stop)\n"
+        "• /subscribe — opt in to the daily portfolio digest AND the 06:00 "
+        "pre-market watchlist briefing on trading days (/unsubscribe to stop)\n"
         "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)\n"
+        "• /briefing [SYMBOL…] [zh] — pre-market watchlist briefing as PDF "
+        "(add zh for 繁體中文; auto-runs 06:00 on trading days)\n"
         "• /stop — cancel whatever I'm currently working on for you"
     )
 
 
 async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     memory.set_subscribed(update.effective_chat.id, True)
-    await update.message.reply_text("✅ Subscribed. You'll get a daily portfolio digest.")
+    await update.message.reply_text(
+        "✅ Subscribed. You'll get the daily portfolio digest and the 06:00 "
+        "pre-market watchlist briefing on trading days."
+    )
 
 
 async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -418,6 +424,105 @@ async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             pass
 
 
+async def cmd_briefing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tracked wrapper around a manual watchlist briefing so /stop can cancel it."""
+    chat_id = update.effective_chat.id
+    task = asyncio.current_task()
+    if not _try_acquire(chat_id, task):
+        await update.message.reply_text(_BUSY_MSG)
+        return
+    try:
+        await _cmd_briefing_impl(update, ctx)
+    except asyncio.CancelledError:
+        if task in _stopping:
+            _stopping.discard(task)
+            log.info("watchlist briefing stopped by user for chat %s", chat_id)
+            try:
+                await update.message.reply_text("🛑 Briefing stopped.")
+            except Exception:
+                pass
+            return
+        raise  # genuine cancellation — propagate
+    finally:
+        _untrack_task(chat_id, task)
+
+
+async def _cmd_briefing_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the Watchlist Monitoring Agent on demand and reply with the briefing.
+
+    No args → the active watchlist. Args → those symbols only. Add ``zh`` for a
+    Traditional-Chinese briefing (e.g. /briefing NVDA MU zh, or /briefing zh).
+    """
+    try:
+        from .watchlist_monitor import (
+            monitor_watchlist, build_briefing, briefing_summary, as_of_now,
+        )
+        from .committee.translate import normalize_lang, translate_report
+
+        # Split a language token (zh) out of the symbol args.
+        lang = "en"
+        symbol_args: list[str] = []
+        for arg in (ctx.args or []):
+            if normalize_lang(arg) == "tc":
+                lang = "tc"
+            else:
+                symbol_args.append(arg.upper())
+        symbols = symbol_args or None
+        lang_label = " (繁體中文)" if lang == "tc" else ""
+        lang_suffix = "_zh" if lang == "tc" else ""
+
+        scope = ", ".join(symbols) if symbols else "your active watchlist"
+        await update.message.reply_text(
+            f"📋 Scanning {scope} for the pre-market briefing{lang_label}…\n"
+            "One model call per security — typically under a minute. "
+            "I'll send the full briefing when ready."
+        )
+        await update.effective_chat.send_action(ChatAction.TYPING)
+
+        try:
+            assessments = await monitor_watchlist(symbols)
+        except Exception as e:
+            log.exception("monitor_watchlist error")
+            await update.message.reply_text(f"⚠️ Briefing error: {e}")
+            return
+
+        if not assessments:
+            await update.message.reply_text(
+                "No active watchlist to review. Create one in the dashboard, "
+                "or pass symbols: /briefing NVDA MU."
+            )
+            return
+
+        briefing = build_briefing(assessments, as_of=as_of_now())
+        briefing = await translate_report(briefing, lang)
+        summary = briefing_summary(assessments)
+        date_str = datetime.date.today().isoformat()
+
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        pdf_path = REPORTS_DIR / f"watchlist_briefing_{date_str}{lang_suffix}.pdf"
+        try:
+            from .committee.render_pdf import markdown_to_pdf
+            markdown_to_pdf(briefing, pdf_path,
+                            title=f"Watchlist Briefing {date_str}{lang_label}")
+            with open(pdf_path, "rb") as fh:
+                await update.message.reply_document(fh, filename=pdf_path.name)
+        except Exception:
+            log.exception("briefing PDF render failed; falling back to .md")
+            md_path = REPORTS_DIR / f"watchlist_briefing_{date_str}{lang_suffix}.md"
+            md_path.write_text(briefing, encoding="utf-8")
+            with open(md_path, "rb") as fh:
+                await update.message.reply_document(fh, filename=md_path.name)
+
+        await update.message.reply_text(summary)
+
+    except Exception as e:
+        log.exception("cmd_briefing crashed unexpectedly")
+        try:
+            await update.message.reply_text(f"⚠️ Briefing error: {e}")
+        except Exception:
+            pass
+
+
 async def _prewarm_chat(chat_id: int) -> None:
     """Connect + resume one chat's session; never let a bad resume block boot."""
     try:
@@ -472,6 +577,7 @@ def main() -> None:
     # Long handlers run block=False so the dispatcher keeps reading updates while
     # one is in flight — that is what lets a /stop arrive and cancel it.
     app.add_handler(CommandHandler("committee", cmd_committee, block=False))
+    app.add_handler(CommandHandler("briefing", cmd_briefing, block=False))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo, block=False))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document, block=False))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text, block=False))

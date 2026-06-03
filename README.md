@@ -5,7 +5,9 @@ questions about your **stock portfolio**, imports CSVs, sends charts, fetches li
 quotes / runs 38 technical strategies, **searches the live web** (Firecrawl), and —
 on demand — convenes a **multi-agent investment committee** (`/committee SYMBOL`)
 that researches a stock and returns an institutional-grade **PDF** report (with an
-optional **Traditional Chinese** version).
+optional **Traditional Chinese** version). Every trading morning a scheduled
+**Watchlist Monitoring Agent** (`/briefing`) delivers a pre-market briefing on your
+watchlist.
 
 The conversational agent runs on your **Claude Pro subscription** via `claude-agent-sdk`
 — **no ANTHROPIC_API_KEY needed** (the `claude` CLI must be installed and logged in). The
@@ -16,24 +18,29 @@ fallback chain across them.
 ## Architecture
 
 ```
-Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee
+Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 22 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 23 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
-                  │     cio/charts.py     matplotlib → PNG
+                  │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
+                  │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
                   │     cio/memory.py     MemCore store: tiered notes, profile, eviction
                   │     cio/context.py    session-start memory injection (token-budgeted)
                   │     cio/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
                   │     cio/stock/*       yfinance quotes, cache, 38 TA strategies, panel
                   │     cio/web.py        Firecrawl-backed web search + scrape
-                  │     cio/scheduler.py  APScheduler: daily digest + EOD price refresh
+                  │     cio/timeutil.py   local TZ + is_trading_day (NYSE calendar)
+                  │     cio/scheduler.py  APScheduler: daily digest + EOD price refresh + 06:00 briefing
                   │     cio/db.py         SQLite (transactions = source of truth)
                   │
-                  └─► cio/committee/*   investment committee pipeline:
-                        bundle → 8 specialists → debate → consensus → CIO → report
-                        models.py  per-agent model router (claude | NIM | OpenAI) + CIO chain
-                        agent_memory.py  isolated per-agent memory (committee.db, WAL)
-                        render_pdf.py / translate.py  PDF + 繁體中文
+                  ├─► cio/committee/*   investment committee pipeline:
+                  │     bundle → 8 specialists → debate → consensus → CIO → report
+                  │     models.py  per-agent model router (claude | NIM | OpenAI) + CIO chain
+                  │     agent_memory.py  isolated per-agent memory (committee.db, WAL)
+                  │     render_pdf.py / translate.py  PDF + 繁體中文
+                  │
+                  └─► cio/watchlist_monitor/*  pre-market Watchlist Monitoring Agent:
+                        per-security assessment (bundle + web news + wma chain) → briefing PDF
 ```
 
 - **Cost basis**: average-cost method. Positions & P&L are *derived* from the
@@ -103,6 +110,46 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   `CIO_CLAUDE_MAX_THINKING_TOKENS` (thinking budget). If a NIM reasoning model returns
   empty (`finish_reason=length`), raise `CIO_NIM_MAX_TOKENS`.
 
+## Watchlists (`/watchlist`)
+
+Named lists of symbols to track, managed from the dashboard. **Multiple lists, exactly
+one active** at a time (system-wide); the active list drives the Telegram price snapshot
+and the `watchlist_prices` agent tool.
+
+- **CRUD + search + import** in the dashboard `/watchlist` page: create / activate /
+  rename / delete lists, add / remove symbols, **drag rows to reorder**, search by name
+  or symbol, and **import a CSV** (paste a row of tickers — same format as
+  `resources/portfolio2.csv` — or one symbol per line).
+- **NASDAQ index floor**: every list is seeded with the NASDAQ Composite `^IXIC` and the
+  index can't be removed, so each list always carries a market benchmark.
+- **`/watchlist` in Telegram** renders a broker-style **quote-board image** —
+  Instrument / Last / Change / Change % / Volume, green/red, with the index row (`COMP`)
+  pinned on top. Deterministic (no model tokens); falls back to a text table if rendering
+  fails. The order you set by dragging is the order shown here.
+- Distinct from the **Watchlist Monitoring Agent** below: that's the scheduled analyst
+  briefing; this is plain list management + live prices.
+
+## Watchlist Monitoring Agent (`/briefing`)
+
+A pre-market analyst that scans your watchlist and delivers a consolidated **morning
+briefing** — cheaper than the committee (one model call per security), so you can triage
+what deserves a deeper look.
+
+- **What it does**: for each security it gathers price / fundamentals / 38 TA signals plus
+  overnight web headlines (Firecrawl), then produces a normalized assessment — overall
+  status, conviction (0–100), recommendation (Buy/Add/Hold/Monitor/Reduce/Sell), new risks,
+  upcoming catalysts, and whether the thesis changed. The briefing aggregates these into an
+  executive summary, high/critical **alerts**, risks, catalysts, and a per-security review.
+- **Escalation**: names with a high/critical event or a negative thesis change are **flagged**
+  for a full `/committee SYMBOL` run (it doesn't auto-run the committee — keeps the briefing cheap).
+- **Schedule**: runs automatically at **06:00 local on trading days**. Holidays *and* weekends
+  are skipped via the **NYSE calendar** (`pandas_market_calendars`). The briefing PDF + a short
+  summary are pushed to every **subscribed** chat (same opt-in as the daily digest).
+- **On demand**: `/briefing` (active watchlist) or `/briefing NVDA MU` (specific symbols);
+  add `zh` for a **Traditional Chinese** briefing. CLI: `python -m cio.watchlist_monitor [SYMBOL…] [zh]`.
+- **Model chain** (`config/committee_models.yaml`, role `wma`): OpenAI `gpt-5.5-2026-04-23`
+  → Claude Opus → NVIDIA NIM `kimi-k2.6`, same daily-budget fallback as the CIO.
+
 ## Setup
 
 ```bash
@@ -134,9 +181,11 @@ harfbuzz) — already present on most Linux desktops.
 - Upload a transactions CSV: `txn_date,symbol,action,quantity,price[,fees,currency,notes]`
   (`action` ∈ BUY/SELL/DIV)
 - Send a photo of a broker screen/receipt to have it read
+- `/watchlist` — broker-style quote-board image for your active watchlist (manage lists in the dashboard)
 - `/committee SYMBOL` — full AI investment-committee PDF report (`/committee AAPL zh` for 繁體中文)
-- `/stop` — cancel whatever's currently running for you (a turn or a committee run)
-- `/subscribe` — get a daily portfolio digest · `/unsubscribe` — stop it
+- `/briefing [SYMBOL…]` — pre-market watchlist briefing PDF (add `zh` for 繁體中文; auto-runs 06:00 on trading days)
+- `/stop` — cancel whatever's currently running for you (a turn or a committee/briefing run)
+- `/subscribe` — opt in to the daily portfolio digest **and** the 06:00 watchlist briefing · `/unsubscribe` — stop both
 
 One request runs at a time per chat: a second message sent while the agent is still
 working is refused with a notice (send `/stop` to cancel the first). Already-committed
@@ -170,6 +219,17 @@ CIO_DIGEST_MINUTE=0
 If the machine is rebooting at digest time, a catch-up runs shortly after boot
 (once per day, never double-sent).
 
+**Watchlist briefing timing** — runs at 06:00 local on trading days (Nasdaq holidays
+and weekends are skipped automatically):
+
+```
+CIO_WMA_HOUR=6           # hour 0–23, or "off" to disable
+CIO_WMA_MINUTE=0
+CIO_WMA_DAYS=mon-fri     # cron day_of_week pre-filter; holidays still skipped via NYSE calendar
+CIO_WMA_CONCURRENCY=4    # securities assessed in parallel
+CIO_TZ=America/Vancouver # local timezone for all schedule times
+```
+
 ## Test without Telegram
 
 ```bash
@@ -185,7 +245,8 @@ Sample data: `data/sample_transactions.csv`.
 
 ## Developer dashboard
 
-A localhost-only, read-only web view to verify the agent is behaving correctly.
+A localhost-only web view to verify the agent is behaving correctly. Read-only except
+for the **Watchlist** page, which is the one write surface (manage your symbol lists).
 
 ```bash
 .venv/bin/python -m cio.dashboard          # http://127.0.0.1:8787
@@ -195,6 +256,11 @@ Pages:
 
 - **Token usage** — OpenAI / Claude / NIM tokens per service per UTC day (from `committee.db`).
 - **Telegram** — full conversation history (every user/assistant turn).
+- **Subscribers** — chats opted in to the daily digest + 06:00 watchlist briefing
+  (chat id + subscribed-since), so you can see exactly who receives the scheduled pushes.
+- **Watchlist** — manage symbol lists (create/activate/rename/delete/search, add/remove
+  symbols, drag-to-reorder, CSV import). The one **write** page; mutations POST then
+  redirect (PRG), behind the same auth gate. One scoped JS for drag; no-JS safe.
 - **Committee** — each run drills into every LLM call: the exact content **sent**
   (system + user prompt) and the content **returned**, per role, in order.
 - **Memory** — per-agent / per-chat memory contents for debugging: every scope across

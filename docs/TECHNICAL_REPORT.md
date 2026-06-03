@@ -4,7 +4,9 @@
 solo operator. Over Telegram it answers stock-portfolio questions, imports CSVs,
 renders charts, fetches live quotes / runs 38 technical strategies, and — on demand —
 convenes a **multi-agent investment committee** that produces an institutional-grade
-research report. It runs 24/7 with a tiered, self-improving memory layer (MemCore).
+research report. A scheduled **Watchlist Monitoring Agent** delivers a pre-market
+briefing on the watchlist every trading morning. It runs 24/7 with a tiered,
+self-improving memory layer (MemCore).
 
 The conversational agent is built on `claude-agent-sdk` using **Claude Code Pro
 authentication — no `ANTHROPIC_API_KEY`**. Embeddings and search are fully local. The
@@ -16,7 +18,8 @@ final report is delivered as a **PDF**, with an on-request **Traditional Chinese
 - **Stack**: Python 3.12, `claude-agent-sdk`, `openai`, `python-telegram-bot`,
   `httpx` (NIM + Firecrawl web), `weasyprint` + `markdown` (PDF), pandas / numpy (`<2.3`),
   `pandas_ta` + a vendored TA engine, SQLite (+ `sqlite-vec`), `fastembed` (ONNX),
-  `tiktoken`, APScheduler, matplotlib, `yfinance`, PyYAML.
+  `tiktoken`, APScheduler, `pandas_market_calendars` (NYSE trading-day calendar),
+  matplotlib, `yfinance`, PyYAML.
 - **Source of truth**: the `transactions` and `prices` tables. All portfolio figures
   are *derived* and recomputed, never cached.
 - **Process model**: one long-lived asyncio process (the Telegram bot) that owns one
@@ -35,8 +38,9 @@ final report is delivered as a **PDF**, with an on-request **Traditional Chinese
 ```mermaid
 flowchart TD
     TG["Telegram"] <--> BOT["cio/bot.py<br/>handlers, access gate, /stop, single-flight, scheduler"]
-    BOT --> AGENT["cio/agent.py<br/>CIOAgent (SDK) + 22 MCP tools"]
+    BOT --> AGENT["cio/agent.py<br/>CIOAgent (SDK) + 23 MCP tools"]
     BOT --> COMM["cio/committee/*<br/>investment committee pipeline"]
+    BOT --> WMA["cio/watchlist_monitor/*<br/>pre-market watchlist briefing"]
     AGENT --> CTX["cio/context.py<br/>memory injection"]
     AGENT --> PORT["cio/portfolio.py<br/>average-cost engine"]
     AGENT --> CHARTS["cio/charts.py + stock/panel.py"]
@@ -53,7 +57,12 @@ flowchart TD
     PORT --> DB[("cio/db.py<br/>data/cio.db")]
     MEM --> DB
     RECALL --> DB
-    SCHED["cio/scheduler.py<br/>digest + price refresh"] --> PORT
+    SCHED["cio/scheduler.py<br/>digest + price refresh + 06:00 WMA briefing"] --> PORT
+    SCHED -. "trading-day gate" .-> TU["cio/timeutil.py<br/>is_trading_day (NYSE cal)"]
+    SCHED --> WMA
+    WMA --> STK
+    WMA --> WEB
+    WMA --> MODELS
     AGENT -. "Pro auth, subprocess" .-> CLAUDE["claude CLI / SDK"]
     WEB -. "httpx /v2" .-> FC["Firecrawl instance"]
     MODELS -. "Bearer key, httpx" .-> NIM["NVIDIA NIM API"]
@@ -62,15 +71,17 @@ flowchart TD
 
 | Module | Responsibility |
 |---|---|
-| `bot.py` | Telegram I/O; **access-control gate**; routes text/photo/CSV to the per-chat agent; `/committee`, `/subscribe`, **`/stop`**; **per-chat single-flight** (block=False long handlers); boot reindex, scheduler start, eager pre-warm |
-| `agent.py` | `CIOAgent` wraps one SDK session; 22 in-process MCP tools (incl. `web_search`/`web_scrape`); rolling sessions, PreCompact hook, nudge, reflection loop |
+| `bot.py` | Telegram I/O; **access-control gate**; routes text/photo/CSV to the per-chat agent; `/committee`, **`/briefing`**, `/subscribe`, **`/stop`**; **per-chat single-flight** (block=False long handlers); boot reindex, scheduler start, eager pre-warm |
+| `agent.py` | `CIOAgent` wraps one SDK session; 23 in-process MCP tools (incl. `web_search`/`web_scrape`/`watchlist_prices`); rolling sessions, PreCompact hook, nudge, reflection loop |
 | `web.py` | Firecrawl-backed `search` / `scrape` (async `httpx` → `/v2`); output-capped, offline-safe; powers the agent's web tools |
 | `context.py` | Assembles the injected "hot" memory block within a token budget (`build_memory_block` chat-scoped, `build_scope_block` arbitrary-scoped) |
 | `recall.py` | fastembed embeddings + `sqlite-vec` ANN + FTS5, fused with RRF; strict-scope recall (`include_global`) |
 | `memory.py` | Tiered note store, profile, digests, playbooks, eviction, chat registry, **figures firewall** |
 | `portfolio.py` | Average-cost basis, positions, realized P&L, summary; idempotent CSV ingest; live-price refresh |
 | `charts.py` / `stock/panel.py` | Allocation pie / P&L bar PNGs; one-stop single-stock panel image |
-| `scheduler.py` | APScheduler daily digest + EOD price-refresh (DB-direct, idempotent, reboot catch-up) |
+| `scheduler.py` | APScheduler daily digest + EOD price-refresh + **06:00 watchlist briefing** (DB-direct, idempotent, reboot catch-up); WMA job is **trading-day gated** via `timeutil.is_trading_day` |
+| `timeutil.py` | Local-TZ helpers + **`is_trading_day`** — Nasdaq trading-day check via the NYSE calendar (`pandas_market_calendars`), weekday fallback if the lib is absent |
+| `watchlist_monitor/*` | Watchlist Monitoring Agent (WMA) — per-security overnight assessment + consolidated morning briefing (see §7) |
 | `db.py` | SQLite schema, `sqlite-vec` loader, dim-migration, legacy migration; self-initializes any db path |
 | `stock/data.py` | yfinance fetch + per-symbol cache (**sanitized paths**) + fundamentals (incl. **forward P/E**) + symbol normalization |
 | `stock/engine/**` | Vendored TA engine: 38 strategies + indicators (pandas 3 / numpy 2 refactor) |
@@ -88,6 +99,7 @@ the agents' accruing notes + 768-dim vectors never bloat the portfolio db. The
 ```mermaid
 erDiagram
     transactions ||--o{ prices : "valued by (symbol)"
+    watchlists ||--o{ watchlist_items : "watchlist_id"
     mem_notes ||--o| mem_vec : "note_id"
     mem_notes ||--o| notes_fts : "rowid"
     conv_turns ||--o| turn_vec : "turn_id"
@@ -95,6 +107,8 @@ erDiagram
     chats ||--o{ conv_turns : "chat_id"
     transactions { int id PK }
     prices { text symbol PK }
+    watchlists { int id PK }
+    watchlist_items { int watchlist_id FK }
     mem_notes { int id PK }
     user_profile { text scope PK }
     playbooks { int id PK }
@@ -105,6 +119,14 @@ erDiagram
 - `transactions` — every BUY/SELL/DIV; positions and P&L derive from this.
 - `prices` — latest close per symbol (manual or refreshed).
 - `imported_files` — sha256 of each ingested CSV (idempotency ledger).
+- `watchlists` / `watchlist_items` — named symbol lists (one `is_active` at a time) and
+  their members. `watchlist_items.position` holds the drag-to-reorder display order
+  (`ORDER BY position, symbol`); items are not financial figures, so they live here as
+  plain membership. Single-active is enforced in `watchlist.set_active()` (clears all
+  other rows in one txn — SQLite can't express "at most one active"); every list is
+  seeded with the NASDAQ Composite `^IXIC`, which `remove_symbol` refuses to drop. The
+  `position` column is back-filled on existing DBs by an `ALTER TABLE` migration in
+  `db.connect()` (idempotent; `CREATE TABLE IF NOT EXISTS` can't add a column).
 
 **MemCore domain (qualitative — never figures):**
 - `mem_notes` — tiered notes (`scope`, `tier` hot/warm, `importance`, `hits`, `source`).
@@ -112,14 +134,16 @@ erDiagram
 - `notes_fts` / `turns_fts` — FTS5 keyword indexes (trigger-synced).
 - `mem_vec` / `turn_vec` — `sqlite-vec` `vec0` tables, `float[768]` embeddings.
 - `conv_turns` — COLD store of every Telegram user/assistant turn (`bot._run` →
-  `memory.log_turn`); feeds hybrid recall and the dev dashboard (§7). Gated by capture level.
+  `memory.log_turn`); feeds hybrid recall and the dev dashboard (§8). Gated by capture level.
 - In **`committee.db`**: the same `mem_notes` / `mem_vec` / `notes_fts` tables, scoped
   `committee:{role}` — one logical namespace per agent (see §6.6) — plus `token_usage`
   (`service`, `day`, `tokens`) for the CIO fallback chain's daily budget (§6.4), and
   `committee_transcript` (every LLM call's sent prompt + returned text, grouped by `run_id`)
-  for the dev dashboard (§7).
+  for the dev dashboard (§8).
 
-**Runtime:** `chats` (per-chat SDK `session_id`), `meta` (`embed_dim`, migration flags).
+**Runtime:** `chats` (per-chat SDK `session_id` + digest/briefing subscription flag),
+`meta` (`embed_dim`, migration flags, and the per-day idempotency stamps
+`last_digest_date` / `last_wma_date` so a same-day reboot never re-sends).
 
 ---
 
@@ -185,9 +209,11 @@ playbook.
 - **`data.py`** — `load_or_download_stock_data` fetches OHLCV from yfinance and caches
   one joblib pickle per symbol under `data/stock_cache/`. **Cache paths are sanitized**
   (`safe_symbol` + realpath containment) so a hostile ticker cannot traverse the dir or
-  name an arbitrary pickle (see §8). `fundamentals()` pulls PE/**forward-PE**/PB/yield/
+  name an arbitrary pickle (see §9). `fundamentals()` pulls PE/**forward-PE**/PB/yield/
   EPS/ROE/margin/market-cap/52-week/quarterly-revenue + `quoteType` (ETF detection).
-  `normalize_symbol` resolves a bare 4-digit code to `.TW`/`.TWO`.
+  `normalize_symbol` resolves a bare 4-digit code to `.TW`/`.TWO`. `latest_quote()`
+  returns the latest close + OHLC/volume **and** the day change (`prev_close`, `change`,
+  `change_pct`, vs the prior session's close) — used by the `/watchlist` quote-board.
 - **`engine/`** — a vendored strategy engine: 38 technical strategies + indicators,
   refactored for pandas 3 / numpy 2. Exposed via the `cio.stock` facade
   (`list_strategies`, `run_strategy`).
@@ -196,7 +222,17 @@ playbook.
   and TW color convention.
 
 Agent tools: `stock_quote`, `stock_history`, `list_stock_strategies`,
-`run_stock_strategy`, `refresh_prices`, `stock_panel`.
+`run_stock_strategy`, `refresh_prices`, `stock_panel`, `watchlist_prices`.
+
+**Watchlists (`cio/watchlist.py`)** — named symbol lists, exactly one active (see §2 for
+the schema + invariants). `prices()` is the shared read path (active list by default,
+fetched via `latest_quote`, injectable `quote_fn` for tests) used by both the
+`watchlist_prices` agent tool (returns JSON) and the deterministic Telegram `/watchlist`
+command. The command renders a **broker-style quote-board PNG** (`charts.watchlist_table`):
+Instrument / Last / Change / Change % / Volume, green/red by sign with an up/down dot, the
+NASDAQ index (`^IXIC` → `COMP`) highlighted on top, K/M/B volume; it falls back to a plain
+text table if rendering fails. List membership order (drag-to-reorder) is the display
+order in both the board and the tool output.
 
 ### 4.1 Web access (`cio/web.py`)
 `web.search(query, limit)` and `web.scrape(url)` call a Firecrawl instance's `/v2/search`
@@ -363,16 +399,98 @@ PDF render falls back to sending the `.md`.
 
 ---
 
-## 7. Developer dashboard (`cio/dashboard/`)
+## 7. Watchlist Monitoring Agent (`cio/watchlist_monitor/`)
 
-A localhost-only, read-only web view for the operator to **verify the agent is
-correct** — what each model received, what it returned, token spend, and chat
-history. Stdlib `http.server.ThreadingHTTPServer` (no web framework, zero new
-deps), bound `127.0.0.1`. Launch: `python -m cio.dashboard`.
+The first layer of the architecture: before market open it scans the watchlist,
+produces a one-security assessment for each name, and renders a consolidated
+**morning briefing** — far cheaper than the committee (one model call per security),
+so the operator can triage what deserves a full committee run.
 
-**Routes** (server-rendered HTML, no client JS):
+```mermaid
+flowchart TD
+    WL["watchlist.active()<br/>symbols"] --> MS
+    subgraph MS["monitor_watchlist — per security (bounded parallel)"]
+        BD["bundle.gather_bundle<br/>price + fundamentals + 38 TA"]
+        NW["web.search<br/>overnight headlines (Firecrawl)"]
+        BD --> ASK["engine.ask_role(role_key='wma')<br/>openai → claude → NIM chain"]
+        NW --> ASK
+        ASK --> ASS["normalized assessment<br/>(PRD §7: status, conviction, rec,<br/>events, risks, catalysts, thesis Δ)"]
+    end
+    MS --> BR["report.build_briefing<br/>PRD §8: exec summary, alerts,<br/>risks, catalysts, per-security review"]
+    BR --> OUT["PDF (+ 繁中 on request) → Telegram"]
+```
+
+### 7.1 Per-security assessment (`agent.py`)
+`monitor_symbol` reuses the committee `gather_bundle` (price / fundamentals / TA) and
+pulls overnight headlines via `cio.web.search` (offline-safe), then calls
+`engine.ask_role(system, user, role_key="wma")` for a single fenced-yaml verdict that is
+**normalized** into a fixed schema: `overall_status` (bullish/neutral/bearish),
+`conviction_score` (0–100, clamped), `recommendation` (Buy/Add/Hold/Monitor/Reduce/Sell),
+`analyst_sentiment`, `event_importance` (low/medium/high/critical),
+`investment_thesis_change` (unchanged/positive/negative), and the
+positive/negative-event, new-risk and upcoming-catalyst lists. Invalid model values fall
+back to safe defaults; a symbol with no data is **skipped without spending a model call**.
+`monitor_watchlist` fans out across the active list under a semaphore
+(`CIO_WMA_CONCURRENCY`, default 4), preserving input order; it never raises.
+
+### 7.2 Committee escalation (PRD §11)
+A high/critical `event_importance` or a negative `investment_thesis_change` sets an
+`escalate` flag. v1 **flags** those names in the briefing (`/committee SYMBOL`) rather than
+auto-running the committee — keeping the daily briefing cheap and respecting the committee's
+per-run cost ceiling.
+
+### 7.3 Model chain
+The `wma` role uses the same shape as the CIO chain (premium → premium → cheap), editable in
+`config/committee_models.yaml`: **OpenAI** `gpt-5.5-2026-04-23` (daily 200k) → **Claude Opus**
+`claude-opus-4-8` (daily 200k) → **NVIDIA NIM** `moonshotai/kimi-k2.6` (last resort). It runs
+through the identical `ask_role` budget/fallback machinery as the committee (§6.4).
+
+### 7.4 Scheduling — trading days only
+`scheduler.watchlist_briefing` runs at **06:00 local** on stock days. APScheduler's
+`day_of_week` (default `mon-fri`, `CIO_WMA_DAYS`) is a cheap pre-filter; the authoritative
+gate is `timeutil.is_trading_day()`, which checks the **NYSE calendar**
+(`pandas_market_calendars`, mirroring `AI4StockMarket/.../build_stocks_data.is_trading_day`)
+so **Nasdaq holidays *and* weekends are skipped**; it degrades to a Mon–Fri check if the
+calendar lib is unavailable. The run is **idempotent per day** (`meta.last_wma_date`, set
+only after a successful send) with a boot-time catch-up if the machine was down at 06:00 on a
+trading day. `CIO_WMA_HOUR=off` disables it. The briefing is pushed (PDF + short summary, `.md`
+fallback) to every **subscribed** chat (`memory.subscribed_chats`, the same opt-in as the
+daily digest; §8 lists subscribers).
+
+### 7.5 Output — PDF + on-request 繁體中文 + manual invoke
+`build_briefing` renders the PRD §8 markdown (executive summary with environment + bullish/
+neutral/bearish counts + highest-priority pick, high/critical alerts, aggregated new risks,
+upcoming catalysts, escalation list, then a priority-ordered per-security review);
+`briefing_summary` is the short Telegram recap. The scheduled push is English; the manual
+paths take a language token for a Traditional-Chinese briefing (reusing the committee
+`translate_report` + OpenCC pipeline, §6.7): **Telegram** `/briefing [SYMBOL…] [zh]`
+(no symbols = active watchlist) and **CLI** `python -m cio.watchlist_monitor [SYMBOL…] [zh]`.
+Both are `/stop`-aware and under the per-chat single-flight lock (§5.1).
+
+---
+
+## 8. Developer dashboard (`cio/dashboard/`)
+
+A localhost-only web view for the operator to **verify the agent is correct** — what
+each model received, what it returned, token spend, and chat history. Read-only except
+for `/watchlist`, the one write surface. Stdlib `http.server.ThreadingHTTPServer` (no web
+framework, zero new deps), bound `127.0.0.1`. Launch: `python -m cio.dashboard`.
+
+**Routes** (server-rendered HTML, no client JS except the one `/watchlist` drag script):
 - `/usage` — tokens per backend per UTC day (`usage.recent` over `committee.db.token_usage`).
 - `/telegram` — full conversation history (`memory.conv_history` over `cio.db.conv_turns`).
+- `/subscribers` — chats opted in to the daily digest + 06:00 watchlist briefing
+  (`memory.list_subscribers`: `chat_id` + subscribed-since), so the operator can see exactly
+  who receives the scheduled pushes.
+- `/watchlist` — the **write surface**: manage symbol lists (`cio/watchlist.py`).
+  GET renders the manager (lists, the selected list's symbols, search, CSV-paste import);
+  `do_POST` dispatches one `action` field (create/activate/rename/delete/add_symbol/
+  remove_symbol/import_csv/reorder) → mutate → **303 redirect** back with a flash
+  (Post/Redirect/Get, so a refresh can't resubmit). Same auth gate as GET. All
+  mutations funnel through `cio/watchlist.py` (single source of truth for the
+  single-active and NASDAQ-index invariants). Drag-to-reorder is one scoped vanilla
+  script that writes the dragged symbol order into a hidden field and submits; with JS
+  off the list still renders and every other action still works.
 - `/committee` → `/committee/<run_id>` — every LLM call of a run: content **sent**
   (system + user prompt) and content **returned**, per role, in order.
 - `/memory` — **per-agent / per-chat memory contents** for debugging: `memory.list_scopes`
@@ -405,7 +523,7 @@ cookie so nav stays clean.
 
 ---
 
-## 8. Correctness & security guarantees
+## 9. Correctness & security guarantees
 
 | Concern | Mechanism |
 |---|---|
@@ -417,7 +535,7 @@ cookie so nav stays clean.
 | Secrets | `TELEGRAM_BOT_TOKEN` / `NVIDIA_API_KEY` / `OPENAI_API_KEY` from env only; `.env` gitignored; the key *name* (not value) is the only thing logged |
 | Duplicate import on replay | Content-hash idempotency ledger, atomic with row inserts |
 | Transcript blowup (24/7) | Rolling sessions (digest + reseed) + importance-decay eviction; dev-dashboard committee transcript pruned to `CIO_TRANSCRIPT_KEEP_RUNS` (level 1/3) |
-| Dashboard exposure | Read-only; binds `127.0.0.1` by default; optional `CIO_DASH_TOKEN` cookie gate; warns if bound off-loopback without a token |
+| Dashboard exposure | Read-only except the `/watchlist` write page; binds `127.0.0.1` by default; optional `CIO_DASH_TOKEN` cookie gate guards GET **and** POST; warns if bound off-loopback without a token. Writes go only through `cio/watchlist.py` (parameterized, invariant-enforcing); POST mutations use PRG redirects |
 | Reboot data loss | All durable state in SQLite; eager resume; graceful stale-session fallback |
 | Dependency CVEs | `pip-audit`: no known-vulnerable dependencies at audit time |
 | Auditability | Every note carries `source` (user/agent/auto/committee/legacy) + timestamps + `importance`/`hits` |
@@ -433,7 +551,7 @@ allowlisted-chat gate that bounds who can drive the agent at all.
 
 ---
 
-## 9. Configuration (environment)
+## 10. Configuration (environment)
 
 All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 
@@ -456,6 +574,10 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `CIO_MODEL` | SDK default | Pin the conversational / Claude default model |
 | `CIO_DIGEST_HOUR` / `_MINUTE` | `8` / `0` | Daily digest time (`off` to disable) |
 | `CIO_PRICE_REFRESH_HOUR` / `_MINUTE` | `17` / `0` | EOD price refresh (`off` to disable) |
+| `CIO_WMA_HOUR` / `_MINUTE` | `6` / `0` | Watchlist briefing time, local TZ (`off` to disable) |
+| `CIO_WMA_DAYS` | `mon-fri` | Cron `day_of_week` pre-filter (Nasdaq holidays/weekends always skipped) |
+| `CIO_WMA_CONCURRENCY` | `4` | Securities assessed in parallel per briefing |
+| `CIO_TZ` | `America/Vancouver` | Local timezone for schedule times + the token-usage day boundary |
 | `CIO_ROLL_TURNS` / `_TOKENS` | `40` / `16000` | Rolling-session checkpoint thresholds |
 | `CIO_NUDGE_TURNS` | `8` | Persist-reminder cadence |
 | `CIO_MAX_NOTES` | `500` | Per-scope note cap (eviction) |
@@ -465,16 +587,16 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `FIRECRAWL_API_KEY` | unset | Firecrawl bearer token (cloud / authed instances; self-hosted needs none) |
 | `CIO_WEB_MAX_CHARS` | `6000` | Per-result web-markdown cap (prompt-budget guard) |
 | `CIO_WEB_TIMEOUT` | `45` | Web request timeout (seconds) |
-| `CIO_CAPTURE_LEVEL` | `1` | Dev-dashboard capture scope 1–3 (§7) |
+| `CIO_CAPTURE_LEVEL` | `1` | Dev-dashboard capture scope 1–3 (§8) |
 | `CIO_TRANSCRIPT_KEEP_RUNS` | `200` | Committee runs retained when pruning (level 1/3) |
 | `CIO_DASH_HOST` / `CIO_DASH_PORT` | `127.0.0.1` / `8787` | Dashboard bind |
 | `CIO_DASH_TOKEN` | unset | Optional dashboard shared-secret gate |
 
 ---
 
-## 10. Verification
+## 11. Verification
 
-`pytest` — **225 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
+`pytest` — **268 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
 firewall, scope isolation, injection budget, hybrid recall, eviction, promotion, rolling
 cadence, playbooks, cold-boot); stock subsystem + panel (incl. forward-P/E field & cell);
 committee (bundle, 8 roles, consensus/tally, 13-section report, confidence band, debate
@@ -484,8 +606,13 @@ each budget state**, parallel-vs-sequential peak, missing-key degrade); per-agen
 incl. a 繁體中文 doc, lang parsing, translate no-op/fallback); **`/stop` + per-chat
 single-flight** (`tests/test_bot_stop.py`: stopped turn not logged / no answer leaked /
 agent reset / registries don't leak; normal turn unaffected; error + genuine-cancel cleanup;
-per-chat isolation; 2nd-message reject while busy; accept after completion/stop); **security**
-(symbol sanitization, cache-path containment, report-filename sanitizer, access gate).
+per-chat isolation; 2nd-message reject while busy; accept after completion/stop); **WMA**
+(`tests/test_watchlist_monitor.py`: yaml parse/normalize, invalid-value fallbacks, no-data
+skip without a model call, escalation flag, order-preserving fan-out, briefing sections +
+summary, `wma` chain resolution); **trading-day calendar** (`tests/test_timeutil.py`:
+NYSE-calendar membership, holiday exclusion, weekday fallback, type coercion); **dashboard**
+(routes incl. `/subscribers`, escaping, 404, token gate); **security** (symbol sanitization,
+cache-path containment, report-filename sanitizer, access gate).
 Dependency scan via `pip-audit` (no known vulnerabilities). Committee live-verified
 end-to-end against AAPL/NVDA (NIM specialists + Opus CIO) and rendered to a real
 CJK-embedded PDF; web tools live-verified against a self-hosted Firecrawl.
