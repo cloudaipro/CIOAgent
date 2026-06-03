@@ -68,6 +68,45 @@ def _agent(chat_id: int) -> CIOAgent:
     return _agents[chat_id]
 
 
+# ----- in-flight task tracking (for /stop) ----------------------------------
+# The long handlers (on_text/on_photo/on_document/cmd_committee) are registered
+# block=False, so the dispatcher keeps reading updates while one runs — that lets
+# a /stop arrive and cancel the in-flight task. `_running` maps chat_id → the set
+# of its live handler tasks; `_stopping` marks the tasks a user explicitly asked
+# to cancel, so a genuine shutdown cancellation (not in the set) still propagates.
+_running: dict[int, set[asyncio.Task]] = {}
+_stopping: set[asyncio.Task] = set()
+
+
+def _track_task(chat_id: int, task: asyncio.Task | None) -> None:
+    if task is not None:
+        _running.setdefault(chat_id, set()).add(task)
+
+
+def _untrack_task(chat_id: int, task: asyncio.Task | None) -> None:
+    if task is not None:
+        _stopping.discard(task)   # central cleanup: never leak a stop marker
+    s = _running.get(chat_id)
+    if s is not None and task is not None:
+        s.discard(task)
+        if not s:
+            _running.pop(chat_id, None)
+
+
+async def _reset_agent(chat_id: int) -> None:
+    """Drop a chat's agent after a cancelled turn so a half-consumed SDK response
+    stream can't corrupt the next turn. The next message lazily rebuilds it,
+    resuming from the saved session_id; financial truth lives in the DB regardless.
+    Never raises."""
+    agent = _agents.pop(chat_id, None)
+    if agent is None:
+        return
+    try:
+        await agent.close()
+    except Exception:
+        log.debug("agent close during reset failed", exc_info=True)
+
+
 async def _reply(update: Update, text: str, images: list[str]) -> None:
     for chunk in (text[i:i + TG_LIMIT] for i in range(0, len(text), TG_LIMIT)) if text else []:
         await update.message.reply_text(chunk)
@@ -80,15 +119,39 @@ async def _run(update: Update, prompt: str) -> None:
     chat_id = update.effective_chat.id
     await update.effective_chat.send_action(ChatAction.TYPING)
     agent = _agent(chat_id)
+    task = asyncio.current_task()
+    _track_task(chat_id, task)
     try:
-        text, images = await agent.ask(prompt)
-    except Exception as e:  # never let the bot die on one bad turn
-        log.exception("agent error")
-        await update.message.reply_text(f"⚠️ Agent error: {e}")
-        return
-    # Persist the exchange for the dev dashboard + cold-store recall (best-effort).
-    memory.log_turn(chat_id, agent._session_id, prompt, text)
-    await _reply(update, text or "(no response)", images)
+        try:
+            text, images = await agent.ask(prompt)
+        except asyncio.CancelledError:
+            # A user /stop cancelled this turn. Distinguish from a genuine
+            # shutdown cancellation: only the former is in `_stopping`.
+            if task in _stopping:
+                _stopping.discard(task)
+                log.info("turn stopped by user for chat %s", chat_id)
+                # Reset the agent: the in-flight LLM stream was interrupted, so a
+                # fresh client avoids any half-consumed state on the next turn. The
+                # turn is NOT logged — it never completed.
+                await _reset_agent(chat_id)
+                try:
+                    await update.message.reply_text(
+                        "🛑 Stopped. Anything already saved or charged before the "
+                        "stop stands — I can only halt the remaining steps."
+                    )
+                except Exception:
+                    pass
+                return
+            raise  # not a user stop (e.g. shutdown) — let it propagate
+        except Exception as e:  # never let the bot die on one bad turn
+            log.exception("agent error")
+            await update.message.reply_text(f"⚠️ Agent error: {e}")
+            return
+        # Persist the exchange for the dev dashboard + cold-store recall (best-effort).
+        memory.log_turn(chat_id, agent._session_id, prompt, text)
+        await _reply(update, text or "(no response)", images)
+    finally:
+        _untrack_task(chat_id, task)
 
 
 # ----- handlers -------------------------------------------------------------
@@ -116,7 +179,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
         "• Send a broker screenshot or receipt photo and I'll read it\n"
         "• /subscribe for a daily portfolio digest (/unsubscribe to stop)\n"
-        "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)"
+        "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)\n"
+        "• /stop — cancel whatever I'm currently working on for you"
     )
 
 
@@ -128,6 +192,25 @@ async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     memory.set_subscribed(update.effective_chat.id, False)
     await update.message.reply_text("🔕 Unsubscribed from the daily digest.")
+
+
+async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Cancel the in-flight turn / committee run for THIS chat.
+
+    Only halts work that hasn't run yet — side effects already committed (DB
+    writes, model/NIM credits spent) cannot be rolled back. Affects only the
+    requesting chat; other chats' running tasks are untouched."""
+    chat_id = update.effective_chat.id
+    tasks = [t for t in _running.get(chat_id, set()) if not t.done()]
+    if not tasks:
+        await update.message.reply_text("Nothing is running to stop.")
+        return
+    for t in tasks:
+        _stopping.add(t)
+        t.cancel()
+    await update.message.reply_text(
+        f"🛑 Stopping {len(tasks)} running task(s)… already-saved work stands."
+    )
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -159,6 +242,27 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tracked wrapper around the committee run so /stop can cancel it mid-flight."""
+    chat_id = update.effective_chat.id
+    task = asyncio.current_task()
+    _track_task(chat_id, task)
+    try:
+        await _cmd_committee_impl(update, ctx)
+    except asyncio.CancelledError:
+        if task in _stopping:
+            _stopping.discard(task)
+            log.info("committee run stopped by user for chat %s", chat_id)
+            try:
+                await update.message.reply_text("🛑 Committee run stopped.")
+            except Exception:
+                pass
+            return
+        raise  # genuine cancellation — propagate
+    finally:
+        _untrack_task(chat_id, task)
+
+
+async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         # ── 1. Parse symbol + optional language ──────────────────────────
         if not ctx.args:
@@ -305,10 +409,13 @@ def main() -> None:
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
-    app.add_handler(CommandHandler("committee", cmd_committee))
-    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
-    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    # Long handlers run block=False so the dispatcher keeps reading updates while
+    # one is in flight — that is what lets a /stop arrive and cancel it.
+    app.add_handler(CommandHandler("committee", cmd_committee, block=False))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo, block=False))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document, block=False))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text, block=False))
     log.info("CIO bot polling…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
