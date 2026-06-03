@@ -12,7 +12,8 @@ Dropped from the source: torch/random and the MyPyUtil/ai4stock_util imports (un
 import os
 import logging
 from functools import lru_cache
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -64,6 +65,44 @@ def closest_trading_day(date, method="next"):
     )
 
 
+# NASDAQ regular session in US/Eastern. Pre/after-market windows aren't traded on
+# the daily OHLC bar this module fetches, so only the regular session matters for
+# deciding whether the latest daily bar is still forming.
+_NASDAQ_OPEN = time(hour=9, minute=30)
+_NASDAQ_CLOSE = time(hour=16, minute=0)
+_EASTERN = ZoneInfo("America/New_York")
+
+
+def nasdaq_trading_status(now=None):
+    """NASDAQ trading status for *now* (US/Eastern; defaults to current time).
+
+    Mirrors AI4StockMarket/StockPricePrediction/build_stocks_data.NASDAQTradingStatus,
+    but uses the NASDAQ market calendar (already a dependency) for holiday/weekend
+    detection instead of the `holidays` package.
+
+    Returns:
+        0 — market closed (weekend or holiday)
+        1 — pre-market (before 09:30)
+        2 — regular hours (09:30–16:00)
+        3 — after-market (after 16:00)
+    """
+    if now is None:
+        now = datetime.now(_EASTERN)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=_EASTERN)
+    d = now.date()
+    # Trading day? NASDAQ calendar covers weekends and holidays in one check.
+    schedule = mcal.get_calendar("NASDAQ").schedule(start_date=d, end_date=d)
+    if schedule.empty:
+        return 0
+    t = now.timetz().replace(tzinfo=None)
+    if t < _NASDAQ_OPEN:
+        return 1
+    if t <= _NASDAQ_CLOSE:
+        return 2
+    return 3
+
+
 def vol_as_int(tick_data):
     tick_data["Volume"] = tick_data["Volume"].astype(int)
     return tick_data
@@ -113,6 +152,18 @@ def load_or_download_stock_data(symbol, start, end):
     end = closest_trading_day(end, method="prev")
 
     stk_file = _cache_path(symbol)
+    # During regular hours the latest daily bar is still forming, and right after
+    # the close Yahoo revises it for ~15min — so a cached bar for the current
+    # session is a stale intraday snapshot for "latest price" callers. When the
+    # market is open or settling (status 2/3) AND the request reaches today's
+    # session, bypass the cache and re-download so the newest bar is fetched fresh
+    # (the download path overwrites the cache with the updated bar). Historical
+    # ranges, and any request while the market is closed/pre-market (the most
+    # recent session's bar is final), are served from cache as normal.
+    now_et = datetime.now(_EASTERN)
+    market_live = nasdaq_trading_status(now_et) in (2, 3)
+    todays_session = closest_trading_day(now_et.replace(tzinfo=None), method="prev")
+    serve_cache = not (market_live and end >= todays_session)
     cached_data = None
     if os.path.isfile(stk_file):
         try:
@@ -121,9 +172,10 @@ def load_or_download_stock_data(symbol, start, end):
             else:
                 cached_data = pd.read_csv(stk_file).set_index("Date")
                 cached_data.index = pd.to_datetime(cached_data.index)
-            # Cache hit only if the cached range covers the request.
+            # Cache hit only if the cached range covers the request AND the request
+            # doesn't reach a still-forming current session.
             if cached_data is not None and not cached_data.empty:
-                if start >= cached_data.index[0] and end <= cached_data.index[-1]:
+                if serve_cache and start >= cached_data.index[0] and end <= cached_data.index[-1]:
                     log.debug("Cache hit: %s", stk_file)
                     return vol_as_int(cached_data.loc[start:end].dropna())
         except Exception:
