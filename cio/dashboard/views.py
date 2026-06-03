@@ -40,6 +40,13 @@ a { color: #58a6ff; }
 .bar { background: #1f6feb; height: 10px; border-radius: 2px; display: inline-block; }
 .msg { white-space: pre-wrap; word-break: break-word; }
 .user { color: #7ee787; } .assistant { color: #e6edf3; }
+td.up { color: #7ee787; } td.down { color: #f85149; }
+.cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 8px 0 16px; }
+.stat { flex: 1; min-width: 150px; border: 1px solid #30363d; border-radius: 8px;
+        padding: 12px 16px; background: #161b22; }
+.stat .k { color: #8b949e; font-size: 12px; } .stat .v { font-size: 20px;
+        font-variant-numeric: tabular-nums; margin-top: 4px; }
+.stat .v.up { color: #7ee787; } .stat .v.down { color: #f85149; }
 details { border: 1px solid #30363d; border-radius: 6px; margin: 8px 0;
           background: #161b22; }
 summary { cursor: pointer; padding: 8px 12px; font-weight: 600; }
@@ -81,7 +88,8 @@ def _page(title: str, body: str, level: int) -> str:
         "<header>"
         "<a href='/'>Overview</a><a href='/usage'>Token usage</a>"
         "<a href='/telegram'>Telegram</a><a href='/committee'>Committee</a>"
-        "<a href='/watchlist'>Watchlist</a><a href='/subscribers'>Subscribers</a>"
+        "<a href='/watchlist'>Watchlist</a><a href='/portfolio'>Portfolio</a>"
+        "<a href='/subscribers'>Subscribers</a>"
         "<a href='/memory'>Memory</a>"
         f"<span class='lvl'>capture level {esc(level)}</span>"
         "</header><main>" + body + "</main></body></html>"
@@ -376,6 +384,123 @@ def render_watchlist(watchlists, selected, level: int,
         + list_table + detail
     )
     return _page("Watchlist", body, level)
+
+
+def _money(value) -> str:
+    """Format a number as a plain string, '' for None."""
+    return "" if value is None else f"{value:,.2f}"
+
+
+def _signed_cell(value, suffix: str = "") -> str:
+    """A right-aligned table cell coloured green when >0, red when <0.
+
+    Green=up, red=down — matches the charts and reports.
+    """
+    if value is None:
+        return "<td class='num'></td>"
+    cls = "up" if value > 0 else ("down" if value < 0 else "")
+    sign = "+" if value > 0 else ""
+    return f"<td class='num {cls}'>{esc(sign + _money(value) + suffix)}</td>"
+
+
+def render_portfolio(summ, positions, realized, level: int,
+                     flash: str = "", flash_err: bool = False) -> str:
+    """Portfolio tab: read view (summary cards, open positions, realized P&L) plus
+    the management write surface (set price, import transactions/prices CSV, refresh
+    live prices). Forms POST to /portfolio; PRG redirect re-renders with a flash.
+
+    *summ* is portfolio.summary(); *positions* and *realized* are lists of row
+    dicts (DataFrame.to_dict('records')). Prices are manually entered or refreshed,
+    so a position with no price shows blank market value — never a crash.
+    """
+    flash_html = (f"<p class='flash{' err' if flash_err else ''}'>{esc(flash)}</p>"
+                  if flash else "")
+
+    upl = summ.get("unrealized_pl") or 0
+    upl_cls = "up" if upl > 0 else ("down" if upl < 0 else "")
+    rpl = summ.get("realized_pl") or 0
+    rpl_cls = "up" if rpl > 0 else ("down" if rpl < 0 else "")
+    cards = (
+        "<div class='cards'>"
+        f"<div class='stat'><div class='k'>Positions</div>"
+        f"<div class='v'>{esc(summ.get('positions'))}</div></div>"
+        f"<div class='stat'><div class='k'>Market value</div>"
+        f"<div class='v'>{esc(_money(summ.get('market_value')))}</div></div>"
+        f"<div class='stat'><div class='k'>Cost basis</div>"
+        f"<div class='v'>{esc(_money(summ.get('cost_basis')))}</div></div>"
+        f"<div class='stat'><div class='k'>Unrealized P&amp;L</div>"
+        f"<div class='v {upl_cls}'>{esc(_money(upl))} "
+        f"({esc(summ.get('unrealized_pct'))}%)</div></div>"
+        f"<div class='stat'><div class='k'>Realized P&amp;L</div>"
+        f"<div class='v {rpl_cls}'>{esc(_money(rpl))}</div></div>"
+        f"<div class='stat'><div class='k'>Dividends</div>"
+        f"<div class='v'>{esc(_money(summ.get('dividends')))}</div></div>"
+        "</div>"
+    )
+
+    pos_rows = "".join(
+        f"<tr><td>{esc(p['symbol'])}</td>"
+        f"<td class='num'>{esc(p['quantity'])}</td>"
+        f"<td class='num'>{esc(_money(p['avg_cost']))}</td>"
+        f"<td class='num'>{esc(_money(p['cost_basis']))}</td>"
+        f"<td class='num'>{esc(_money(p['last_price']))}</td>"
+        f"<td class='num'>{esc(_money(p['market_value']))}</td>"
+        f"{_signed_cell(p['unrealized_pl'])}"
+        f"{_signed_cell(p['unrealized_pct'], '%')}</tr>"
+        for p in positions
+    ) or "<tr><td class='empty' colspan='8'>no open positions — import a transactions CSV below</td></tr>"
+    pos_table = (
+        "<table><tr><th>Symbol</th><th>Qty</th><th>Avg cost</th><th>Cost basis</th>"
+        "<th>Last</th><th>Market value</th><th>Unrealized P&amp;L</th><th>%</th></tr>"
+        f"{pos_rows}</table>")
+
+    rpl_rows = "".join(
+        f"<tr><td>{esc(r['symbol'])}</td>"
+        f"{_signed_cell(r['realized_pl'])}"
+        f"<td class='num'>{esc(_money(r['dividends']))}</td>"
+        f"{_signed_cell(r['total'])}</tr>"
+        for r in realized
+    ) or "<tr><td class='empty' colspan='4'>no realized P&amp;L yet</td></tr>"
+    rpl_table = (
+        "<table><tr><th>Symbol</th><th>Realized P&amp;L</th><th>Dividends</th>"
+        f"<th>Total</th></tr>{rpl_rows}</table>")
+
+    # --- management write forms (mirror the watchlist POST pattern) ---
+    set_price_form = (
+        "<form method='post' action='/portfolio' class='row'>"
+        "<input type='hidden' name='action' value='set_price'>"
+        "<input name='symbol' placeholder='AAPL' required>"
+        "<input name='close' type='number' step='any' placeholder='Price' required>"
+        "<input name='price_date' type='date'>"
+        "<button class='primary' type='submit'>Set price</button></form>")
+    refresh_form = (
+        "<form method='post' action='/portfolio' class='inline'>"
+        "<input type='hidden' name='action' value='refresh_live'>"
+        "<button type='submit'>Refresh live prices</button></form>")
+    txns_form = (
+        "<form method='post' action='/portfolio'>"
+        "<input type='hidden' name='action' value='import_txns'>"
+        "<textarea name='csv_text' placeholder='txn_date,symbol,action,quantity,price"
+        "[,fees,currency,notes] — action is BUY / SELL / DIV'></textarea>"
+        "<div class='row'><button class='primary' type='submit'>Import transactions</button>"
+        "<span class='empty'>idempotent: an identical CSV is rejected</span></div></form>")
+    prices_form = (
+        "<form method='post' action='/portfolio'>"
+        "<input type='hidden' name='action' value='import_prices'>"
+        "<textarea name='csv_text' placeholder='symbol,price_date,close'></textarea>"
+        "<div class='row'><button class='primary' type='submit'>Import prices</button>"
+        "<span class='empty'>upserts the latest close per symbol</span></div></form>")
+
+    body = (
+        "<h1>Portfolio</h1>" + flash_html + cards
+        + "<h2>Open positions</h2>" + pos_table
+        + "<h2>Realized P&amp;L</h2>" + rpl_table
+        + "<div class='card'><h2>Set price</h2>"
+        + "<div class='row'>" + set_price_form + refresh_form + "</div>"
+        + "<h2>Import transactions (CSV)</h2>" + txns_form
+        + "<h2>Import prices (CSV)</h2>" + prices_form + "</div>"
+    )
+    return _page("Portfolio", body, level)
 
 
 def render_committee_run(run_id: str, calls, level: int) -> str:

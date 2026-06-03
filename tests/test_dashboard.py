@@ -66,6 +66,34 @@ def test_render_committee_run_shows_sent_and_returned():
     assert "SENT" in html and "RETURNED" in html
 
 
+def test_render_portfolio_view_and_colors():
+    summ = {"positions": 1, "market_value": 1500.0, "cost_basis": 1000.0,
+            "unrealized_pl": 500.0, "unrealized_pct": 50.0,
+            "realized_pl": -20.0, "dividends": 10.0}
+    positions = [{"symbol": "AAPL", "quantity": 10, "avg_cost": 100.0,
+                  "cost_basis": 1000.0, "last_price": 150.0, "market_value": 1500.0,
+                  "unrealized_pl": 500.0, "unrealized_pct": 50.0}]
+    realized = [{"symbol": "TSLA", "realized_pl": -20.0, "dividends": 10.0,
+                 "total": -10.0}]
+    html = views.render_portfolio(summ, positions, realized, level=1)
+    assert "AAPL" in html and "TSLA" in html
+    assert "td.up" in html and "td.down" in html  # green=up / red=down css
+    assert "class='num up'" in html   # positive unrealized P&L coloured up
+    assert "class='num down'" in html  # negative realized P&L coloured down
+
+
+def test_render_portfolio_handles_missing_price():
+    """A position with no last price must render blank, not crash."""
+    summ = {"positions": 1, "market_value": 0, "cost_basis": 1000.0,
+            "unrealized_pl": 0, "unrealized_pct": 0,
+            "realized_pl": 0, "dividends": 0}
+    positions = [{"symbol": "AAPL", "quantity": 10, "avg_cost": 100.0,
+                  "cost_basis": 1000.0, "last_price": None, "market_value": None,
+                  "unrealized_pl": None, "unrealized_pct": None}]
+    html = views.render_portfolio(summ, positions, [], level=1)
+    assert "AAPL" in html
+
+
 def test_render_empty_response_labelled():
     calls = [{
         "run_id": "r1", "symbol": "AAPL", "role_key": "risk", "service": "openai",
@@ -100,6 +128,22 @@ def live(monkeypatch):
     monkeypatch.setattr(dash_server.memory, "list_subscribers",
                         lambda *a, **k: [{"chat_id": 12345, "updated_at": "2026-06-03 14:00:00"}])
 
+    class _DF:  # stand-in for the pandas frames the portfolio funcs return
+        def __init__(self, rows): self._rows = rows
+        def to_dict(self, _orient): return self._rows
+    monkeypatch.setattr(dash_server.portfolio, "summary",
+                        lambda *a, **k: {"positions": 1, "market_value": 1500.0,
+                                         "cost_basis": 1000.0, "unrealized_pl": 500.0,
+                                         "unrealized_pct": 50.0, "realized_pl": 0.0,
+                                         "dividends": 0.0})
+    monkeypatch.setattr(dash_server.portfolio, "positions",
+                        lambda *a, **k: _DF([{"symbol": "AAPL", "quantity": 10,
+                                              "avg_cost": 100.0, "cost_basis": 1000.0,
+                                              "last_price": 150.0, "market_value": 1500.0,
+                                              "unrealized_pl": 500.0, "unrealized_pct": 50.0}]))
+    monkeypatch.setattr(dash_server.portfolio, "realized_pl",
+                        lambda *a, **k: _DF([]))
+
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), dash_server._Handler)
     port = httpd.server_address[1]
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -119,7 +163,8 @@ def _get(port, path, headers=None):
 
 
 def test_routes_render(live):
-    for path in ("/", "/usage", "/telegram", "/subscribers", "/committee", "/committee/r1"):
+    for path in ("/", "/usage", "/telegram", "/subscribers", "/committee",
+                 "/committee/r1", "/portfolio"):
         status, body, _ = _get(live, path)
         assert status == 200, path
         assert "CIO dev dashboard" in body
@@ -129,6 +174,29 @@ def test_routes_render(live):
     # committee run shows the captured exchange
     _, run_body, _ = _get(live, "/committee/r1")
     assert "RETURNED" in run_body
+
+
+def _post(port, path, fields):
+    body = "&".join(f"{k}={v}" for k, v in fields.items())
+    conn = HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", path, body=body,
+                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    return resp.status, resp
+
+
+def test_portfolio_set_price_redirects(live, monkeypatch):
+    calls = {}
+    monkeypatch.setattr(dash_server.portfolio, "set_price",
+                        lambda sym, close, date=None, **k: calls.update(
+                            symbol=sym, close=close))
+    status, resp = _post(live, "/portfolio",
+                         {"action": "set_price", "symbol": "AAPL", "close": "150"})
+    assert status == 303  # PRG redirect
+    assert calls == {"symbol": "AAPL", "close": 150.0}
+    assert "/portfolio?" in resp.getheader("Location", "")
 
 
 def test_unknown_route_404(live):
