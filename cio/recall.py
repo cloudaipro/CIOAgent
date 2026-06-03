@@ -102,6 +102,40 @@ def reindex_all(db_path=DB_PATH) -> tuple[int, int]:
     return len(notes), len(turns)
 
 
+# ----- dedup ----------------------------------------------------------------
+
+def nearest_in_scope(text: str, scope: str, db_path=DB_PATH,
+                     pool: int = 20) -> dict | None:
+    """Closest existing note to *text* within *scope*, by embedding distance.
+
+    Returns {'id', 'text', 'distance'} for the nearest note in the SAME scope, or
+    None if the scope has no indexed notes. `distance` is the sqlite-vec L2 metric
+    (smaller = more similar); for the normalized bge vectors, distance² ≈ 2(1−cos).
+    Used by the write path to collapse semantic duplicates before insert.
+    """
+    qvec = _ser(embed_one(text))
+    conn = db.connect(db_path)
+    # KNN runs on the vec table alone (proven pattern, same as search()); we then
+    # filter to this scope and take the closest in-scope hit. An out-of-scope note
+    # must never collapse ours, so scope filtering happens after the ANN lookup.
+    knn = conn.execute(
+        "SELECT note_id, distance FROM mem_vec WHERE embedding MATCH ? "
+        "ORDER BY distance LIMIT ?",
+        (qvec, pool),
+    ).fetchall()
+    best = None
+    for r in knn:
+        row = conn.execute(
+            "SELECT value FROM mem_notes WHERE id = ? AND scope = ?",
+            (r["note_id"], scope),
+        ).fetchone()
+        if row:
+            best = {"id": r["note_id"], "text": row["value"], "distance": r["distance"]}
+            break  # knn is distance-sorted, so the first in-scope hit is the closest
+    conn.close()
+    return best
+
+
 # ----- search ---------------------------------------------------------------
 
 def _fts_query(text: str) -> str | None:

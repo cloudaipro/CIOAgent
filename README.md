@@ -36,7 +36,8 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   ├─► cio/committee/*   investment committee pipeline:
                   │     bundle → 8 specialists → debate → consensus → CIO → report
                   │     models.py  per-agent model router (claude | NIM | OpenAI) + CIO chain
-                  │     agent_memory.py  isolated per-agent memory (committee.db, WAL)
+                  │     agent_memory.py  isolated per-agent memory (committee.db, WAL) + dedup
+                  │     note_sanitizer.py  LLM figures-sanitizer (salvage) + sanitizer_log.py audit
                   │     render_pdf.py / translate.py  PDF + 繁體中文
                   │
                   └─► cio/watchlist_monitor/*  pre-market Watchlist Monitoring Agent:
@@ -79,8 +80,16 @@ A tiered, auditable memory layer designed to be **≥ Hermes & OpenClaw** (see
   reusable playbook when a repeatable procedure occurred, and promoting
   frequently-used notes into the injected set. Learned artifacts pass the figures
   firewall and are logged (`source=auto`).
-- **Figures firewall**: the store refuses to memorize numbers/prices — those are
-  always recomputed from the ledger, so memory can never go stale on a figure.
+- **Figures firewall** (three layers): stale numbers never enter memory — they're
+  always recomputed from the ledger. (1) a **prompt rule** keeps figures out of notes
+  at the source; (2) an **LLM sanitizer** rewrites a figure-laden note into a clean
+  qualitative one, *salvaging the insight* (`"141% ROE proves the moat"` →
+  `"exceptional profitability proves the moat"`), with its decisions logged for audit;
+  (3) a deterministic **keyword-gated regex** is the offline backstop and the
+  acceptance contract the rewrite must pass. Bare plan-style percentages
+  (`"trim 50% on breakout"`) are allowed; stale fundamentals (`"27% margins"`) are not.
+
+Full design: [docs/MEMORY-AND-CONTEXT.md](docs/MEMORY-AND-CONTEXT.md).
 
 Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 `memory_get`, `save_playbook` / `list_playbooks`.
@@ -98,7 +107,10 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   Strong Sell, with bull/base/bear scenarios). Specialists run in parallel.
 - **Per-agent memory**: each of the 9 agents keeps its **own isolated** persistent memory
   (scope `committee:{role}` in `data/committee.db`), so they accrue private lessons
-  without sharing context — all behind the same figures firewall.
+  without sharing context — all behind the same figures firewall. Notes are
+  **deduplicated** on write: a deterministic key collapses identical takeaways and a
+  semantic check (embedding distance) collapses paraphrases, so an agent re-deriving the
+  same lesson reinforces one note instead of spawning twins.
 - **Model services** (`config/committee_models.yaml`): each agent maps to `claude`, `nim`,
   or `openai`. The CIO runs a **fallback chain** — OpenAI `gpt-5.5-2026-04-23` (daily
   200k tokens) → Claude Opus (daily 200k) → NVIDIA NIM — switching automatically as each
@@ -245,8 +257,11 @@ Sample data: `data/sample_transactions.csv`.
 
 ## Developer dashboard
 
-A localhost-only web view to verify the agent is behaving correctly. Read-only except
-for the **Watchlist** page, which is the one write surface (manage your symbol lists).
+A localhost-only web view to verify the agent is behaving correctly. Mostly read-only;
+write surfaces are the **Watchlist** / **Portfolio** pages (manage lists, set prices,
+import CSVs) and **delete** controls on the Telegram / Memory / Committee pages. Every
+mutation POSTs then redirects (PRG), behind the same auth gate, and destructive deletes
+ask for confirmation first.
 
 ```bash
 .venv/bin/python -m cio.dashboard          # http://127.0.0.1:8787
@@ -255,17 +270,21 @@ for the **Watchlist** page, which is the one write surface (manage your symbol l
 Pages:
 
 - **Token usage** — OpenAI / Claude / NIM tokens per service per UTC day (from `committee.db`).
-- **Telegram** — full conversation history (every user/assistant turn).
+- **Telegram** — conversation history **grouped by local day**, with a day selector at the
+  top (click a day to view only it) and a per-day **delete** button.
 - **Subscribers** — chats opted in to the daily digest + 06:00 watchlist briefing
   (chat id + subscribed-since), so you can see exactly who receives the scheduled pushes.
 - **Watchlist** — manage symbol lists (create/activate/rename/delete/search, add/remove
-  symbols, drag-to-reorder, CSV import). The one **write** page; mutations POST then
-  redirect (PRG), behind the same auth gate. One scoped JS for drag; no-JS safe.
+  symbols, drag-to-reorder, CSV import). One scoped JS for drag; no-JS safe.
 - **Committee** — each run drills into every LLM call: the exact content **sent**
-  (system + user prompt) and the content **returned**, per role, in order.
+  (system + user prompt) and the content **returned**, per role, in order. Includes a
+  **delete-all-runs** button.
 - **Memory** — per-agent / per-chat memory contents for debugging: every scope across
   both stores (`chat:*` / `global` in `cio.db`, `committee:<role>` in `committee.db`)
-  with each note's tier, key, value, hits, importance, source, and update time.
+  with each note's tier, key, value, hits, importance, source, and update time. Each store
+  and each scope has a **delete** button.
+- **Sanitizer** — audit trail of the figures-sanitizer: every note it rewrote (figures
+  stripped) or rejected, with the agent, symbol, what was removed, and the stored result.
 
 Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:
 

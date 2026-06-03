@@ -13,6 +13,7 @@ Public API:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -23,6 +24,13 @@ log = logging.getLogger(__name__)
 
 # Token budget per agent's memory injection — lean to keep prompts tight.
 MEM_BUDGET: int = int(os.getenv("CIO_AGENT_MEM_BUDGET", "400"))
+
+# Semantic-dedup threshold (sqlite-vec L2 distance; smaller = more similar). A new
+# note whose nearest in-scope neighbour is within this distance is treated as a
+# restatement of it — we reinforce the existing note instead of inserting a twin.
+# For normalized bge vectors, dist² ≈ 2(1−cos): 0.45 ≈ cos 0.90 (near-paraphrase).
+# Tune with CIO_DEDUP_MAXDIST; set to 0 to disable semantic dedup (key dedup stays).
+DEDUP_MAXDIST: float = float(os.getenv("CIO_DEDUP_MAXDIST", "0.45"))
 
 # Module-level DB path — tests monkeypatch this to a temp db.
 # Committee memory lives in its OWN db (data/committee.db) so the agents'
@@ -133,21 +141,51 @@ def recall_block(role_key: str, symbol: str, k: int = 5,
 # save_note — write the agent's private durable takeaway
 # ---------------------------------------------------------------------------
 
+def _note_key(symbol: str, value: str) -> str:
+    """Deterministic upsert key so re-saving the same takeaway updates one row
+    instead of inserting a duplicate. Keyed on (symbol, normalized value text)."""
+    digest = hashlib.sha1(value.strip().lower().encode("utf-8")).hexdigest()[:12]
+    sym = (symbol or "").strip().upper() or "_"
+    return f"{sym}:{digest}"
+
+
 def save_note(role_key: str, value: str, symbol: str,
               importance: float = 1.0) -> int | None:
     """Persist *value* as a WARM note in this agent's scope.
 
+    Deduplicated two ways: a deterministic key collapses identical text (upsert),
+    and a semantic check collapses paraphrases of an existing note (the closest
+    in-scope neighbour within DEDUP_MAXDIST is reinforced, not duplicated).
+
     Figures firewall: a note containing a price / $ amount / P&L is rejected
-    and logged (not crashed).  Returns the note id on success, None on rejection
-    or any other error.
+    and logged (not crashed).  Returns the note id (existing or new) on success,
+    None on rejection or any other error.
     """
     if not value or not value.strip():
         return None
     try:
         _ensure_wal()
+        scope = scope_for(role_key)
+
+        # Semantic dedup: if a near-identical note already exists in THIS scope,
+        # reinforce it (bump) rather than store a paraphrase twin. Best-effort —
+        # a recall hiccup must never block the actual save.
+        if DEDUP_MAXDIST > 0:
+            try:
+                near = recall.nearest_in_scope(value, scope, db_path=DB_PATH)
+                if near and near["distance"] <= DEDUP_MAXDIST:
+                    memory.bump(near["id"], db_path=DB_PATH)
+                    log.debug("save_note: semantic dup of note %s (dist %.3f) for %s/%s",
+                              near["id"], near["distance"], role_key, symbol)
+                    return near["id"]
+            except Exception as exc:
+                log.warning("save_note: dedup check failed for %s/%s: %s",
+                            role_key, symbol, exc)
+
         return memory.remember(
             value,
-            scope=scope_for(role_key),
+            key=_note_key(symbol, value),
+            scope=scope,
             tier="warm",
             source="committee",
             importance=importance,

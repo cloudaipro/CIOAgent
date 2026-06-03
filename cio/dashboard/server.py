@@ -11,6 +11,7 @@ Routes:
   /telegram             Telegram conversation history
   /subscribers          chats opted in to the digest + watchlist briefing
   /memory               per-agent / per-chat memory contents (debug)
+  /sanitizer            figures-sanitizer audit trail (what was stripped/rejected)
   /committee            list committee runs
   /committee/<run_id>   full sent/returned transcript for one run
   /watchlist            manage watchlists (GET renders, POST mutates
@@ -26,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from cio import db, devcapture, memory, portfolio, watchlist
-from cio.committee import agent_memory, transcript, usage
+from cio.committee import agent_memory, sanitizer_log, transcript, usage
 from . import views
 
 log = logging.getLogger("cio.dashboard")
@@ -72,16 +73,26 @@ class _Handler(BaseHTTPRequestHandler):
         their own isolated notes in agent_memory.DB_PATH.
         """
         sections = []
-        for label, dbp in (
-            ("Conversation / portfolio (chat:* · global)", db.DB_PATH),
-            ("Committee agents (committee:<role>)", agent_memory.DB_PATH),
+        for store, label, dbp in (
+            ("conversational", "Conversation / portfolio (chat:* · global)", db.DB_PATH),
+            ("committee", "Committee agents (committee:<role>)", agent_memory.DB_PATH),
         ):
             scopes = []
             for s in memory.list_scopes(db_path=dbp):
                 notes = memory.list_notes(s["scope"], limit=200, db_path=dbp)
                 scopes.append({"scope": s["scope"], "count": s["count"], "notes": notes})
-            sections.append({"label": label, "scopes": scopes})
+            sections.append({"store": store, "label": label, "scopes": scopes})
         return sections
+
+    @staticmethod
+    def _db_for_store(store: str):
+        """Route a store id to its db. Unknown → conversational (safe default)."""
+        return agent_memory.DB_PATH if store == "committee" else db.DB_PATH
+
+    @staticmethod
+    def _db_for_scope(scope: str):
+        """Committee scopes live in committee.db; everything else in cio.db."""
+        return agent_memory.DB_PATH if (scope or "").startswith("committee:") else db.DB_PATH
 
     def _watchlist_view(self, query: dict, level: int) -> str:
         """Gather watchlist data for the GET render. ?q= searches; ?wl= selects a
@@ -122,11 +133,22 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/usage":
                 html = views.render_usage(usage.recent(days=30), level)
             elif path == "/telegram":
-                html = views.render_telegram(memory.conv_history(limit=200), level)
+                sel_day = query.get("day", [None])[0]
+                turns = (memory.conv_history_on_day(sel_day) if sel_day
+                         else memory.conv_history(limit=200))
+                html = views.render_telegram(
+                    turns, level, days=memory.conv_days(), selected_day=sel_day,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/subscribers":
                 html = views.render_subscribers(memory.list_subscribers(), level)
             elif path == "/memory":
-                html = views.render_memory(self._memory_sections(), level)
+                html = views.render_memory(
+                    self._memory_sections(), level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
+            elif path == "/sanitizer":
+                html = views.render_sanitizer(sanitizer_log.recent(200), level)
             elif path == "/watchlist":
                 html = self._watchlist_view(query, level)
             elif path == "/portfolio":
@@ -138,7 +160,10 @@ class _Handler(BaseHTTPRequestHandler):
                     flash=query.get("msg", [""])[0],
                     flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/committee":
-                html = views.render_committee_list(transcript.list_runs(100), level)
+                html = views.render_committee_list(
+                    transcript.list_runs(100), level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path.startswith("/committee/"):
                 run_id = path.split("/committee/", 1)[1]
                 html = views.render_committee_run(run_id, transcript.get_run(run_id), level)
@@ -181,8 +206,93 @@ class _Handler(BaseHTTPRequestHandler):
             self._watchlist_post(form, set_cookie)
         elif path == "/portfolio":
             self._portfolio_post(form, set_cookie)
+        elif path == "/memory":
+            self._memory_post(form, set_cookie)
+        elif path == "/committee":
+            self._committee_post(form, set_cookie)
+        elif path == "/telegram":
+            self._telegram_post(form, set_cookie)
         else:
             self._send("<h1>404</h1>", status=404)
+
+    def _telegram_post(self, form: dict, set_cookie: str | None) -> None:
+        """Telegram page mutation. Only action: wipe_day day=YYYY-MM-DD — delete one
+        local day's conversation turns. Irreversible; confirmed client-side. PRG back."""
+        action = form.get("action", [""])[0].strip()
+        day = form.get("day", [""])[0].strip()
+        msg, err = "", False
+        try:
+            if action == "wipe_day":
+                if not day:
+                    raise ValueError("missing day")
+                n = memory.delete_turns_on_day(day)
+                msg = f"deleted Telegram history for {day} ({n} turn(s))"
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("telegram POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/telegram?" + urlencode(params), set_cookie)
+
+    def _committee_post(self, form: dict, set_cookie: str | None) -> None:
+        """Committee page mutation. Only action: wipe_runs — delete every captured
+        committee run (transcript). Irreversible; confirmed client-side. PRG back."""
+        action = form.get("action", [""])[0].strip()
+        msg, err = "", False
+        try:
+            if action == "wipe_runs":
+                n = transcript.clear_all()
+                msg = f"deleted all committee runs ({n} call-row(s))"
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("committee POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/committee?" + urlencode(params), set_cookie)
+
+    def _memory_post(self, form: dict, set_cookie: str | None) -> None:
+        """Memory page mutations (all irreversible; confirmed client-side):
+          wipe_agents          — delete every committee agent's notes (committee.db)
+          wipe_store store=…    — delete every note in one store (conversational|committee)
+          wipe_scope scope=…    — delete one scope's notes (db routed by scope prefix)
+        PRG back to /memory with a flash."""
+        def f(name: str) -> str:
+            return form.get(name, [""])[0].strip()
+
+        action = f("action")
+        msg, err = "", False
+        try:
+            if action == "wipe_agents":
+                n = memory.clear_notes(db_path=agent_memory.DB_PATH)
+                msg = f"deleted all agent memory ({n} note(s))"
+            elif action == "wipe_store":
+                store = f("store")
+                n = memory.clear_notes(db_path=self._db_for_store(store))
+                msg = f"deleted all {store or 'conversational'} memory ({n} note(s))"
+            elif action == "wipe_scope":
+                scope = f("scope")
+                if not scope:
+                    raise ValueError("missing scope")
+                n = memory.clear_notes(scope=scope, db_path=self._db_for_scope(scope))
+                msg = f"deleted scope {scope!r} ({n} note(s))"
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("memory POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/memory?" + urlencode(params), set_cookie)
 
     def _watchlist_post(self, form: dict, set_cookie: str | None) -> None:
         def f(name: str) -> str:

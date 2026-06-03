@@ -91,6 +91,7 @@ def _page(title: str, body: str, level: int) -> str:
         "<a href='/watchlist'>Watchlist</a><a href='/portfolio'>Portfolio</a>"
         "<a href='/subscribers'>Subscribers</a>"
         "<a href='/memory'>Memory</a>"
+        "<a href='/sanitizer'>Sanitizer</a>"
         f"<span class='lvl'>capture level {esc(level)}</span>"
         "</header><main>" + body + "</main></body></html>"
     )
@@ -159,50 +160,168 @@ def render_subscribers(subscribers, level: int) -> str:
     return _page("Subscribers", body, level)
 
 
-def render_telegram(turns, level: int) -> str:
-    rows = "".join(
-        f"<tr><td class='num'>{esc(t['chat_id'])}</td>"
-        f"<td class='{esc(t['role'])}'>{esc(t['role'])}</td>"
-        f"<td class='msg'>{esc(t['content'])}</td>"
-        f"<td>{esc_ts(t['ts'])}</td></tr>"
-        for t in turns
-    ) or "<tr><td class='empty' colspan='4'>no Telegram turns captured (level 3 disables this)</td></tr>"
-    body = (
-        "<h1>Telegram conversation history</h1>"
-        f"<table><tr><th>Chat</th><th>Role</th><th>Message</th><th>When</th></tr>{rows}</table>"
+def render_telegram(turns, level: int, days=None, selected_day: str | None = None,
+                    flash: str = "", flash_err: bool = False) -> str:
+    """Telegram history grouped by local calendar day, newest day first, with a
+    per-day delete button (irreversible, confirmed, auth-gated, PRG).
+
+    *days* is memory.conv_days() — [{day, count}], newest first — rendered as a day
+    selector at the top. *selected_day* (from ``?day=``) restricts the view to one day;
+    None shows the recent history across days.
+    """
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
     )
+    # Day selector: "All" + one link per day. The active choice is marked.
+    def _navlink(label: str, href: str, active: bool) -> str:
+        cls = " class='badge'" if active else ""
+        return f"<a{cls} href='{esc(href)}'>{esc(label)}</a>"
+    nav_items = [_navlink("All", "/telegram", selected_day is None)]
+    for d in (days or []):
+        nav_items.append(_navlink(
+            f"{d['day']} ({d['count']})", f"/telegram?day={d['day']}",
+            d["day"] == selected_day))
+    day_nav = ("<div class='daynav'>Days: " + " · ".join(nav_items) + "</div>"
+               if days else "")
+
+    # Group turns by local day, preserving the newest-first order they arrive in.
+    days: dict[str, list] = {}
+    for t in turns:
+        days.setdefault(timeutil.local_day(t.get("ts")), []).append(t)
+
+    blocks: list[str] = []
+    for day, items in days.items():
+        rows = "".join(
+            f"<tr><td class='num'>{esc(t['chat_id'])}</td>"
+            f"<td class='{esc(t['role'])}'>{esc(t['role'])}</td>"
+            f"<td class='msg'>{esc(t['content'])}</td>"
+            f"<td>{esc_ts(t['ts'])}</td></tr>"
+            for t in items
+        )
+        del_btn = _wipe_form(
+            "wipe_day", "Delete this day",
+            f"Delete all Telegram history for {day}? This cannot be undone.",
+            path="/telegram", day=day,
+        )
+        blocks.append(
+            f"<h2>{esc(day or 'unknown')} · {len(items)} turn(s) {del_btn}</h2>"
+            "<table><tr><th>Chat</th><th>Role</th><th>Message</th><th>When</th></tr>"
+            f"{rows}</table>"
+        )
+    empty_msg = (f"<p class='empty'>no Telegram turns for {esc(selected_day)}.</p>"
+                 if selected_day else
+                 "<p class='empty'>no Telegram turns captured (level 3 disables this).</p>")
+    body_inner = "".join(blocks) or empty_msg
+    body = ("<h1>Telegram conversation history</h1>" + flash_html + day_nav
+            + body_inner)
     return _page("Telegram", body, level)
 
 
-def render_committee_list(runs, level: int, token_q: str = "") -> str:
+def render_committee_list(runs, level: int, token_q: str = "",
+                          flash: str = "", flash_err: bool = False) -> str:
     rows = "".join(
         f"<tr><td><a href='/committee/{esc(r['run_id'])}{token_q}'>{esc(r['run_id'])}</a></td>"
         f"<td>{esc(r['symbol'])}</td><td>{esc_ts(r['started'])}</td>"
         f"<td class='num'>{esc(r['calls'])}</td><td class='num'>{esc(r['tokens'])}</td></tr>"
         for r in runs
     ) or "<tr><td class='empty' colspan='5'>no committee runs captured</td></tr>"
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
+    )
+    # Destructive: delete every captured run. Only shown when there's something to clear.
+    wipe_btn = _wipe_form(
+        "wipe_runs", "Delete all committee runs",
+        "Delete ALL captured committee runs? This cannot be undone.",
+        path="/committee",
+    ) if runs else ""
     body = (
-        "<h1>Committee runs</h1>"
+        f"<h1>Committee runs {wipe_btn}</h1>" + flash_html +
         f"<table><tr><th>Run</th><th>Symbol</th><th>Started</th><th>Calls</th><th>Tokens</th></tr>{rows}</table>"
     )
     return _page("Committee", body, level)
 
 
-def render_memory(sections, level: int) -> str:
+def render_sanitizer(rows, level: int) -> str:
+    """Audit trail of the LLM figures-sanitizer: what it stripped or rejected.
+
+    *rows* are sanitizer_log.recent() dicts: role_key, symbol, action, original,
+    cleaned, removed (list), ts. 'cleaned' = rewritten and stored; 'rejected' =
+    dropped (nothing qualitative survived)."""
+    def _row(r: dict) -> str:
+        act = r.get("action") or ""
+        badge = ("<span class='badge down'>rejected</span>" if act == "rejected"
+                 else "<span class='badge up'>cleaned</span>")
+        removed = ", ".join(r.get("removed") or []) or "—"
+        cleaned = esc(r.get("cleaned")) if r.get("cleaned") else "<span class='empty'>(dropped)</span>"
+        return (f"<tr><td>{esc_ts(r.get('ts'))}</td>"
+                f"<td>{esc(r.get('role_key'))}</td>"
+                f"<td>{esc(r.get('symbol'))}</td>"
+                f"<td>{badge}</td>"
+                f"<td class='msg'><span class='empty'>{esc(removed)}</span></td>"
+                f"<td class='msg'>{esc(r.get('original'))}</td>"
+                f"<td class='msg'>{cleaned}</td></tr>")
+
+    body_rows = "".join(_row(r) for r in rows) or (
+        "<tr><td class='empty' colspan='7'>no sanitizer activity yet — figures get "
+        "stripped or rejected here when committee agents write figure-laden notes.</td></tr>")
+    body = (
+        "<h1>Figures-sanitizer audit</h1>"
+        "<p>Every time the LLM sanitizer rewrites a memory note to remove stale "
+        "figures, or rejects one outright, it is logged here. The deterministic regex "
+        "firewall is the final gate; this shows the smart pass's decisions.</p>"
+        "<table><tr><th>When</th><th>Agent</th><th>Symbol</th><th>Action</th>"
+        "<th>Removed</th><th>Original</th><th>Stored</th></tr>"
+        f"{body_rows}</table>"
+    )
+    return _page("Sanitizer", body, level)
+
+
+def _wipe_form(action: str, label: str, confirm: str, **hidden) -> str:
+    """A small auth-gated POST form with a JS-confirm danger button. Hidden fields
+    carry the action target (store/scope). All values are HTML-escaped. *path* is the
+    form target (popped from hidden kwargs; defaults to /memory)."""
+    path = hidden.pop("path", "/memory")
+    fields = f"<input type='hidden' name='action' value='{esc(action)}'>"
+    for name, val in hidden.items():
+        fields += f"<input type='hidden' name='{esc(name)}' value='{esc(val)}'>"
+    return (
+        f"<form class='inline' method='post' action='{esc(path)}' "
+        f"onsubmit=\"return confirm('{esc(confirm)}');\">"
+        f"{fields}<button type='submit' class='danger'>{esc(label)}</button></form>"
+    )
+
+
+def render_memory(sections, level: int, flash: str = "", flash_err: bool = False) -> str:
     """Per-agent / per-chat memory contents, for debugging.
 
-    *sections* is a list of ``{"label": str, "scopes": [{"scope", "count", "notes"}]}``
+    *sections* is a list of ``{"store", "label", "scopes": [{"scope","count","notes"}]}``
     where each note is a mem_notes row dict. One <details> per scope; HOT notes
-    (injected into prompts) flagged so you can see what each agent 'knows'.
+    (injected into prompts) flagged so you can see what each agent 'knows'. Each store
+    has a "delete all" button and each scope a per-scope delete button (all irreversible,
+    confirmed client-side, auth-gated, PRG).
     """
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
+    )
     blocks: list[str] = []
     for sec in sections:
         scopes = sec.get("scopes") or []
-        blocks.append(f"<h2>{esc(sec.get('label'))}</h2>")
+        store = sec.get("store") or ""
+        # Store-level "delete all" button next to the section header.
+        store_btn = _wipe_form(
+            "wipe_store", f"Delete all {esc(store)} memory",
+            f"Delete ALL {store} memory? This cannot be undone.", store=store,
+        ) if scopes else ""
+        blocks.append(
+            f"<h2>{esc(sec.get('label'))} {store_btn}</h2>")
         if not scopes:
             blocks.append("<p class='empty'>no memory in this store.</p>")
             continue
         for sc in scopes:
+            scope = sc.get("scope") or ""
             notes = sc.get("notes") or []
             note_rows = "".join(
                 f"<tr><td>{esc(n.get('tier'))}</td>"
@@ -214,14 +333,18 @@ def render_memory(sections, level: int) -> str:
                 f"<td>{esc_ts(n.get('updated_at'))}</td></tr>"
                 for n in notes
             ) or "<tr><td class='empty' colspan='7'>no notes</td></tr>"
+            scope_btn = _wipe_form(
+                "wipe_scope", "Delete scope",
+                f"Delete all notes in {scope}? This cannot be undone.", scope=scope,
+            )
             blocks.append(
-                f"<details><summary>{esc(sc.get('scope'))} "
-                f"· {esc(sc.get('count'))} note(s)</summary>"
+                f"<details><summary>{esc(scope)} "
+                f"· {esc(sc.get('count'))} note(s) {scope_btn}</summary>"
                 "<table><tr><th>Tier</th><th>Key</th><th>Value</th><th>Hits</th>"
                 "<th>Imp</th><th>Source</th><th>Updated</th></tr>"
                 f"{note_rows}</table></details>"
             )
-    body = "<h1>Agent memory contents</h1>" + "".join(blocks)
+    body = "<h1>Agent memory contents</h1>" + flash_html + "".join(blocks)
     return _page("Memory", body, level)
 
 
