@@ -93,6 +93,31 @@ def _untrack_task(chat_id: int, task: asyncio.Task | None) -> None:
             _running.pop(chat_id, None)
 
 
+# Per-chat single-flight: at most one heavy operation (turn or committee run) in
+# flight per chat. A second message that arrives while one runs is rejected with
+# this notice rather than racing the first on the same agent. /stop is exempt.
+_BUSY_MSG = ("⏳ I'm still working on your previous request. Send /stop to cancel "
+             "it, then try again.")
+
+
+def _chat_busy(chat_id: int, exclude: asyncio.Task | None = None) -> bool:
+    """True if this chat has a live (non-done) tracked task other than *exclude*."""
+    return any(t is not exclude and not t.done()
+               for t in _running.get(chat_id, ()))
+
+
+def _try_acquire(chat_id: int, task: asyncio.Task | None) -> bool:
+    """Atomically claim the chat's single in-flight slot for *task*.
+
+    Returns False if another live task already holds it. Synchronous start-to-end
+    (no await), so two block=False handlers scheduled back-to-back can't both win.
+    """
+    if _chat_busy(chat_id, exclude=task):
+        return False
+    _track_task(chat_id, task)
+    return True
+
+
 async def _reset_agent(chat_id: int) -> None:
     """Drop a chat's agent after a cancelled turn so a half-consumed SDK response
     stream can't corrupt the next turn. The next message lazily rebuilds it,
@@ -117,10 +142,12 @@ async def _reply(update: Update, text: str, images: list[str]) -> None:
 
 async def _run(update: Update, prompt: str) -> None:
     chat_id = update.effective_chat.id
+    task = asyncio.current_task()
+    if not _try_acquire(chat_id, task):
+        await update.message.reply_text(_BUSY_MSG)
+        return
     await update.effective_chat.send_action(ChatAction.TYPING)
     agent = _agent(chat_id)
-    task = asyncio.current_task()
-    _track_task(chat_id, task)
     try:
         try:
             text, images = await agent.ask(prompt)
@@ -245,7 +272,9 @@ async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Tracked wrapper around the committee run so /stop can cancel it mid-flight."""
     chat_id = update.effective_chat.id
     task = asyncio.current_task()
-    _track_task(chat_id, task)
+    if not _try_acquire(chat_id, task):
+        await update.message.reply_text(_BUSY_MSG)
+        return
     try:
         await _cmd_committee_impl(update, ctx)
     except asyncio.CancelledError:

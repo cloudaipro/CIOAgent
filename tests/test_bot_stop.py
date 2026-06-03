@@ -389,3 +389,106 @@ def test_stop_cancels_committee_run(_clean_state, monkeypatch):
     assert bot._running.get(5) in (None, set())          # cleaned
     assert bot._stopping == set()
     assert log_calls == []                               # committee path never logs turns
+
+
+# ===========================================================================
+# Per-chat single-flight (Reject): a 2nd message while one runs is refused
+# ===========================================================================
+
+def test_second_message_rejected_while_busy(_clean_state):
+    log_calls = _clean_state
+
+    async def scenario():
+        fake = FakeAgent(block=True)                     # holds the slot
+        bot._agents[1] = fake
+        t1 = asyncio.create_task(bot._run(FakeUpdate(chat_id=1), "A"))
+        await _wait(fake.started.wait())
+
+        # Second message for the SAME chat — must be rejected, not run.
+        upd2 = FakeUpdate(chat_id=1)
+        await bot._run(upd2, "B")
+
+        # First turn untouched; only one task tracked; agent called once.
+        assert fake.ask_calls == 1
+        assert len(bot._running.get(1, set())) == 1
+        assert not t1.done()
+
+        fake.release.set()                               # let the first finish
+        await _wait(t1)
+        return fake, upd2
+
+    fake, upd2 = asyncio.run(scenario())
+
+    assert any("still working" in r for r in upd2.message.replies)   # busy notice
+    assert not any("answer:" in r for r in upd2.message.replies)     # B never ran
+    assert fake.closed is False                          # reject is not a cancel/reset
+    assert len(log_calls) == 1                           # only A persisted
+    assert bot._running == {}
+    assert bot._stopping == set()
+
+
+def test_message_accepted_after_previous_completes(_clean_state):
+    log_calls = _clean_state
+
+    async def scenario():
+        fake = FakeAgent(block=False)                    # each call returns at once
+        bot._agents[1] = fake
+        await bot._run(FakeUpdate(chat_id=1), "A")
+        assert not bot._chat_busy(1)                     # slot freed
+        await bot._run(FakeUpdate(chat_id=1), "B")
+        return fake
+
+    fake = asyncio.run(scenario())
+
+    assert fake.ask_calls == 2                            # both ran (serial, not rejected)
+    assert len(log_calls) == 2
+    assert bot._running == {}
+
+
+def test_committee_rejected_while_turn_busy(_clean_state, monkeypatch):
+    async def _must_not_run(sym):
+        raise AssertionError("run_committee must not start while a turn is busy")
+    monkeypatch.setattr("cio.committee.run_committee", _must_not_run)
+
+    async def scenario():
+        fake = FakeAgent(block=True)
+        bot._agents[7] = fake
+        t1 = asyncio.create_task(bot._run(FakeUpdate(chat_id=7), "A"))
+        await _wait(fake.started.wait())
+
+        cupd = FakeUpdate(chat_id=7)
+        await bot.cmd_committee(cupd, FakeCtx(args=["AAPL"]))   # rejected before impl
+
+        assert len(bot._running.get(7, set())) == 1            # still just the turn
+        fake.release.set()
+        await _wait(t1)
+        return cupd
+
+    cupd = asyncio.run(scenario())
+    assert any("still working" in r for r in cupd.message.replies)
+    assert bot._running == {}
+
+
+def test_new_message_accepted_after_stop(_clean_state):
+    log_calls = _clean_state
+
+    async def scenario():
+        fake = FakeAgent(block=True)
+        bot._agents[1] = fake
+        t1 = asyncio.create_task(bot._run(FakeUpdate(chat_id=1), "A"))
+        await _wait(fake.started.wait())
+        await bot.cmd_stop(FakeUpdate(chat_id=1), FakeCtx())
+        await _wait(t1)                                  # stopped → slot freed, agent reset
+
+        assert not bot._chat_busy(1)
+        fake2 = FakeAgent(block=False)                   # lazy rebuild after reset
+        bot._agents[1] = fake2
+        upd2 = FakeUpdate(chat_id=1)
+        await bot._run(upd2, "B")                        # must be accepted now
+        return upd2
+
+    upd2 = asyncio.run(scenario())
+    assert any("answer:B" in r for r in upd2.message.replies)
+    assert len(log_calls) == 1                           # A stopped (unlogged), only B logged
+    assert bot._running == {}
+    assert bot._stopping == set()
