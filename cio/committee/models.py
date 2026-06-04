@@ -62,6 +62,26 @@ _BUILTIN: dict[str, Any] = {
 # Repo-relative config path (resolved once at module import)
 _REPO_CONFIG = Path(__file__).parent.parent.parent / "config" / "committee_models.yaml"
 
+# Services the dashboard Configure tab offers in its service combo box.
+SERVICES = ("claude", "nim", "openai")
+
+# Fallback model catalog per service for the Configure tab. The live catalog is
+# read from ``model_catalog:`` in committee_models.yaml (editable via the dashboard);
+# this constant only seeds services the yaml omits. Free text is always allowed.
+MODEL_SUGGESTIONS: dict[str, list[str]] = {
+    "claude": [
+        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+        "claude-sonnet-4-6", "claude-sonnet-4-5",
+        "claude-haiku-4-5-20251001",
+    ],
+    "nim": [
+        "minimaxai/minimax-m2.7", "moonshotai/kimi-k2.6",
+        "deepseek-ai/deepseek-r1", "qwen/qwen3-235b-a22b",
+        "meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1",
+    ],
+    "openai": ["gpt-5.5-2026-04-23", "gpt-5.1", "gpt-5", "o4-mini", "gpt-4.1"],
+}
+
 
 @lru_cache(maxsize=1)
 def load_config(path: str | None = None) -> dict:
@@ -236,3 +256,75 @@ def resolve_chain(role_key: str) -> list[dict]:
     # Single-service role → 1-link chain, no limit.
     service, model = resolve(role_key)
     return [{"service": service, "model": model}]
+
+
+# ---------------------------------------------------------------------------
+# Editing IO (used by the dashboard Configure tab)
+# ---------------------------------------------------------------------------
+
+def config_path() -> str:
+    """Filesystem path the Configure tab reads/writes (env > repo default)."""
+    return os.getenv("CIO_MODELS_CONFIG") or str(_REPO_CONFIG)
+
+
+def model_catalog() -> dict[str, list[str]]:
+    """Per-service model-name suggestions for the Configure tab.
+
+    Live source is ``model_catalog:`` in the yaml (user-editable via the dashboard);
+    any service the yaml omits falls back to the built-in ``MODEL_SUGGESTIONS`` so
+    the dropdowns are never empty. Result is keyed by every service in ``SERVICES``.
+    """
+    cfg = load_config()
+    cat = cfg.get("model_catalog")
+    result: dict[str, list[str]] = {s: list(MODEL_SUGGESTIONS.get(s, [])) for s in SERVICES}
+    if isinstance(cat, dict):
+        for svc, mods in cat.items():
+            if isinstance(mods, list):
+                result[svc] = [str(m) for m in mods if m]
+    return result
+
+
+def _yaml_rt():
+    """Round-trip YAML handler (ruamel) — preserves comments and flow style.
+    Raises ImportError if ruamel is not installed (caller falls back to pyyaml)."""
+    from ruamel.yaml import YAML
+    y = YAML()
+    y.preserve_quotes = True
+    y.width = 4096  # don't wrap long lines (urls, flow maps)
+    return y
+
+
+def read_doc(path: str | None = None):
+    """Load the config for *editing*.
+
+    Prefers ruamel round-trip (keeps comments + inline ``{flow: maps}``). Falls
+    back to a plain pyyaml dict (edits then drop comments on save). If no file
+    exists yet, returns a deep copy of the effective config so the form still
+    renders and the first save materialises the file.
+    """
+    resolved = path or config_path()
+    if not os.path.exists(resolved):
+        import copy
+        return copy.deepcopy(load_config())
+    try:
+        with open(resolved, "r", encoding="utf-8") as fh:
+            return _yaml_rt().load(fh)
+    except ImportError:
+        import yaml
+        with open(resolved, "r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh)
+
+
+def write_doc(doc, path: str | None = None) -> None:
+    """Persist an edited config doc, then clear the load_config cache so the new
+    values take effect on the next resolve()."""
+    resolved = path or config_path()
+    try:
+        with open(resolved, "w", encoding="utf-8") as fh:
+            _yaml_rt().dump(doc, fh)
+    except ImportError:
+        import yaml
+        with open(resolved, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(dict(doc), fh, sort_keys=False, default_flow_style=False,
+                           allow_unicode=True)
+    load_config.cache_clear()

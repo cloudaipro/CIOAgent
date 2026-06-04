@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from cio import db, devcapture, memory, portfolio, watchlist
-from cio.committee import agent_memory, sanitizer_log, transcript, usage
+from cio.committee import agent_memory, models, sanitizer_log, transcript, usage
 from . import views
 
 log = logging.getLogger("cio.dashboard")
@@ -164,6 +164,12 @@ class _Handler(BaseHTTPRequestHandler):
                     transcript.list_runs(100), level,
                     flash=query.get("msg", [""])[0],
                     flash_err=query.get("err", ["0"])[0] == "1")
+            elif path == "/configure":
+                html = views.render_configure(
+                    models.load_config(), level, models.SERVICES,
+                    models.model_catalog(), path=models.config_path(),
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path.startswith("/committee/"):
                 run_id = path.split("/committee/", 1)[1]
                 html = views.render_committee_run(run_id, transcript.get_run(run_id), level)
@@ -212,6 +218,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._committee_post(form, set_cookie)
         elif path == "/telegram":
             self._telegram_post(form, set_cookie)
+        elif path == "/configure":
+            self._configure_post(form, set_cookie)
         else:
             self._send("<h1>404</h1>", status=404)
 
@@ -293,6 +301,101 @@ class _Handler(BaseHTTPRequestHandler):
         if err:
             params["err"] = "1"
         self._redirect("/memory?" + urlencode(params), set_cookie)
+
+    @staticmethod
+    def _set_service_model(node: dict, service: str, model: str) -> None:
+        """Apply a service combo + model box onto a config node. Empty model → null
+        (some agents legitimately run with model: null)."""
+        if service:
+            node["service"] = service
+        node["model"] = model if model else None
+
+    def _configure_post(self, form: dict, set_cookie: str | None) -> None:
+        """Save the committee_models.yaml edits from the Configure tab.
+
+        Reads the live doc (round-trip, comments preserved), assigns the posted
+        values onto the existing structure, writes it back, and clears the model
+        config cache so the next committee run picks up the change. PRG back."""
+        def f(name: str) -> str:
+            return form.get(name, [""])[0].strip()
+
+        msg, err = "", False
+        try:
+            doc = models.read_doc()
+            if isinstance(doc.get("defaults"), dict):
+                self._set_service_model(
+                    doc["defaults"], f("defaults:service"), f("defaults:model"))
+
+            for key, acfg in (doc.get("agents") or {}).items():
+                if not isinstance(acfg, dict):
+                    continue
+                if "chain" in acfg:
+                    for i, link in enumerate(acfg.get("chain") or []):
+                        if not isinstance(link, dict):
+                            continue
+                        svc = f(f"chain:{key}:{i}:service")
+                        mdl = f(f"chain:{key}:{i}:model")
+                        if svc:
+                            link["service"] = svc
+                        if mdl:
+                            link["model"] = mdl
+                        dl = f(f"chain:{key}:{i}:daily_limit")
+                        if dl:
+                            link["daily_limit"] = int(dl)
+                        elif "daily_limit" in link:
+                            del link["daily_limit"]
+                else:
+                    self._set_service_model(
+                        acfg, f(f"agent:{key}:service"), f(f"agent:{key}:model"))
+
+            for prov, fields in (
+                ("nim", ("base_url", "api_key_env", "max_tokens")),
+                ("openai", ("base_url", "api_key_env", "token_param", "max_tokens")),
+                ("claude", ("max_thinking_tokens",)),
+            ):
+                node = doc.get(prov)
+                if not isinstance(node, dict):
+                    continue
+                for field in fields:
+                    val = f(f"provider:{prov}:{field}")
+                    if val == "":
+                        if field in ("max_tokens", "max_thinking_tokens") and field in node:
+                            del node[field]  # blank cap → drop, fall back to default
+                        continue
+                    node[field] = int(val) if field in ("max_tokens", "max_thinking_tokens") else val
+
+            # Model catalog: rebuild each service's list from its surviving rows
+            # (blank row = removed) plus any newly-added names (comma/newline split).
+            catalog: dict = {}
+            for svc in models.SERVICES:
+                rows = sorted(
+                    (int(k.split(":")[2]), v[0].strip())
+                    for k, v in form.items() if k.startswith(f"catalog:{svc}:")
+                )
+                names = [v for _, v in rows if v]
+                added = form.get(f"catalog_add:{svc}", [""])[0]
+                for raw in added.replace("\n", ",").split(","):
+                    name = raw.strip()
+                    if name:
+                        names.append(name)
+                deduped: list[str] = []
+                for n in names:
+                    if n not in deduped:
+                        deduped.append(n)
+                catalog[svc] = deduped
+            if any(catalog.values()):
+                doc["model_catalog"] = catalog
+
+            models.write_doc(doc)
+            msg = "saved committee_models.yaml — applies to the next run"
+        except Exception as exc:  # never 500 the operator on a bad form
+            log.warning("configure POST failed: %s", exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/configure?" + urlencode(params), set_cookie)
 
     def _watchlist_post(self, form: dict, set_cookie: str | None) -> None:
         def f(name: str) -> str:

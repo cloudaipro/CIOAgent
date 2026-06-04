@@ -206,6 +206,7 @@ _NAV = [
     ("Committee", "/committee"), ("Watchlist", "/watchlist"),
     ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
     ("Memory", "/memory"), ("Sanitizer", "/sanitizer"),
+    ("Configure", "/configure"),
 ]
 
 
@@ -812,3 +813,184 @@ def render_committee_run(run_id: str, calls, level: int) -> str:
     sym = calls[0].get("symbol") or ""
     body = f"<h1>Run {esc(run_id)} · {esc(sym)}</h1>" + "".join(blocks)
     return _page("Run", body, level)
+
+
+# ---------------------------------------------------------------------------
+# Configure tab — edit config/committee_models.yaml from the UI
+# ---------------------------------------------------------------------------
+
+def _svc_select(name: str, current, services) -> str:
+    """A service combo box (class 'svc' so JS can pair it to the model box in the
+    same row). If *current* isn't in the known list it's kept as a selected option
+    so an unusual value isn't silently dropped."""
+    opts = list(services)
+    if current and current not in opts:
+        opts = [current] + opts
+    cells = "".join(
+        f"<option value='{esc(s)}'{' selected' if s == current else ''}>{esc(s)}</option>"
+        for s in opts
+    )
+    return f"<select class='svc' name='{esc(name)}'>{cells}</select>"
+
+
+def _model_select(name: str, current, service, catalog) -> str:
+    """A model dropdown listing the *service*'s whole catalog (unlike a datalist,
+    a <select> always shows every option, not just ones matching typed text). An
+    unknown *current* value is kept as a selected option so it isn't lost. To use a
+    model not listed, add it under 'Manage model catalog'. Class 'mdl' lets JS
+    repopulate it when the paired service select changes."""
+    opts = list(catalog.get(service or "", []) or [])
+    if current and current not in opts:
+        opts = [current] + opts
+    if not opts:
+        return (f"<select class='mdl' name='{esc(name)}'>"
+                "<option value=''>(none — add under Manage model catalog)</option></select>")
+    cells = "".join(
+        f"<option value='{esc(o)}'{' selected' if o == current else ''}>{esc(o)}</option>"
+        for o in opts
+    )
+    return f"<select class='mdl' name='{esc(name)}'>{cells}</select>"
+
+
+# JS: dependent dropdown. When a service select changes, rebuild the model select in
+# the same row from that service's catalog (kept in window.__cat), preserving the
+# current pick if it still exists, else selecting the first model.
+def _configure_js(catalog: dict) -> str:
+    import json
+    return (
+        "<script>window.__cat=" + json.dumps(catalog) + ";"
+        "(function(){"
+        "document.querySelectorAll('select.svc').forEach(function(sel){"
+        "sel.addEventListener('change',function(){"
+        "var tr=sel.closest('tr');if(!tr)return;"
+        "var m=tr.querySelector('select.mdl');if(!m)return;"
+        "var prev=m.value,list=(window.__cat[sel.value]||[]);"
+        "m.innerHTML='';"
+        "list.forEach(function(name){var o=document.createElement('option');"
+        "o.value=name;o.textContent=name;if(name===prev)o.selected=true;m.appendChild(o);});"
+        "if(m.selectedIndex<0&&m.options.length)m.selectedIndex=0;"
+        "});});})();</script>"
+    )
+
+
+def render_configure(cfg, level: int, services, model_suggestions,
+                     path: str = "", flash: str = "", flash_err: bool = False) -> str:
+    """Edit committee model routing. One big POST form → /configure.
+
+    Simple agents render as service combo + model box; chain agents (cio/wma)
+    render each fallback link with service + model + daily_limit. A collapsible
+    section exposes provider connection knobs (base_url / api_key_env / token caps).
+    """
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
+    )
+    agents = cfg.get("agents") or {}
+    defaults = cfg.get("defaults") or {}
+
+    # --- defaults ---
+    def_rows = (
+        "<table><tr><th>Scope</th><th>Service</th><th>Model</th></tr>"
+        f"<tr><td>defaults</td>"
+        f"<td>{_svc_select('defaults:service', defaults.get('service'), services)}</td>"
+        f"<td>{_model_select('defaults:model', defaults.get('model'), defaults.get('service'), model_suggestions)}</td></tr></table>"
+    )
+
+    # --- simple (single-service) agents ---
+    simple_rows, chain_blocks = [], []
+    for key, acfg in agents.items():
+        if isinstance(acfg, dict) and "chain" in acfg:
+            link_rows = "".join(
+                "<tr>"
+                f"<td class='num'>{i}</td>"
+                f"<td>{_svc_select(f'chain:{esc(key)}:{i}:service', (link or {}).get('service'), services)}</td>"
+                f"<td>{_model_select(f'chain:{esc(key)}:{i}:model', (link or {}).get('model'), (link or {}).get('service'), model_suggestions)}</td>"
+                f"<td><input name='chain:{esc(key)}:{i}:daily_limit' class='num' "
+                f"value='{esc((link or {}).get('daily_limit') or '')}' "
+                "placeholder='none' inputmode='numeric'></td>"
+                "</tr>"
+                for i, link in enumerate(acfg.get("chain") or [])
+            )
+            chain_blocks.append(
+                f"<h2>{esc(key)} · fallback chain</h2>"
+                "<table><tr><th>#</th><th>Service</th><th>Model</th>"
+                "<th>Daily token limit</th></tr>" + link_rows + "</table>"
+            )
+        elif isinstance(acfg, dict):
+            simple_rows.append(
+                f"<tr><td>{esc(key)}</td>"
+                f"<td>{_svc_select(f'agent:{esc(key)}:service', acfg.get('service'), services)}</td>"
+                f"<td>{_model_select(f'agent:{esc(key)}:model', acfg.get('model'), acfg.get('service'), model_suggestions)}</td></tr>"
+            )
+    simple_tbl = (
+        "<table><tr><th>Agent</th><th>Service</th><th>Model</th></tr>"
+        + "".join(simple_rows) + "</table>"
+    )
+
+    # --- provider connection settings (collapsed) ---
+    def _txt(name, val, ph=""):
+        return (f"<input name='{esc(name)}' value='{esc(val if val is not None else '')}' "
+                f"placeholder='{esc(ph)}'>")
+    nim = cfg.get("nim") or {}
+    oa = cfg.get("openai") or {}
+    cl = cfg.get("claude") or {}
+    providers = (
+        "<details><summary>Provider connection settings</summary>"
+        "<table><tr><th>NIM</th><th>Value</th></tr>"
+        f"<tr><td>base_url</td><td>{_txt('provider:nim:base_url', nim.get('base_url'))}</td></tr>"
+        f"<tr><td>api_key_env</td><td>{_txt('provider:nim:api_key_env', nim.get('api_key_env'))}</td></tr>"
+        f"<tr><td>max_tokens</td><td>{_txt('provider:nim:max_tokens', nim.get('max_tokens'), 'output cap')}</td></tr>"
+        "</table>"
+        "<table><tr><th>OpenAI</th><th>Value</th></tr>"
+        f"<tr><td>base_url</td><td>{_txt('provider:openai:base_url', oa.get('base_url'))}</td></tr>"
+        f"<tr><td>api_key_env</td><td>{_txt('provider:openai:api_key_env', oa.get('api_key_env'))}</td></tr>"
+        f"<tr><td>token_param</td><td>{_txt('provider:openai:token_param', oa.get('token_param'), 'max_completion_tokens')}</td></tr>"
+        f"<tr><td>max_tokens</td><td>{_txt('provider:openai:max_tokens', oa.get('max_tokens'), 'output cap')}</td></tr>"
+        "</table>"
+        "<table><tr><th>Claude</th><th>Value</th></tr>"
+        f"<tr><td>max_thinking_tokens</td><td>{_txt('provider:claude:max_thinking_tokens', cl.get('max_thinking_tokens'), 'blank = SDK default')}</td></tr>"
+        "</table></details>"
+    )
+
+    # --- model catalog management (collapsed): edits the service→models lists that
+    # drive the dropdowns above. Clear a box to remove; add box appends names. ---
+    catalog_rows = []
+    for svc in services:
+        mods = model_suggestions.get(svc, []) or []
+        inputs = "".join(
+            f"<input name='catalog:{esc(svc)}:{i}' value='{esc(m)}' "
+            "style='display:block;margin:3px 0'>"
+            for i, m in enumerate(mods)
+        )
+        catalog_rows.append(
+            f"<tr><td style='vertical-align:top'><strong>{esc(svc)}</strong></td>"
+            f"<td>{inputs}"
+            f"<input name='catalog_add:{esc(svc)}' "
+            "placeholder='add model(s) — comma separated' "
+            "style='display:block;margin-top:6px'></td></tr>"
+        )
+    catalog_ui = (
+        "<details><summary>Manage model catalog</summary>"
+        "<p class='hint'>Clear a box to remove that model; use the bottom box to add "
+        "one or more (comma separated). These names populate the model dropdowns above.</p>"
+        "<table><tr><th>Service</th><th>Models</th></tr>"
+        + "".join(catalog_rows) + "</table></details>"
+    )
+
+    body = (
+        "<h1>Configure committee models</h1>"
+        + flash_html
+        + (f"<p class='hint'>Editing <code>{esc(path)}</code>. "
+           "Pick service and model from the dropdowns; add model names under "
+           "“Manage model catalog” below. Saving applies to the next committee run.</p>")
+        + "<form method='post' action='/configure'>"
+        + "<h2>Defaults</h2>" + def_rows
+        + "<h2>Agents</h2>" + simple_tbl
+        + "".join(chain_blocks)
+        + providers
+        + catalog_ui
+        + "<p style='margin-top:16px'><button type='submit' class='primary'>Save changes</button></p>"
+        + "</form>"
+        + _configure_js({s: list(model_suggestions.get(s, []) or []) for s in services})
+    )
+    return _page("Configure", body, level)

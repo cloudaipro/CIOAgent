@@ -128,7 +128,8 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
 - **Model services** (`config/committee_models.yaml`): each agent maps to `claude`, `nim`,
   or `openai`. The CIO runs a **fallback chain** — OpenAI `gpt-5.5-2026-04-23` (daily
   200k tokens) → Claude Opus (daily 200k) → NVIDIA NIM — switching automatically as each
-  day's token budget is spent. Limits and models are editable in the config.
+  day's token budget is spent. Limits and models are editable in the config, or from the
+  dashboard **Configure** page (no text editor needed).
 - **Output-token caps** are configurable per backend (env overrides yaml):
   `CIO_OPENAI_MAX_TOKENS` / `nim.max_tokens` `CIO_NIM_MAX_TOKENS` (default 2048), and the
   OpenAI param name `CIO_OPENAI_TOKEN_PARAM` (gpt-5.x = `max_completion_tokens`, older
@@ -279,10 +280,10 @@ Sample data: `data/sample_transactions.csv`.
 ## Developer dashboard
 
 A localhost-only web view to verify the agent is behaving correctly. Mostly read-only;
-write surfaces are the **Watchlist** / **Portfolio** pages (manage lists, set prices,
-import CSVs) and **delete** controls on the Telegram / Memory / Committee pages. Every
-mutation POSTs then redirects (PRG), behind the same auth gate, and destructive deletes
-ask for confirmation first.
+write surfaces are the **Watchlist** / **Portfolio** / **Configure** pages (manage lists,
+set prices, import CSVs, edit model routing) and **delete** controls on the Telegram /
+Memory / Committee pages. Every mutation POSTs then redirects (PRG), behind the same auth
+gate, and destructive deletes ask for confirmation first.
 
 ```bash
 .venv/bin/python -m cio.dashboard          # http://127.0.0.1:8787
@@ -306,6 +307,14 @@ Pages:
   and each scope has a **delete** button.
 - **Sanitizer** — audit trail of the figures-sanitizer: every note it rewrote (figures
   stripped) or rejected, with the agent, symbol, what was removed, and the stored result.
+- **Configure** — edit `config/committee_models.yaml` from the UI instead of a text editor.
+  Per-agent **service** combo box (`claude` / `nim` / `openai`) and a **model** dropdown that
+  swaps to the chosen service's models; chain agents (`cio` / `wma`) edit each fallback link
+  (service + model + daily token limit). Collapsible sections expose provider connection
+  knobs (base_url / api_key_env / token caps) and a **model-catalog** editor (add/remove the
+  model names that populate the dropdowns). Saves round-trip the YAML (comments preserved via
+  `ruamel.yaml`; falls back to `pyyaml` if absent) and clear the config cache so edits apply
+  to the next run.
 
 Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:
 
