@@ -52,6 +52,19 @@ def test_list_runs_summarizes(tdb):
     assert runs["run1"]["symbol"] == "AAPL"
 
 
+def test_source_tag_roundtrips(tdb):
+    """A run's trigger source is stored per call and surfaced by list_runs so the
+    dashboard can tell chat-triggered runs from /committee ones."""
+    transcript.record("cio", "claude", "m", "s", "u", "r",
+                      run_id="chatrun", symbol="AAPL", source="chat")
+    transcript.record("cio", "claude", "m", "s", "u", "r",
+                      run_id="cmdrun", symbol="MSFT", source="command")
+    runs = {r["run_id"]: r for r in transcript.list_runs()}
+    assert runs["chatrun"]["source"] == "chat"
+    assert runs["cmdrun"]["source"] == "command"
+    assert transcript.get_run("chatrun")[0]["source"] == "chat"
+
+
 def test_never_raises_on_bad_path(monkeypatch):
     # A directory where a file is expected → record swallows the error.
     monkeypatch.setattr(transcript, "DB_PATH", Path("/proc/should-not-write/x.db"))

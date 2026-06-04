@@ -20,6 +20,15 @@ def esc_ts(value) -> str:
     return escape(timeutil.utc_to_local(value))
 
 
+_TRIGGER_LABELS = {"command": "💬 /committee", "chat": "🗣 chat", "cli": "⌨ cli"}
+
+
+def _trigger(run: dict) -> str:
+    """Human label for what triggered a committee run. Pre-source rows → '—'."""
+    src = run.get("source")
+    return esc(_TRIGGER_LABELS.get(src, src)) if src else "—"
+
+
 _CSS = """
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
@@ -105,10 +114,11 @@ def render_overview(usage_today, runs, turns, level: int, token_q: str = "") -> 
 
     run_rows = "".join(
         f"<tr><td><a href='/committee/{esc(r['run_id'])}{token_q}'>{esc(r['symbol'])}</a></td>"
+        f"<td>{_trigger(r)}</td>"
         f"<td>{esc_ts(r['started'])}</td><td class='num'>{esc(r['calls'])}</td>"
         f"<td class='num'>{esc(r['tokens'])}</td></tr>"
         for r in runs
-    ) or "<tr><td class='empty' colspan='4'>no committee runs captured</td></tr>"
+    ) or "<tr><td class='empty' colspan='5'>no committee runs captured</td></tr>"
 
     turn_rows = "".join(
         f"<tr><td class='{esc(t['role'])}'>{esc(t['role'])}</td>"
@@ -122,7 +132,7 @@ def render_overview(usage_today, runs, turns, level: int, token_q: str = "") -> 
         "<h2>Tokens used today (local)</h2>"
         f"<table><tr><th>Service</th><th>Tokens</th></tr>{rows}</table>"
         "<h2>Recent committee runs</h2>"
-        f"<table><tr><th>Symbol</th><th>Started</th><th>Calls</th><th>Tokens</th></tr>{run_rows}</table>"
+        f"<table><tr><th>Symbol</th><th>Trigger</th><th>Started</th><th>Calls</th><th>Tokens</th></tr>{run_rows}</table>"
         "<h2>Recent Telegram turns</h2>"
         f"<table><tr><th>Role</th><th>Message</th><th>When</th></tr>{turn_rows}</table>"
     )
@@ -222,10 +232,10 @@ def render_committee_list(runs, level: int, token_q: str = "",
                           flash: str = "", flash_err: bool = False) -> str:
     rows = "".join(
         f"<tr><td><a href='/committee/{esc(r['run_id'])}{token_q}'>{esc(r['run_id'])}</a></td>"
-        f"<td>{esc(r['symbol'])}</td><td>{esc_ts(r['started'])}</td>"
+        f"<td>{esc(r['symbol'])}</td><td>{_trigger(r)}</td><td>{esc_ts(r['started'])}</td>"
         f"<td class='num'>{esc(r['calls'])}</td><td class='num'>{esc(r['tokens'])}</td></tr>"
         for r in runs
-    ) or "<tr><td class='empty' colspan='5'>no committee runs captured</td></tr>"
+    ) or "<tr><td class='empty' colspan='6'>no committee runs captured</td></tr>"
     flash_html = (
         f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
         if flash else ""
@@ -238,7 +248,7 @@ def render_committee_list(runs, level: int, token_q: str = "",
     ) if runs else ""
     body = (
         f"<h1>Committee runs {wipe_btn}</h1>" + flash_html +
-        f"<table><tr><th>Run</th><th>Symbol</th><th>Started</th><th>Calls</th><th>Tokens</th></tr>{rows}</table>"
+        f"<table><tr><th>Run</th><th>Symbol</th><th>Trigger</th><th>Started</th><th>Calls</th><th>Tokens</th></tr>{rows}</table>"
     )
     return _page("Committee", body, level)
 

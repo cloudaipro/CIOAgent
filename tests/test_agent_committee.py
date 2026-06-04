@@ -25,7 +25,7 @@ def _call_tool(args):
 
 def test_run_committee_tool_emits_document(monkeypatch):
     """Tool pushes the report path into _PENDING_DOCS and returns the summary."""
-    async def _fake_produce(symbol, lang, reports_dir):
+    async def _fake_produce(symbol, lang, reports_dir, source="command"):
         return CommitteeArtifact(symbol=symbol.upper(),
                                  doc_path="/tmp/AAPL_committee.pdf",
                                  summary="📋 *AAPL Committee Summary*\nBuy")
@@ -43,7 +43,7 @@ def test_run_committee_tool_emits_document(monkeypatch):
 
 def test_run_committee_tool_error_emits_no_document(monkeypatch):
     """On a pipeline error the tool returns the message and emits NO document."""
-    async def _fake_produce(symbol, lang, reports_dir):
+    async def _fake_produce(symbol, lang, reports_dir, source="command"):
         return CommitteeArtifact(symbol=symbol.upper(),
                                  error="No data for ZZZ. Check the symbol.")
 
@@ -60,6 +60,26 @@ def test_run_committee_tool_requires_symbol():
     """Empty symbol → guidance, no run."""
     out = _call_tool({"symbol": "  ", "lang": ""})
     assert "symbol" in out["content"][0]["text"].lower()
+
+
+def test_produce_report_tags_source_for_capture(monkeypatch):
+    """produce_report sets the run-source ContextVar the transcript capture reads,
+    so chat-triggered runs are distinguishable from /committee ones."""
+    import cio.committee.engine as engine
+    from cio.committee import delivery
+
+    seen = {}
+
+    async def _fake_run(sym):
+        seen["source"] = engine._RUN_SOURCE.get()   # what _capture would record
+        class _R:  # minimal stand-in; .error short-circuits before render
+            error = "stop here"
+        return _R()
+
+    monkeypatch.setattr("cio.committee.run_committee", _fake_run)
+
+    _run(delivery.produce_report("AAPL", "", reports_dir=None, source="chat"))
+    assert seen["source"] == "chat"
 
 
 def test_ask_threads_docs_from_run_query(monkeypatch):

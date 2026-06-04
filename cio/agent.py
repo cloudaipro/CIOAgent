@@ -401,7 +401,7 @@ async def t_committee(args):
     if not sym:
         return _text("Provide a stock symbol, e.g. AAPL or 2330.TW.")
     from .committee.delivery import produce_report
-    art = await produce_report(sym, args.get("lang"), REPORTS_DIR)
+    art = await produce_report(sym, args.get("lang"), REPORTS_DIR, source="chat")
     if art.error:
         return _text(art.error)
     _PENDING_DOCS.append(str(art.doc_path))

@@ -40,6 +40,16 @@ log = logging.getLogger(__name__)
 # A ContextVar (not a global) keeps concurrent runs and parallel calls isolated.
 _RUN_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("cio_run_id", default=None)
 _RUN_SYMBOL: contextvars.ContextVar[str | None] = contextvars.ContextVar("cio_run_symbol", default=None)
+# What triggered this run — "command" (/committee slash), "chat" (conversational
+# agent's run_committee tool), or "cli". Set by the caller before run_committee;
+# propagates into the parallel role tasks like _RUN_ID does.
+_RUN_SOURCE: contextvars.ContextVar[str] = contextvars.ContextVar("cio_run_source", default="command")
+
+
+def set_run_source(source: str) -> None:
+    """Tag the trigger of the upcoming/current committee run for the dev dashboard.
+    Call this before run_committee in the same async context."""
+    _RUN_SOURCE.set(source or "command")
 
 
 def _capture(service: str | None, model: str | None, system_prompt: str,
@@ -49,6 +59,7 @@ def _capture(service: str | None, model: str | None, system_prompt: str,
         role_key=role_key, service=service, model=model,
         system_prompt=system_prompt, user_prompt=user_prompt, response=text,
         tokens=tok, run_id=_RUN_ID.get(), symbol=_RUN_SYMBOL.get(),
+        source=_RUN_SOURCE.get(),
     )
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS committee_transcript (
     user_prompt   TEXT,                       -- content SENT (user)
     response      TEXT,                       -- content RETURNED
     tokens        INTEGER NOT NULL DEFAULT 0,
+    source        TEXT,                       -- what triggered the run: command | chat | cli
     ts            TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_transcript_run ON committee_transcript(run_id, id);
@@ -43,11 +44,17 @@ CREATE INDEX IF NOT EXISTS idx_transcript_run ON committee_transcript(run_id, id
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    """Open a plain sqlite3 connection and ensure the table exists."""
+    """Open a plain sqlite3 connection and ensure the table (and any later columns)
+    exist."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    # Migrate DBs created before the `source` column existed.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(committee_transcript)")}
+    if "source" not in cols:
+        conn.execute("ALTER TABLE committee_transcript ADD COLUMN source TEXT")
+        conn.commit()
     return conn
 
 
@@ -61,6 +68,7 @@ def record(
     tokens: int = 0,
     run_id: str | None = None,
     symbol: str | None = None,
+    source: str | None = None,
     db_path: Path | None = None,
 ) -> None:
     """Persist one LLM call (sent + returned). Prunes per capture level. Never raises."""
@@ -69,10 +77,10 @@ def record(
         conn = _connect(path)
         conn.execute(
             "INSERT INTO committee_transcript "
-            "(run_id,symbol,role_key,service,model,system_prompt,user_prompt,response,tokens) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "(run_id,symbol,role_key,service,model,system_prompt,user_prompt,response,tokens,source) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (run_id, symbol, role_key, service, model, system_prompt, user_prompt,
-             response, int(tokens or 0)),
+             response, int(tokens or 0), source),
         )
         conn.commit()
         if devcapture.prune_enabled():
@@ -121,7 +129,7 @@ def list_runs(limit: int = 100, db_path: Path | None = None) -> list[dict]:
         conn = _connect(path)
         rows = conn.execute(
             "SELECT run_id, MAX(symbol) AS symbol, MIN(ts) AS started, "
-            "       COUNT(*) AS calls, SUM(tokens) AS tokens "
+            "       COUNT(*) AS calls, SUM(tokens) AS tokens, MAX(source) AS source "
             "FROM committee_transcript WHERE run_id IS NOT NULL "
             "GROUP BY run_id ORDER BY MAX(id) DESC LIMIT ?",
             (limit,),
