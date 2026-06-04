@@ -94,11 +94,18 @@ Full design: [docs/MEMORY-AND-CONTEXT.md](docs/MEMORY-AND-CONTEXT.md).
 Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 `memory_get`, `save_playbook` / `list_playbooks`.
 
-## Investment committee (`/committee`)
+## Investment committee (`/committee` or ask in chat)
 
 `/committee SYMBOL` runs a simulated buy-side process and returns a 13-section **PDF**
 research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** version.
 
+- **Two ways to convene**: the `/committee SYMBOL` slash command, or just **ask in plain
+  language** ("convene the committee on META", "委員會討論 Meta"). Both route through the
+  same `cio/committee/delivery.py` pipeline. In chat, the agent's `run_committee` tool
+  fires the **real** committee (and sends the PDF) — it is told never to invent or
+  simulate a verdict itself. The dashboard tags each run with its trigger (`chat` vs
+  `/committee` vs `cli`). It's the one cost-bearing tool (~10-20 model calls); the agent
+  confirms the symbol before firing.
 - **Pipeline**: gather data (price / fundamentals incl. **forward P/E** / 38 TA signals) →
   **8 specialist agents** (market, equity, industry, valuation, quant, ETF, risk, catalyst)
   vote (valuation & equity weigh forward vs trailing P/E) →
@@ -276,9 +283,9 @@ Pages:
   (chat id + subscribed-since), so you can see exactly who receives the scheduled pushes.
 - **Watchlist** — manage symbol lists (create/activate/rename/delete/search, add/remove
   symbols, drag-to-reorder, CSV import). One scoped JS for drag; no-JS safe.
-- **Committee** — each run drills into every LLM call: the exact content **sent**
-  (system + user prompt) and the content **returned**, per role, in order. Includes a
-  **delete-all-runs** button.
+- **Committee** — every run, each with its **Trigger** (`chat` ask vs `/committee` slash
+  vs `cli`), drills into every LLM call: the exact content **sent** (system + user prompt)
+  and the content **returned**, per role, in order. Includes a **delete-all-runs** button.
 - **Memory** — per-agent / per-chat memory contents for debugging: every scope across
   both stores (`chat:*` / `global` in `cio.db`, `committee:<role>` in `committee.db`)
   with each note's tier, key, value, hits, importance, source, and update time. Each store
