@@ -26,12 +26,15 @@ from claude_agent_sdk import (
 from . import charts, context, memory, portfolio, recall, watchlist, web
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+REPORTS_DIR = PROJECT_ROOT / "data" / "reports"
 
 # Collector for image paths produced by chart tools during a turn. A plain
 # module global (not a contextvar) because the SDK runs MCP tool callbacks in a
 # separate task context. `_LOCK` serializes turns so this stays correct even if
-# two chats arrive at once.
+# two chats arrive at once. `_PENDING_DOCS` is the same idea for file documents
+# (e.g. the committee PDF) the bot sends via reply_document.
 _PENDING: list[str] = []
+_PENDING_DOCS: list[str] = []
 _LOCK = asyncio.Lock()
 
 # Rolling session: after this many turns or approx tokens, checkpoint a digest
@@ -381,12 +384,36 @@ async def t_web_scrape(args):
     return _text(f"# {r.get('title') or args['url']}\n{r['url']}\n\n{r['markdown']}")
 
 
+# ----- investment committee -------------------------------------------------
+
+@tool("run_committee",
+      "Convene the REAL multi-agent investment committee on ONE stock symbol and send "
+      "the user the official PDF report. This runs the actual committee pipeline "
+      "(specialists → debate → CIO vote), ~10-20 model calls, 1-3 minutes. "
+      "Use this ONLY when the user explicitly asks to convene/run the committee, or for "
+      "a committee report / verdict / vote on a symbol. NEVER fabricate, simulate, or "
+      "describe a committee outcome yourself — always call this tool so the real "
+      "subsystem (with its cost ceiling and locked process) produces the verdict. "
+      "lang: 'zh'/'tc' for a 繁體中文 report, otherwise leave empty for English.",
+      {"symbol": str, "lang": str})
+async def t_committee(args):
+    sym = str(args.get("symbol") or "").strip()
+    if not sym:
+        return _text("Provide a stock symbol, e.g. AAPL or 2330.TW.")
+    from .committee.delivery import produce_report
+    art = await produce_report(sym, args.get("lang"), REPORTS_DIR)
+    if art.error:
+        return _text(art.error)
+    _PENDING_DOCS.append(str(art.doc_path))
+    return _text(art.summary + "\n\n(The full committee report has been sent to the user.)")
+
+
 CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
              t_refresh_prices, t_stock_panel, t_watchlist_prices,
-             t_web_search, t_web_scrape]
+             t_web_search, t_web_scrape, t_committee]
 _TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock portfolio.
@@ -402,6 +429,11 @@ Rules:
   read one. Use it for qualitative context (catalysts, news, sentiment) — NOT for prices
   or financials, which always come from the stock tools. Cite the source URL when you
   use web content.
+- INVESTMENT COMMITTEE: when the user asks to "convene the committee", run a committee,
+  or wants the committee's verdict/vote on a stock, call the run_committee tool. It runs
+  the REAL multi-agent committee and sends the official PDF. NEVER invent committee seats,
+  votes, or a verdict yourself — do not simulate it inline. If unsure whether they want the
+  full (cost-bearing) run, confirm the symbol first, then call the tool.
 - Be concise and direct. Lead with the number that answers the question.
 - Use allocation_chart / pl_chart when a visual helps or the user asks to "see" something.
 - If the user sends an image path, use the Read tool to view it (e.g. a receipt or broker
@@ -451,6 +483,7 @@ class CIOAgent:
         self._turns = 0          # turns since last checkpoint (rolling session)
         self._tokens = 0         # approx tokens since last checkpoint
         self._compaction_pending = False   # set by PreCompact hook -> checkpoint soon
+        self._last_docs: list[str] = []    # doc paths from the most recent main turn
 
     async def _on_precompact(self, input_data, tool_use_id, ctx) -> dict:
         """PreCompact hook: the SDK is about to lossily summarize old turns.
@@ -510,6 +543,7 @@ class CIOAgent:
             global _ACTIVE_SCOPE
             _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
             _PENDING.clear()
+            _PENDING_DOCS.clear()
             await self._client.query(prompt)
             parts: list[str] = []
             tokens = 0
@@ -530,6 +564,11 @@ class CIOAgent:
             self._record_usage(tokens, prompt, text)
             images = list(_PENDING)
             _PENDING.clear()
+            # Documents (committee PDF) are stashed on the instance, not returned,
+            # so the (text, images) signature stays stable for tests that stub
+            # _run_query. ask() drains it before any checkpoint turn overwrites it.
+            self._last_docs = list(_PENDING_DOCS)
+            _PENDING_DOCS.clear()
             return text, images
 
     @staticmethod
@@ -544,20 +583,22 @@ class CIOAgent:
         except Exception:
             pass
 
-    async def ask(self, prompt: str) -> tuple[str, list[str]]:
-        """Send a turn; return (assistant_text, image_paths). May trigger a
-        rolling-session checkpoint afterwards if the transcript is getting large."""
+    async def ask(self, prompt: str) -> tuple[str, list[str], list[str]]:
+        """Send a turn; return (assistant_text, image_paths, doc_paths). May trigger
+        a rolling-session checkpoint afterwards if the transcript is getting large."""
         await self._ensure()
         # Periodic nudge to persist notable context (cheap; no extra LLM call).
         if NUDGE_TURNS and self._turns and self._turns % NUDGE_TURNS == 0:
             prompt = prompt + _NUDGE_SUFFIX
         text, images = await self._run_query(prompt)
+        # Capture this turn's documents before any checkpoint turn clears the stash.
+        docs, self._last_docs = self._last_docs, []
         self._turns += 1
         self._tokens += context.count_tokens(prompt) + context.count_tokens(text)
         if (self._compaction_pending or self._turns >= ROLL_TURNS
                 or self._tokens >= ROLL_TOKENS):
             await self._checkpoint()
-        return text, images
+        return text, images, docs
 
     async def _checkpoint(self) -> None:
         """Bound transcript growth: digest the current session, persist it BEFORE
