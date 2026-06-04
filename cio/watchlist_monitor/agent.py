@@ -22,7 +22,7 @@ import logging
 import os
 from datetime import datetime
 
-from .prompts import WMA_SYSTEM
+from .prompts import WMA_SYSTEM, MACRO_SNAPSHOT_SYSTEM
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,9 @@ _RECS = {"Buy", "Add", "Hold", "Monitor", "Reduce", "Sell"}
 _STATUS = {"bullish", "neutral", "bearish"}
 _IMPORTANCE = {"low", "medium", "high", "critical"}
 _THESIS = {"unchanged", "positive", "negative"}
+_SENSITIVITY = {"low", "medium", "high"}
+_SENTIMENT = {"risk-on", "cautious", "risk-off"}
+_GLOBAL_RISK = {"low", "elevated", "high"}
 
 
 def _as_list(val) -> list:
@@ -63,6 +66,13 @@ def _conviction(val) -> int:
         return max(0, min(100, int(float(val))))
     except (TypeError, ValueError):
         return 50
+
+
+def _score100(val, default: int = 0) -> int:
+    try:
+        return max(0, min(100, int(float(val))))
+    except (TypeError, ValueError):
+        return default
 
 
 def _headlines_text(news: list[dict]) -> str:
@@ -108,6 +118,9 @@ def _skipped(symbol: str, reason: str) -> dict:
         "overall_status": "neutral", "conviction_score": 0,
         "recommendation": "Monitor", "analyst_sentiment": "neutral",
         "event_importance": "low", "investment_thesis_change": "unchanged",
+        "external_risk_score": 0, "macro_sensitivity": "low",
+        "geopolitical_sensitivity": "low", "commodity_sensitivity": "low",
+        "currency_sensitivity": "low",
         "key_positive_events": [], "key_negative_events": [],
         "new_risks": [], "upcoming_catalysts": [],
         "summary": reason, "escalate": False, "error": reason, "_raw": "",
@@ -159,6 +172,11 @@ async def monitor_symbol(symbol: str, *, bundle_fn=None, news_fn=None) -> dict:
         "analyst_sentiment": _one_of(parsed.get("analyst_sentiment"), _STATUS, "neutral"),
         "event_importance": importance,
         "investment_thesis_change": thesis,
+        "external_risk_score": _score100(parsed.get("external_risk_score"), 0),
+        "macro_sensitivity": _one_of(parsed.get("macro_sensitivity"), _SENSITIVITY, "low"),
+        "geopolitical_sensitivity": _one_of(parsed.get("geopolitical_sensitivity"), _SENSITIVITY, "low"),
+        "commodity_sensitivity": _one_of(parsed.get("commodity_sensitivity"), _SENSITIVITY, "low"),
+        "currency_sensitivity": _one_of(parsed.get("currency_sensitivity"), _SENSITIVITY, "low"),
         "key_positive_events": _as_list(parsed.get("key_positive_events")),
         "key_negative_events": _as_list(parsed.get("key_negative_events")),
         "new_risks": _as_list(parsed.get("new_risks")),
@@ -196,6 +214,46 @@ async def monitor_watchlist(symbols: list[str] | None = None, *,
                 return _skipped(sym, f"error: {e}")
 
     return list(await asyncio.gather(*[_bounded(s) for s in symbols]))
+
+
+async def global_macro_snapshot(*, news_fn=None) -> dict:
+    """One shared macro/geopolitical read for the whole briefing (PRD §"Global
+    Market Intelligence"). A SINGLE LLM call per watchlist run — not per security —
+    so the WMA's first layer stays cheap. Never raises; degrades to a neutral read.
+    """
+    from ..committee import engine
+
+    if news_fn is None:
+        from .. import web
+        news_fn = web.search
+    query = ("global markets macro geopolitical oil inflation interest rates "
+             "central bank sanctions today")
+    try:
+        res = news_fn(query, limit=6)
+        if inspect.isawaitable(res):
+            res = await res
+        news = list(res or [])
+    except Exception as e:
+        log.debug("WMA macro snapshot news fetch failed: %s", e)
+        news = []
+    user_prompt = (
+        "Summarise this morning's global backdrop for a portfolio manager.\n\n"
+        f"OVERNIGHT_HEADLINES:\n{_headlines_text(news)}"
+    )
+    try:
+        raw = await engine.ask_role(MACRO_SNAPSHOT_SYSTEM, user_prompt, role_key="macro")
+    except Exception as e:
+        log.debug("WMA macro snapshot failed: %s", e)
+        raw = ""
+    parsed = engine.parse_yaml_block(raw) if raw else {}
+    return {
+        "market_sentiment": _one_of(parsed.get("market_sentiment"), _SENTIMENT, "cautious"),
+        "geopolitical_risk": _one_of(parsed.get("geopolitical_risk"), _GLOBAL_RISK, "low"),
+        "commodity_risk": _one_of(parsed.get("commodity_risk"), _GLOBAL_RISK, "low"),
+        "key_events": _as_list(parsed.get("key_events")),
+        "summary": str(parsed.get("summary") or parsed.get("_raw") or "").strip(),
+        "_raw": raw,
+    }
 
 
 def as_of_now() -> str:

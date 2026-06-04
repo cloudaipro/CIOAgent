@@ -34,14 +34,15 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   │     cio/db.py         SQLite (transactions = source of truth)
                   │
                   ├─► cio/committee/*   investment committee pipeline:
-                  │     bundle → 8 specialists → debate → consensus → CIO → report
+                  │     bundle → 9 specialists → debate → consensus → CIO → report
                   │     models.py  per-agent model router (claude | NIM | OpenAI) + CIO chain
                   │     agent_memory.py  isolated per-agent memory (committee.db, WAL) + dedup
                   │     note_sanitizer.py  LLM figures-sanitizer (salvage) + sanitizer_log.py audit
                   │     render_pdf.py / translate.py  PDF + 繁體中文
                   │
                   └─► cio/watchlist_monitor/*  pre-market Watchlist Monitoring Agent:
-                        per-security assessment (bundle + web news + wma chain) → briefing PDF
+                        per-security assessment (bundle + web news + wma chain)
+                        + one shared global macro/geopolitical snapshot → briefing PDF
 ```
 
 - **Cost basis**: average-cost method. Positions & P&L are *derived* from the
@@ -96,7 +97,7 @@ Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 
 ## Investment committee (`/committee` or ask in chat)
 
-`/committee SYMBOL` runs a simulated buy-side process and returns a 13-section **PDF**
+`/committee SYMBOL` runs a simulated buy-side process and returns a 14-section **PDF**
 research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** version.
 
 - **Two ways to convene**: the `/committee SYMBOL` slash command, or just **ask in plain
@@ -107,12 +108,18 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   `/committee` vs `cli`). It's the one cost-bearing tool (~10-20 model calls); the agent
   confirms the symbol before firing.
 - **Pipeline**: gather data (price / fundamentals incl. **forward P/E** / 38 TA signals) →
-  **8 specialist agents** (market, equity, industry, valuation, quant, ETF, risk, catalyst)
-  vote (valuation & equity weigh forward vs trailing P/E) →
+  **9 specialist agents** (market, **geopolitical & macro**, equity, industry, valuation,
+  quant, ETF, risk, catalyst) vote (valuation & equity weigh forward vs trailing P/E) →
   **debate** (bear-vs-bull + risk-vs-valuation cross-examination, then revised votes) →
   **moderator consensus** + deterministic tally → **CIO** final decision (Strong Buy …
-  Strong Sell, with bull/base/bear scenarios). Specialists run in parallel.
-- **Per-agent memory**: each of the 9 agents keeps its **own isolated** persistent memory
+  Strong Sell, with bull/base/bear scenarios + macro/geopolitical risk scores). Specialists
+  run in parallel.
+- **Geopolitical & Macro Intelligence**: a dedicated specialist reads the macro backdrop
+  (rates, inflation, growth, liquidity), geopolitics (conflicts, sanctions, export controls,
+  trade), commodities, and FX, then judges how they cut for the name's sector. Its output
+  drives a **Global Macro & Geopolitical Environment** report section + an **External Risk
+  Matrix** (geopolitical / commodity / currency / regulatory).
+- **Per-agent memory**: each of the 10 agents (9 specialists + CIO) keeps its **own isolated** persistent memory
   (scope `committee:{role}` in `data/committee.db`), so they accrue private lessons
   without sharing context — all behind the same figures firewall. Notes are
   **deduplicated** on write: a deterministic key collapses identical takeaways and a
@@ -157,8 +164,15 @@ what deserves a deeper look.
 - **What it does**: for each security it gathers price / fundamentals / 38 TA signals plus
   overnight web headlines (Firecrawl), then produces a normalized assessment — overall
   status, conviction (0–100), recommendation (Buy/Add/Hold/Monitor/Reduce/Sell), new risks,
-  upcoming catalysts, and whether the thesis changed. The briefing aggregates these into an
-  executive summary, high/critical **alerts**, risks, catalysts, and a per-security review.
+  upcoming catalysts, whether the thesis changed, plus **external-risk exposure**
+  (`external_risk_score` + macro / geopolitical / commodity / currency sensitivity). The
+  briefing aggregates these into an executive summary, high/critical **alerts**, risks,
+  catalysts, and a per-security review.
+- **Global Macro & Geopolitical**: one **shared** macro/geopolitical headline read per run
+  (not per security — keeps the first layer cheap) opens the briefing as **Global Market
+  Intelligence** (market sentiment, geopolitical & commodity risk, key events), feeds a
+  **Macro & Geopolitical Alerts** block, and a **Watchlist Exposure Analysis** table ranks
+  names by their external-risk sensitivity.
 - **Escalation**: names with a high/critical event or a negative thesis change are **flagged**
   for a full `/committee SYMBOL` run (it doesn't auto-run the committee — keeps the briefing cheap).
 - **Schedule**: runs automatically at **06:00 local on trading days**. Holidays *and* weekends

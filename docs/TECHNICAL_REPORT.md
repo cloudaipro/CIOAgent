@@ -296,7 +296,7 @@ effects already committed (DB writes, spent model/NIM credits) before the stop a
 
 `/committee SYMBOL [zh]` (Telegram), a plain-language ask in chat ("convene the committee
 on META" → the agent's `run_committee` tool), or `python -m cio.committee SYMBOL [zh]`
-(CLI) runs a simulated buy-side process and delivers a 13-section **PDF** report (or `.md`
+(CLI) runs a simulated buy-side process and delivers a 14-section **PDF** report (or `.md`
 on render failure) to `data/reports/`; add `zh` for a **Traditional Chinese** version (§6.7).
 
 All three entry points funnel through one helper, **`delivery.produce_report(symbol, lang,
@@ -310,14 +310,14 @@ cost-bearing tool (~10-20 model calls).
 ```mermaid
 flowchart TD
     BD["bundle.gather_bundle<br/>price + fundamentals (incl. forward P/E) + 38 TA + ETF flag"] --> SP
-    subgraph SP["Round 1 — 8 specialists (parallel)"]
-        M[market]; E[equity]; I[industry]; V[valuation]
+    subgraph SP["Round 1 — 9 specialists (parallel)"]
+        M[market]; MAC[macro]; E[equity]; I[industry]; V[valuation]
         Q[quant]; ETF[etf*]; R[risk]; C[catalyst]
     end
     SP --> DEB["Round 2-3 — debate<br/>bear vs bull + risk vs valuation,<br/>then revised votes"]
     DEB --> CON["moderator consensus<br/>+ deterministic vote tally"]
-    CON --> CIO["CIO final decision<br/>(Strong Buy … Strong Sell, scenarios)"]
-    CIO --> REP["report.build_report<br/>13 sections + §11 confidence band"]
+    CON --> CIO["CIO final decision<br/>(Strong Buy … Strong Sell, scenarios,<br/>macro/geopolitical risk scores)"]
+    CIO --> REP["report.build_report<br/>14 sections + §11 confidence band"]
 ```
 
 ### 6.1 Pipeline (`engine.py`)
@@ -328,6 +328,20 @@ risk rating, horizon, bull/base/bear scenarios with probability + price target) 
 report. `run_committee` never raises; missing data degrades to a clean "no data" result.
 `format_bundle` surfaces `FWD_PE` (forward P/E) in the DATA block; the **valuation** and
 **equity** specialists' prompts instruct them to weigh forward vs trailing P/E.
+
+### 6.1b Geopolitical & Macro Intelligence specialist (`role_key="macro"`)
+The 9th specialist provides early warning of **external** risks/opportunities. Its prompt
+covers the macro backdrop (rates, inflation/CPI/PPI, growth/GDP/PMI, Treasury yields,
+liquidity), geopolitics (conflicts, US-China, trade wars, sanctions, export controls),
+commodities (crude / gas / gold / copper / lithium / rare earths), currencies (USD/EUR/JPY/
+CNY/CAD), and supply-chain stress — then judges how they cut for **this** name's sector. It
+must answer three questions in its reason (macro / geopolitical / commodity impact on the
+thesis) and emits `macro_environment` (supportive|neutral|restrictive), `geopolitical_risk`/
+`commodity_risk`/`currency_risk`/`regulatory_risk` (low|medium|high), `major_events`, and
+`affected_sectors_positive`/`_negative`. The **moderator** weighs this external-risk debate,
+and the **CIO** yaml adds `macro_alignment_score`, `geopolitical_risk_score`, and
+`external_risk_adjustment` so the final call integrates fundamentals + valuation + macro +
+geopolitical + risk. Cost: +2 calls/run (Round-1 + Round-3), within the ~20-call ceiling.
 
 ### 6.2 Debate (PRD §7.2)
 `select_debate_pairs` deterministically picks the most-bearish-vs-most-bullish pair plus
@@ -348,7 +362,7 @@ defaults) and dispatches via `_dispatch` to one of three backends:
   `gpt-5.5-2026-04-23`).
 Each backend returns `(text, tokens)` — real usage from the API (`usage.total_tokens`,
 `AssistantMessage.usage`), estimated via `tiktoken` only when omitted. A missing key →
-`("", 0)` so the run degrades gracefully. Shipped default: 8 specialists + moderator +
+`("", 0)` so the run degrades gracefully. Shipped default: 9 specialists + moderator +
 translator → **NIM `minimaxai/minimax-m2.7`**; CIO → a **fallback chain** (§6.4). The
 chosen service/model is logged per call (`agent <role> → <service>:<model>`).
 
@@ -387,7 +401,7 @@ debate cross-exam pairs, Round-3 revisions — concurrently under a semaphore
 consume prior outputs). `off` = fully sequential.
 
 ### 6.6 Per-agent isolated memory
-Each of the 9 agents (8 specialists + CIO) has its own MemCore namespace
+Each of the 10 agents (9 specialists + CIO) has its own MemCore namespace
 `committee:{role}` in **`committee.db`** (WAL), via `agent_memory.py`:
 - **recall_block** injects the agent's *own* hot block + a symbol-scoped RRF recall
   (`include_global=False`), bumping hit counts to drive promotion.
@@ -398,7 +412,7 @@ Isolation is proven: a note in `committee:risk` never surfaces for `committee:va
 `global`, or any `chat:*`.
 
 ### 6.7 Report output — PDF + Traditional Chinese
-`build_report` produces the 13-section markdown; `render_pdf.markdown_to_pdf` converts it
+`build_report` produces the 14-section markdown; `render_pdf.markdown_to_pdf` converts it
 (`markdown` → HTML → **WeasyPrint**) to a PDF with a single CJK CSS font stack
 (`Noto Sans CJK TC`) that renders English and Chinese alike (fonts embedded/subset). When
 the user adds a language token (`zh`/`tc`/`中文`/`繁中`), `translate.translate_report` first
@@ -423,9 +437,11 @@ flowchart TD
         NW["web.search<br/>overnight headlines (Firecrawl)"]
         BD --> ASK["engine.ask_role(role_key='wma')<br/>openai → claude → NIM chain"]
         NW --> ASK
-        ASK --> ASS["normalized assessment<br/>(PRD §7: status, conviction, rec,<br/>events, risks, catalysts, thesis Δ)"]
+        ASK --> ASS["normalized assessment<br/>(PRD §7: status, conviction, rec,<br/>events, risks, catalysts, thesis Δ,<br/>external-risk score + sensitivities)"]
     end
-    MS --> BR["report.build_briefing<br/>PRD §8: exec summary, alerts,<br/>risks, catalysts, per-security review"]
+    WL --> GMS["global_macro_snapshot<br/>ONE shared macro/geopolitical<br/>headline read per run"]
+    MS --> BR["report.build_briefing<br/>PRD §8: Global Market Intelligence,<br/>exec summary, macro/geopolitical alerts,<br/>exposure analysis, per-security review"]
+    GMS --> BR
     BR --> OUT["PDF (+ 繁中 on request) → Telegram"]
 ```
 
@@ -436,11 +452,28 @@ pulls overnight headlines via `cio.web.search` (offline-safe), then calls
 **normalized** into a fixed schema: `overall_status` (bullish/neutral/bearish),
 `conviction_score` (0–100, clamped), `recommendation` (Buy/Add/Hold/Monitor/Reduce/Sell),
 `analyst_sentiment`, `event_importance` (low/medium/high/critical),
-`investment_thesis_change` (unchanged/positive/negative), and the
-positive/negative-event, new-risk and upcoming-catalyst lists. Invalid model values fall
-back to safe defaults; a symbol with no data is **skipped without spending a model call**.
-`monitor_watchlist` fans out across the active list under a semaphore
-(`CIO_WMA_CONCURRENCY`, default 4), preserving input order; it never raises.
+`investment_thesis_change` (unchanged/positive/negative), the
+positive/negative-event, new-risk and upcoming-catalyst lists, plus **external-risk
+exposure** — `external_risk_score` (0–100) and `macro_sensitivity` /
+`geopolitical_sensitivity` / `commodity_sensitivity` / `currency_sensitivity`
+(low|medium|high) — all parsed in the same single call (no extra model calls). Invalid
+model values fall back to safe defaults; a symbol with no data is **skipped without
+spending a model call**. `monitor_watchlist` fans out across the active list under a
+semaphore (`CIO_WMA_CONCURRENCY`, default 4), preserving input order; it never raises.
+
+### 7.1b Global macro snapshot (`global_macro_snapshot`)
+One **shared** call per briefing run (not per security, so the first layer stays cheap)
+reads the morning's macro/geopolitical headlines via `cio.web.search` and emits a compact
+top-of-briefing read: `market_sentiment` (risk-on|cautious|risk-off), `geopolitical_risk`
+and `commodity_risk` (low|elevated|high), `key_events`, and a one-line `summary`
+(`role_key="macro"`, prompt `MACRO_SNAPSHOT_SYSTEM`). It is offline-safe — no headlines or
+an unparseable answer degrades to a neutral read. `build_briefing` / `briefing_summary` take
+it as an **optional** `macro=` arg (backward compatible: `monitor_watchlist` still returns a
+plain `list[dict]`), rendering the **Global Market Intelligence** section, a **Macro &
+Geopolitical Alerts** block, and a **Watchlist Exposure Analysis** table (names ranked by
+external-risk sensitivity — derived, no extra call). Callers `bot.py` / `scheduler.py` /
+`__main__.py` fetch the snapshot and pass it; a snapshot failure leaves the briefing intact
+minus the global section.
 
 ### 7.2 Committee escalation (PRD §11)
 A high/critical `event_importance` or a negative `investment_thesis_change` sets an
@@ -609,10 +642,11 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 
 ## 11. Verification
 
-`pytest` — **268 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
+`pytest` — **273 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
 firewall, scope isolation, injection budget, hybrid recall, eviction, promotion, rolling
 cadence, playbooks, cold-boot); stock subsystem + panel (incl. forward-P/E field & cell);
-committee (bundle, 8 roles, consensus/tally, 13-section report, confidence band, debate
+committee (bundle, 9 roles incl. **geopolitical & macro**, consensus/tally, 14-section
+report incl. macro/geopolitical environment + external-risk matrix, confidence band, debate
 pair-selection + rounds, model routing claude/NIM/OpenAI, **CIO fallback-chain selection at
 each budget state**, parallel-vs-sequential peak, missing-key degrade); per-agent memory
 (isolation, firewall, injection, promotion); **PDF/translation** (real WeasyPrint renders
@@ -620,9 +654,11 @@ incl. a 繁體中文 doc, lang parsing, translate no-op/fallback); **`/stop` + p
 single-flight** (`tests/test_bot_stop.py`: stopped turn not logged / no answer leaked /
 agent reset / registries don't leak; normal turn unaffected; error + genuine-cancel cleanup;
 per-chat isolation; 2nd-message reject while busy; accept after completion/stop); **WMA**
-(`tests/test_watchlist_monitor.py`: yaml parse/normalize, invalid-value fallbacks, no-data
-skip without a model call, escalation flag, order-preserving fan-out, briefing sections +
-summary, `wma` chain resolution); **trading-day calendar** (`tests/test_timeutil.py`:
+(`tests/test_watchlist_monitor.py`: yaml parse/normalize incl. external-risk
+sensitivities, invalid-value fallbacks, no-data skip without a model call, escalation flag,
+order-preserving fan-out, briefing sections + summary, **global macro snapshot**
+parse/offline-safe + macro-aware briefing sections, `wma` chain resolution); **trading-day
+calendar** (`tests/test_timeutil.py`:
 NYSE-calendar membership, holiday exclusion, weekday fallback, type coercion); **dashboard**
 (routes incl. `/subscribers`, escaping, 404, token gate); **security** (symbol sanitization,
 cache-path containment, report-filename sanitizer, access gate).

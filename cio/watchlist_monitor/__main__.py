@@ -13,7 +13,10 @@ from pathlib import Path
 
 
 def main():
-    from . import monitor_watchlist, build_briefing, briefing_summary, as_of_now
+    from . import (
+        monitor_watchlist, global_macro_snapshot, build_briefing,
+        briefing_summary, as_of_now,
+    )
     from ..committee.translate import normalize_lang, translate_report
 
     # Split a trailing/any language token (zh) out of the symbol list.
@@ -27,9 +30,10 @@ def main():
     lang_suffix = "_zh" if lang == "tc" else ""
 
     assessments = asyncio.run(monitor_watchlist(symbols or None))
-    briefing = build_briefing(assessments, as_of=as_of_now())
+    macro = asyncio.run(global_macro_snapshot())
+    briefing = build_briefing(assessments, as_of=as_of_now(), macro=macro)
     briefing = asyncio.run(translate_report(briefing, lang))
-    print(briefing_summary(assessments))
+    print(briefing_summary(assessments, macro))
     print()
 
     out_dir = Path(__file__).resolve().parent.parent.parent / "data" / "reports"

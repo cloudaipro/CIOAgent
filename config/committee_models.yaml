@@ -4,6 +4,7 @@
 defaults: {service: nim, model: minimaxai/minimax-m2.7}
 agents:
   market:    {service: nim,    model: moonshotai/kimi-k2.6}
+  macro:     {service: nim,    model: moonshotai/kimi-k2.6}
   equity:    {service: nim,    model: moonshotai/kimi-k2.6}
   industry:  {service: nim,    model: moonshotai/kimi-k2.6}
   valuation: {service: nim,    model: moonshotai/kimi-k2.6}

@@ -403,7 +403,8 @@ async def _cmd_briefing_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     """
     try:
         from .watchlist_monitor import (
-            monitor_watchlist, build_briefing, briefing_summary, as_of_now,
+            monitor_watchlist, global_macro_snapshot, build_briefing,
+            briefing_summary, as_of_now,
         )
         from .committee.translate import normalize_lang, translate_report
 
@@ -441,9 +442,14 @@ async def _cmd_briefing_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-        briefing = build_briefing(assessments, as_of=as_of_now())
+        try:
+            macro = await global_macro_snapshot()
+        except Exception:
+            log.exception("global_macro_snapshot error; briefing without macro")
+            macro = None
+        briefing = build_briefing(assessments, as_of=as_of_now(), macro=macro)
         briefing = await translate_report(briefing, lang)
-        summary = briefing_summary(assessments)
+        summary = briefing_summary(assessments, macro)
         date_str = datetime.date.today().isoformat()
 
         REPORTS_DIR.mkdir(parents=True, exist_ok=True)

@@ -163,7 +163,8 @@ async def watchlist_briefing(bot) -> None:
         return
     try:
         from .watchlist_monitor import (
-            monitor_watchlist, build_briefing, briefing_summary, as_of_now,
+            monitor_watchlist, global_macro_snapshot, build_briefing,
+            briefing_summary, as_of_now,
         )
         assessments = await monitor_watchlist()
     except Exception:
@@ -172,8 +173,13 @@ async def watchlist_briefing(bot) -> None:
     if not assessments:
         log.info("watchlist_briefing: no active watchlist / nothing to review")
         return
-    briefing = build_briefing(assessments, as_of=as_of_now())
-    summary = briefing_summary(assessments)
+    try:
+        macro = await global_macro_snapshot()
+    except Exception:
+        log.exception("watchlist_briefing: macro snapshot failed; continuing without")
+        macro = None
+    briefing = build_briefing(assessments, as_of=as_of_now(), macro=macro)
+    summary = briefing_summary(assessments, macro)
     if await _send_briefing(bot, chats, briefing, summary, today):
         memory.set_meta(_LAST_WMA_KEY, today)
 

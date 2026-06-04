@@ -150,6 +150,26 @@ _ROLE_YAML: dict[str, str] = {
         confidence: 80
         reason: Highly liquid ETF with tight tracking error
         ```"""),
+    "macro": textwrap.dedent("""\
+        ```yaml
+        macro_environment: supportive
+        geopolitical_risk: medium
+        commodity_risk: low
+        currency_risk: low
+        regulatory_risk: medium
+        major_events:
+          - US-China export restrictions
+          - Middle East tension
+        affected_sectors_positive:
+          - Energy
+          - Defense
+        affected_sectors_negative:
+          - Consumer Electronics
+        vote: HOLD
+        confidence: 58
+        reason: Qualitative assessment — macro supportive but geopolitical tail risk on China exposure
+        memory_note: AAPL carries persistent China supply-chain geopolitical exposure across cycles
+        ```"""),
     "risk": textwrap.dedent("""\
         ```yaml
         risk_score: 45
@@ -183,6 +203,9 @@ _ROLE_YAML: dict[str, str] = {
         confidence_score: 68
         risk_rating: Moderate
         time_horizon: 12 months
+        macro_alignment_score: 64
+        geopolitical_risk_score: 42
+        external_risk_adjustment: Qualitative assessment — trimmed confidence on China geopolitical risk
         base_case: Qualitative assessment — modest appreciation driven by services
         bull_case: Qualitative assessment — AI supercycle re-rates the stock
         bear_case: Qualitative assessment — China ban triggers multiple compression
@@ -230,6 +253,8 @@ async def _canned_ask_role(
         return _ROLE_YAML["cio"]
     if "moderator" in sp:
         return _ROLE_YAML["moderator"]
+    if "geopolitical & macro intelligence" in sp:
+        return _ROLE_YAML["macro"]
     if "market intelligence" in sp:
         return _ROLE_YAML["market"]
     if "equity research" in sp:
@@ -345,6 +370,7 @@ EXPECTED_SECTION_HEADERS = [
     "## Executive Summary",
     "## Company Overview",
     "## Market Analysis",
+    "## Global Macro & Geopolitical Environment",
     "## Industry Analysis",
     "## Financial Analysis",
     "## Valuation Analysis",
@@ -380,26 +406,28 @@ class TestRunCommittee:
         assert result.opinions == []
 
     def test_non_etf_has_7_opinions(self, monkeypatch):
-        """AAPL (not ETF) should produce exactly 7 opinions (etf specialist skipped)."""
+        """AAPL (not ETF) should produce exactly 8 opinions (etf specialist skipped)."""
         monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_AAPL)
         monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
         from cio.committee.engine import run_committee
         result = self._run(run_committee(SYMBOL_AAPL))
         assert result.error is None
-        assert len(result.opinions) == 7
+        assert len(result.opinions) == 8
         keys = {op["key"] for op in result.opinions}
         assert "etf" not in keys
+        assert "macro" in keys
 
-    def test_etf_has_8_opinions(self, monkeypatch):
-        """SPY (is_etf=True) should produce 8 opinions."""
+    def test_etf_has_9_opinions(self, monkeypatch):
+        """SPY (is_etf=True) should produce 9 opinions."""
         monkeypatch.setattr("cio.committee.engine.gather_bundle", lambda sym: FAKE_BUNDLE_ETF)
         monkeypatch.setattr("cio.committee.engine.ask_role", _canned_ask_role)
         from cio.committee.engine import run_committee
         result = self._run(run_committee("SPY"))
         assert result.error is None
-        assert len(result.opinions) == 8
+        assert len(result.opinions) == 9
         keys = {op["key"] for op in result.opinions}
         assert "etf" in keys
+        assert "macro" in keys
 
     def test_consensus_present(self, monkeypatch):
         """consensus dict is populated and contains required keys."""
@@ -421,7 +449,7 @@ class TestRunCommittee:
         assert "hold_count" in tally
         assert "sell_count" in tally
         # votes should sum to 7 for AAPL (non-ETF)
-        assert tally["buy_count"] + tally["hold_count"] + tally["sell_count"] == 7
+        assert tally["buy_count"] + tally["hold_count"] + tally["sell_count"] == 8
 
     def test_vote_tally_nontrivial(self, monkeypatch):
         """Canned votes are varied (BUY, HOLD, SELL all appear) → tally is non-trivial."""
@@ -469,13 +497,24 @@ class TestBuildReport:
         from cio.committee.engine import run_committee
         return self._run(run_committee(SYMBOL_AAPL))
 
-    def test_all_13_sections_present(self, monkeypatch):
-        """Report must contain all 13 section headers."""
+    def test_all_sections_present(self, monkeypatch):
+        """Report must contain all section headers (incl. macro/geopolitical)."""
         result = self._make_result(monkeypatch)
         from cio.committee.report import build_report
         report = build_report(SYMBOL_AAPL, result)
         for header in EXPECTED_SECTION_HEADERS:
             assert header in report, f"Missing section: {header}"
+
+    def test_macro_section_rendered(self, monkeypatch):
+        """Macro specialist output + External Risk Matrix + CIO external-risk fields."""
+        result = self._make_result(monkeypatch)
+        from cio.committee.report import build_report
+        report = build_report(SYMBOL_AAPL, result)
+        assert "External Risk Matrix" in report
+        assert "**Macro Environment:** supportive" in report
+        # External Risk Adjustment from the CIO yaml
+        assert "External Risk Adjustment" in report
+        assert "Macro Alignment" in report
 
     def test_confidence_band_in_report(self, monkeypatch):
         """Report must contain a confidence band label from §11."""
@@ -700,7 +739,7 @@ class TestRunCommitteeDebate:
     def test_round1_opinions_populated(self, monkeypatch):
         """result.round1_opinions should hold the 7 Round 1 specialist votes."""
         result = self._make_result_debate_on(monkeypatch)
-        assert len(result.round1_opinions) == 7
+        assert len(result.round1_opinions) == 8
 
     def test_debate_exchanges_non_empty(self, monkeypatch):
         """Debate must produce at least one exchange with actual challenge AND
@@ -1613,7 +1652,7 @@ class TestParallelExecution:
         result = self._run(run_committee(SYMBOL_AAPL, debate=False, parallel=True))
 
         assert result.error is None
-        assert len(result.opinions) == 7
+        assert len(result.opinions) == 8
         assert counter["peak"] > 1, f"Expected peak > 1 in parallel mode, got {counter['peak']}"
 
     def test_sequential_peak_equals_one(self, monkeypatch):
@@ -1626,7 +1665,7 @@ class TestParallelExecution:
         result = self._run(run_committee(SYMBOL_AAPL, debate=False, parallel=False))
 
         assert result.error is None
-        assert len(result.opinions) == 7
+        assert len(result.opinions) == 8
         assert counter["peak"] == 1, f"Expected peak == 1 in sequential mode, got {counter['peak']}"
 
     def test_parallel_and_sequential_same_shape(self, monkeypatch):
@@ -1640,5 +1679,5 @@ class TestParallelExecution:
 
         assert r_par.error is None
         assert r_seq.error is None
-        assert len(r_par.opinions) == len(r_seq.opinions) == 7
+        assert len(r_par.opinions) == len(r_seq.opinions) == 8
         assert set(op["key"] for op in r_par.opinions) == set(op["key"] for op in r_seq.opinions)

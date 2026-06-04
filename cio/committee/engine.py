@@ -682,7 +682,8 @@ async def run_committee(
         f"COMMITTEE OPINIONS:\n{opinions_summary}\n\n"
         f"CONSENSUS:\n{mod_raw}\n\n"
         f"Required output fields: final_recommendation, confidence_score, risk_rating, "
-        f"time_horizon, base_case, bull_case, bear_case, scenarios"
+        f"time_horizon, macro_alignment_score, geopolitical_risk_score, "
+        f"external_risk_adjustment, base_case, bull_case, bear_case, scenarios"
     )
     # Inject CIO's own scoped memory block, plus the figure-prevention rule.
     cio_mem = agent_memory.recall_block("cio", resolved)

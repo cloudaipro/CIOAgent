@@ -1,7 +1,8 @@
 """
 report.py — build_report / confidence_band
 
-Renders PRD §9 thirteen-section markdown report from a CommitteeResult.
+Renders the PRD §9 markdown report (14 sections incl. Global Macro &
+Geopolitical Environment) from a CommitteeResult.
 Never crashes on missing data — prints the header + "_Insufficient data._".
 """
 from __future__ import annotations
@@ -187,7 +188,7 @@ def _debate_section(debate_data: dict, round1_opinions: list[dict], final_opinio
 
 def build_report(symbol: str, result) -> str:
     """
-    Render a 13-section PRD §9 markdown report from a CommitteeResult (or dict-like).
+    Render the PRD §9 markdown report (14 sections) from a CommitteeResult (or dict-like).
 
     Never raises; missing sections render as "## Title\n\n_Insufficient data._".
     """
@@ -263,6 +264,30 @@ def build_report(symbol: str, result) -> str:
     else:
         mkt_body = "_Insufficient data._"
     sections.append(_section("Market Analysis", mkt_body))
+
+    # ── 3b. Global Macro & Geopolitical Environment ───────────────────────
+    mac = next((op for op in opinions if op.get("key") == "macro"), None)
+    if mac:
+        def _lst(v):
+            if isinstance(v, (list, tuple)):
+                return ", ".join(str(x) for x in v) or "_Insufficient data._"
+            return _v(v)
+        macro_body = (
+            f"**Macro Environment:** {_v(mac.get('macro_environment'))}  \n"
+            f"**Major Events:** {_lst(mac.get('major_events'))}  \n"
+            f"**Sectors Helped:** {_lst(mac.get('affected_sectors_positive'))}  \n"
+            f"**Sectors Hurt:** {_lst(mac.get('affected_sectors_negative'))}\n\n"
+            f"**External Risk Matrix**\n\n"
+            f"| Geopolitical | Commodity | Currency | Regulatory |\n"
+            f"|---|---|---|---|\n"
+            f"| {_v(mac.get('geopolitical_risk'), '?')} "
+            f"| {_v(mac.get('commodity_risk'), '?')} "
+            f"| {_v(mac.get('currency_risk'), '?')} "
+            f"| {_v(mac.get('regulatory_risk'), '?')} |"
+        )
+    else:
+        macro_body = "_Insufficient data._"
+    sections.append(_section("Global Macro & Geopolitical Environment", macro_body))
 
     # ── 4. Industry Analysis ──────────────────────────────────────────────
     ind = next((op for op in opinions if op.get("key") == "industry"), None)
@@ -369,7 +394,10 @@ def build_report(symbol: str, result) -> str:
             f"**Final Recommendation:** {final_rec}  \n"
             f"**Confidence Score:** {_v(conf_score)} — **{band}**  \n"
             f"**Risk Rating:** {_v(cio.get('risk_rating'))}  \n"
-            f"**Time Horizon:** {_v(cio.get('time_horizon'))}  \n\n"
+            f"**Time Horizon:** {_v(cio.get('time_horizon'))}  \n"
+            f"**Macro Alignment:** {_v(cio.get('macro_alignment_score'))}  |  "
+            f"**Geopolitical Risk:** {_v(cio.get('geopolitical_risk_score'))}  \n"
+            f"**External Risk Adjustment:** {_v(cio.get('external_risk_adjustment'))}  \n\n"
             f"**Base Case:** {base_case}  \n"
             f"**Bull Case:** {_v(cio.get('bull_case'))}  \n"
             f"**Bear Case:** {_v(cio.get('bear_case'))}"
