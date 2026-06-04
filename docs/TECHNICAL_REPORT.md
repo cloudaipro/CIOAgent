@@ -294,9 +294,18 @@ effects already committed (DB writes, spent model/NIM credits) before the stop a
 
 ## 6. Investment committee (`cio/committee/`)
 
-`/committee SYMBOL [zh]` (Telegram) or `python -m cio.committee SYMBOL [zh]` (CLI) runs a
-simulated buy-side process and delivers a 13-section **PDF** report (or `.md` on render
-failure) to `data/reports/`; add `zh` for a **Traditional Chinese** version (§6.7).
+`/committee SYMBOL [zh]` (Telegram), a plain-language ask in chat ("convene the committee
+on META" → the agent's `run_committee` tool), or `python -m cio.committee SYMBOL [zh]`
+(CLI) runs a simulated buy-side process and delivers a 13-section **PDF** report (or `.md`
+on render failure) to `data/reports/`; add `zh` for a **Traditional Chinese** version (§6.7).
+
+All three entry points funnel through one helper, **`delivery.produce_report(symbol, lang,
+reports_dir, source)`** (`cio/committee/delivery.py`): run → translate → render PDF (md
+fallback) → summary, returning a `CommitteeArtifact`. The `source` arg (`command` /
+`chat` / `cli`) tags the run for the dashboard (§8). The chat agent is told in its system
+prompt **never to fabricate or simulate a committee** — it must call the tool so the real
+subsystem produces the verdict; it confirms the symbol first since this is the one
+cost-bearing tool (~10-20 model calls).
 
 ```mermaid
 flowchart TD
@@ -491,8 +500,9 @@ framework, zero new deps), bound `127.0.0.1`. Launch: `python -m cio.dashboard`.
   single-active and NASDAQ-index invariants). Drag-to-reorder is one scoped vanilla
   script that writes the dragged symbol order into a hidden field and submits; with JS
   off the list still renders and every other action still works.
-- `/committee` → `/committee/<run_id>` — every LLM call of a run: content **sent**
-  (system + user prompt) and content **returned**, per role, in order.
+- `/committee` → `/committee/<run_id>` — each run lists its **Trigger** (`chat` / `command`
+  / `cli`, from the transcript `source` column) and drills into every LLM call: content
+  **sent** (system + user prompt) and content **returned**, per role, in order.
 - `/memory` — **per-agent / per-chat memory contents** for debugging: `memory.list_scopes`
   enumerates every scope across **both** stores (`chat:*` / `global` in `cio.db`,
   `committee:<role>` in `committee.db`); each scope lists its notes with tier, key, value,
@@ -502,8 +512,11 @@ framework, zero new deps), bound `127.0.0.1`. Launch: `python -m cio.dashboard`.
 **Capture funnels** (one per source, so nothing is missed and nothing is double-counted):
 - Committee transcript: `engine.ask_role` is the single LLM entry point; a `_capture()`
   call sits beside each `usage.record`, tagged by a `_RUN_ID` ContextVar set at the top of
-  `run_committee` (propagates into the parallel tasks). Before this, committee prompts/
-  responses were persisted nowhere — `_raw` on opinion dicts is not durable.
+  `run_committee` (propagates into the parallel tasks). Each row also stores a `source`
+  (trigger) from the `_RUN_SOURCE` ContextVar — set by `engine.set_run_source()` inside
+  `delivery.produce_report`, so `command`/`chat`/`cli` runs are distinguishable; `_connect`
+  ALTER-migrates DBs predating the column. Before this, committee prompts/responses were
+  persisted nowhere — `_raw` on opinion dicts is not durable.
 - Telegram turns: `bot._run` is the single funnel for text/photo/document turns →
   `memory.log_turn` writes the user + assistant rows to `conv_turns` (which also,
   finally, populates the COLD recall layer that was defined but unwritten).
