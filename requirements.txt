@@ -2,6 +2,7 @@ claude-agent-sdk>=0.2.87
 httpx
 openai
 pyyaml
+ruamel.yaml          # round-trip YAML for dashboard Configure tab (preserves comments); pyyaml is the fallback if absent
 python-telegram-bot>=22.0
 pandas>=2.0
 numpy<2.3              # capped: numba (via pandas_ta) requires numpy>=1.24,<2.3
