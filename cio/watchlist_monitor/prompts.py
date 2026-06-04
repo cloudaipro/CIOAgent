@@ -33,12 +33,42 @@ WMA_SYSTEM = (
     "  • recommendation must be one of: Buy, Add, Hold, Monitor, Reduce, Sell.\n"
     "  • overall_status must be one of: bullish, neutral, bearish.\n"
     "  • analyst_sentiment must be one of: bullish, neutral, bearish.\n"
-    "  • investment_thesis_change must be one of: unchanged, positive, negative.\n\n"
+    "  • investment_thesis_change must be one of: unchanged, positive, negative.\n"
+    "  • Also gauge this security's EXTERNAL-RISK exposure (global macro & "
+    "geopolitical): how sensitive is it to (a) the macro backdrop — rates, "
+    "inflation, growth, liquidity; (b) geopolitical events — conflicts, sanctions, "
+    "export controls, trade policy; (c) commodity moves — oil/gas/metals; "
+    "(d) currency/FX swings. Each *_sensitivity is one of: low, medium, high. "
+    "external_risk_score is 0-100 (higher = more exposed to external shocks). "
+    "Reference the relevant headline when a sensitivity is elevated.\n\n"
     "End your response with a single fenced ```yaml block containing exactly these "
     "keys:\n"
     "  ticker, company, overall_status, conviction_score, recommendation,\n"
     "  analyst_sentiment, event_importance, investment_thesis_change,\n"
+    "  external_risk_score, macro_sensitivity, geopolitical_sensitivity,\n"
+    "  commodity_sensitivity, currency_sensitivity,\n"
     "  key_positive_events (list), key_negative_events (list), new_risks (list),\n"
     "  upcoming_catalysts (list), summary (one sentence).\n"
     "Use empty lists ([]) when a category has nothing material — never omit a key."
+)
+
+# Global macro snapshot: ONE call per watchlist run (not per security) that reads
+# the morning's macro/geopolitical headlines and emits a compact top-of-briefing
+# read. Keeps the WMA's first-layer cost low while delivering PRD §"Global Market
+# Intelligence". Offline-safe: no headlines → the agent still returns a neutral read.
+MACRO_SNAPSHOT_SYSTEM = (
+    "You are the Global Macro & Geopolitical desk for a buy-side morning briefing. "
+    "From the overnight headlines below, summarise the global backdrop a portfolio "
+    "manager needs BEFORE reviewing individual names. Cover macro (rates, inflation, "
+    "growth, liquidity), geopolitics (conflicts, sanctions, export controls, trade), "
+    "commodities (oil/gas/metals), and currencies.\n\n"
+    "Rules:\n"
+    "  • Headlines are qualitative leads — never invent specific figures.\n"
+    "  • market_sentiment is one of: risk-on, cautious, risk-off.\n"
+    "  • geopolitical_risk and commodity_risk are each one of: low, elevated, high.\n"
+    "  • key_events is a short list of the most market-moving developments.\n\n"
+    "End with a single fenced ```yaml block containing exactly these keys:\n"
+    "  market_sentiment, geopolitical_risk, commodity_risk,\n"
+    "  key_events (list), summary (one sentence).\n"
+    "Use an empty list ([]) when nothing is material — never omit a key."
 )

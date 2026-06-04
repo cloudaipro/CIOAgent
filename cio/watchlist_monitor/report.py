@@ -12,6 +12,8 @@ from typing import Any
 
 _IMPORTANCE_RANK = {"critical": 3, "high": 2, "medium": 1, "low": 0}
 _STATUS_EMOJI = {"bullish": "🟢", "neutral": "⚪", "bearish": "🔴"}
+_SENS_RANK = {"high": 2, "medium": 1, "low": 0}
+_SENS_EMOJI = {"high": "🔴", "medium": "🟠", "low": "🟢"}
 
 
 def _priority_key(a: dict) -> tuple:
@@ -48,7 +50,57 @@ def _bullets(items: list[str]) -> str:
     return "\n".join(f"- {x}" for x in items) if items else "- _none_"
 
 
-def briefing_summary(assessments: list[dict]) -> str:
+def _macro_alerts(assessments: list[dict], macro: dict | None) -> list[str]:
+    """PRD macro / geopolitical alert lines, from the global snapshot + per-security
+    sensitivity. Derived (no extra LLM calls)."""
+    alerts: list[str] = []
+    if macro:
+        if macro.get("commodity_risk") == "high":
+            alerts.append("**macro** (high): commodity risk elevated — "
+                          f"{macro.get('summary') or 'see global intelligence'}")
+        if macro.get("geopolitical_risk") == "high":
+            alerts.append("**geopolitical** (high): "
+                          f"{macro.get('summary') or 'elevated geopolitical risk'}")
+    for a in assessments:
+        if a.get("error"):
+            continue
+        if a.get("geopolitical_sensitivity") == "high":
+            alerts.append(f"**geopolitical** ({a['ticker']}): high geopolitical "
+                          "sensitivity on current events")
+        elif a.get("commodity_sensitivity") == "high":
+            alerts.append(f"**macro** ({a['ticker']}): high commodity sensitivity")
+    return alerts
+
+
+def _exposure_table(assessments: list[dict]) -> str:
+    """Watchlist Exposure Analysis — per-security external-risk read, sorted by
+    geopolitical sensitivity then external_risk_score."""
+    rows = [a for a in assessments if not a.get("error")]
+    if not rows:
+        return "_No securities to assess._"
+    rows = sorted(
+        rows,
+        key=lambda a: (_SENS_RANK.get(a.get("geopolitical_sensitivity", "low"), 0),
+                       a.get("external_risk_score", 0)),
+        reverse=True,
+    )
+    out = [
+        "| Ticker | Ext. Risk | Macro | Geopolitical | Commodity | Currency |",
+        "|---|---|---|---|---|---|",
+    ]
+    for a in rows:
+        def _s(k):
+            v = a.get(k, "low")
+            return f"{_SENS_EMOJI.get(v, '🟢')} {v}"
+        out.append(
+            f"| {a.get('ticker', '?')} | {a.get('external_risk_score', 0)} | "
+            f"{_s('macro_sensitivity')} | {_s('geopolitical_sensitivity')} | "
+            f"{_s('commodity_sensitivity')} | {_s('currency_sensitivity')} |"
+        )
+    return "\n".join(out)
+
+
+def briefing_summary(assessments: list[dict], macro: dict | None = None) -> str:
     """One short plain-text block for Telegram (no Markdown formatting chars)."""
     if not assessments:
         return "📋 Watchlist briefing: no active watchlist / no securities to review."
@@ -61,6 +113,11 @@ def briefing_summary(assessments: list[dict]) -> str:
         f"Environment: {_market_environment(assessments)}  |  "
         f"🟢 {c['bullish']}  ⚪ {c['neutral']}  🔴 {c['bearish']}",
     ]
+    if macro:
+        lines.append(
+            f"Global: {macro.get('market_sentiment', 'cautious')}  |  "
+            f"geopolitical {macro.get('geopolitical_risk', 'low')}  |  "
+            f"commodity {macro.get('commodity_risk', 'low')}")
     hp = _highest_priority(assessments)
     if hp:
         lines.append(f"Highest priority: {hp['ticker']} "
@@ -103,8 +160,14 @@ def _security_block(a: dict) -> str:
 
 
 def build_briefing(assessments: list[dict], as_of: str = "",
-                   watchlist_name: str | None = None) -> str:
-    """Render the full morning briefing markdown (PRD §8)."""
+                   watchlist_name: str | None = None,
+                   macro: dict | None = None) -> str:
+    """Render the full morning briefing markdown (PRD §8).
+
+    *macro* is the optional global_macro_snapshot() dict; when present it renders
+    the Global Market Intelligence section (before stock analysis) plus macro /
+    geopolitical alerts.
+    """
     title = "# Watchlist Monitoring Briefing"
     if watchlist_name:
         title += f": {watchlist_name}"
@@ -124,6 +187,26 @@ def build_briefing(assessments: list[dict], as_of: str = "",
     parts.append(f"**Watchlist:** 🟢 bullish {c['bullish']}  |  "
                  f"⚪ neutral {c['neutral']}  |  🔴 bearish {c['bearish']}  ")
     parts.append(f"**Highest priority:** {hp['ticker'] if hp else '—'}\n")
+
+    # ── Global Market Intelligence (must appear before stock analysis) ──────
+    if macro:
+        parts.append("## Global Market Intelligence\n")
+        parts.append(f"**Market sentiment:** {macro.get('market_sentiment', 'cautious')}  |  "
+                     f"**Geopolitical risk:** {macro.get('geopolitical_risk', 'low')}  |  "
+                     f"**Commodity risk:** {macro.get('commodity_risk', 'low')}  ")
+        if macro.get("summary"):
+            parts.append(f"\n{macro['summary']}\n")
+        parts.append("**Key events:**")
+        parts.append(_bullets(macro.get("key_events", [])) + "\n")
+
+    # ── Macro & Geopolitical Alerts ─────────────────────────────────────────
+    macro_alerts = _macro_alerts(assessments, macro)
+    parts.append("## Macro & Geopolitical Alerts\n")
+    parts.append(_bullets(macro_alerts) + "\n")
+
+    # ── Watchlist Exposure Analysis ─────────────────────────────────────────
+    parts.append("## Watchlist Exposure Analysis\n")
+    parts.append(_exposure_table(assessments) + "\n")
 
     # ── §2 Highest Priority Alerts (high/critical only) ─────────────────────
     alerts = [a for a in ranked

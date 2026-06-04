@@ -93,8 +93,8 @@ A **scope** is the hard isolation boundary. Three families:
 
 - `global` — durable facts true across all chats.
 - `chat:<id>` — per-conversation memory for a specific Telegram chat.
-- `committee:<role>` — one per committee agent (8 specialists + CIO), e.g.
-  `committee:risk`, `committee:valuation`, `committee:cio`.
+- `committee:<role>` — one per committee agent (9 specialists + CIO), e.g.
+  `committee:risk`, `committee:macro`, `committee:valuation`, `committee:cio`.
 
 Isolation is enforced at query time. Conversational recall reads `scope` + `global`;
 committee recall passes `include_global=False`, restricting hits **strictly** to that

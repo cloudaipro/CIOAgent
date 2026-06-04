@@ -44,6 +44,11 @@ def _yaml(status="bullish", conv=84, rec="Add", importance="high",
         analyst_sentiment: bullish
         event_importance: {importance}
         investment_thesis_change: {thesis}
+        external_risk_score: 72
+        macro_sensitivity: medium
+        geopolitical_sensitivity: high
+        commodity_sensitivity: low
+        currency_sensitivity: medium
         key_positive_events:
           - HBM demand increased
           - Analyst target raised
@@ -97,6 +102,12 @@ def test_monitor_symbol_parses_and_normalizes(patch_ask):
     assert a["upcoming_catalysts"] == ["earnings release"]
     assert a["escalate"] is True            # high importance → escalate
     assert a["error"] is None
+    # external-risk exposure fields parsed + normalized
+    assert a["external_risk_score"] == 72
+    assert a["macro_sensitivity"] == "medium"
+    assert a["geopolitical_sensitivity"] == "high"
+    assert a["commodity_sensitivity"] == "low"
+    assert a["currency_sensitivity"] == "medium"
     # role_key must route through the wma model chain
     assert installed.calls[0][0] == "wma"
 
@@ -171,6 +182,75 @@ def test_build_briefing_empty():
     from cio.watchlist_monitor import build_briefing
     md = build_briefing([], as_of="2026-06-03")
     assert "No active watchlist" in md
+
+
+# ---------------------------------------------------------------------------
+# global macro snapshot + macro-aware briefing
+# ---------------------------------------------------------------------------
+
+_MACRO_YAML = textwrap.dedent("""\
+    Global desk read.
+
+    ```yaml
+    market_sentiment: risk-off
+    geopolitical_risk: high
+    commodity_risk: high
+    key_events:
+      - Brent crude above $95
+      - New semiconductor export controls
+    summary: Oil spike and export controls weigh on risk appetite.
+    ```
+""")
+
+
+def test_global_macro_snapshot_parses_and_normalizes(patch_ask):
+    from cio.watchlist_monitor import global_macro_snapshot
+    installed = patch_ask(_MACRO_YAML)
+    m = _run(global_macro_snapshot(news_fn=_fake_news))
+    assert m["market_sentiment"] == "risk-off"
+    assert m["geopolitical_risk"] == "high"
+    assert m["commodity_risk"] == "high"
+    assert "Brent crude above $95" in m["key_events"]
+    # one shared call, routed through the macro role
+    assert installed.calls[0][0] == "macro"
+
+
+def test_global_macro_snapshot_offline_safe(patch_ask):
+    from cio.watchlist_monitor import global_macro_snapshot
+    patch_ask("no yaml here")               # unparseable → neutral defaults
+    m = _run(global_macro_snapshot(news_fn=lambda q, limit=5: []))
+    assert m["market_sentiment"] == "cautious"
+    assert m["geopolitical_risk"] == "low"
+    assert m["commodity_risk"] == "low"
+
+
+def test_build_briefing_with_macro_sections(patch_ask):
+    from cio.watchlist_monitor import monitor_watchlist, build_briefing
+    patch_ask(_yaml())
+    out = _run(monitor_watchlist(["MU"], bundle_fn=lambda s: FAKE_BUNDLE,
+                                 news_fn=_fake_news))
+    macro = {"market_sentiment": "risk-off", "geopolitical_risk": "high",
+             "commodity_risk": "high", "key_events": ["Brent crude above $95"],
+             "summary": "Risk-off backdrop."}
+    md = build_briefing(out, as_of="2026-06-03", macro=macro)
+    assert "Global Market Intelligence" in md
+    assert "Watchlist Exposure Analysis" in md
+    assert "Macro & Geopolitical Alerts" in md
+    assert "Brent crude above $95" in md
+    # per-security high geopolitical sensitivity surfaces in exposure table
+    assert "geopolitical" in md.lower()
+
+
+def test_build_briefing_without_macro_omits_global(patch_ask):
+    """Backward-compat: no macro arg → no Global Market Intelligence section."""
+    from cio.watchlist_monitor import monitor_watchlist, build_briefing
+    patch_ask(_yaml())
+    out = _run(monitor_watchlist(["MU"], bundle_fn=lambda s: FAKE_BUNDLE,
+                                 news_fn=_fake_news))
+    md = build_briefing(out, as_of="2026-06-03")
+    assert "Global Market Intelligence" not in md
+    # exposure analysis is always rendered
+    assert "Watchlist Exposure Analysis" in md
 
 
 def test_briefing_summary(patch_ask):

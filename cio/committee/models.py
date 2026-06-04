@@ -24,6 +24,7 @@ _BUILTIN: dict[str, Any] = {
     "defaults": {"service": "nim", "model": "minimaxai/minimax-m2.7"},
     "agents": {
         "market":    {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
+        "macro":     {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
         "equity":    {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
         "industry":  {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
         "valuation": {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
