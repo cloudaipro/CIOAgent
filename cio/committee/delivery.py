@@ -42,19 +42,24 @@ class CommitteeArtifact:
     error: str | None = None
 
 
-async def produce_report(symbol: str, lang: "str | None",
-                         reports_dir: Path) -> CommitteeArtifact:
+async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
+                         source: str = "command") -> CommitteeArtifact:
     """Run the full committee pipeline for one symbol and return an artifact.
+
+    ``source`` tags what triggered the run ("command" for /committee, "chat" for
+    the conversational agent's tool) so the dev dashboard can tell them apart.
 
     Never raises: any failure inside run_committee is captured into
     ``CommitteeArtifact.error``.
     """
     from .translate import normalize_lang, translate_report
+    from .engine import set_run_source
 
     sym = str(symbol).upper()
     lang = normalize_lang(lang)
     lang_label = " (繁體中文)" if lang == "tc" else ""
 
+    set_run_source(source)
     from . import run_committee, build_report  # honour monkeypatch seams
     try:
         result = await run_committee(sym)

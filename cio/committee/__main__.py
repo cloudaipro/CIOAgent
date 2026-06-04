@@ -23,7 +23,9 @@ def main():
     lang_suffix = "_zh" if lang == "tc" else ""
 
     from . import run_committee, build_report
+    from .engine import set_run_source
 
+    set_run_source("cli")
     result = asyncio.run(run_committee(symbol))
     report_md = build_report(symbol, result)
     report_md = asyncio.run(translate_report(report_md, lang))
