@@ -89,7 +89,7 @@ class FakeAgent:
             await self.release.wait()
         if self.raises is not None:
             raise self.raises
-        return (f"answer:{prompt}", [])
+        return (f"answer:{prompt}", [], [])
 
     async def close(self):
         self.closed = True

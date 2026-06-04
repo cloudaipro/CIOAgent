@@ -132,12 +132,16 @@ async def _reset_agent(chat_id: int) -> None:
         log.debug("agent close during reset failed", exc_info=True)
 
 
-async def _reply(update: Update, text: str, images: list[str]) -> None:
+async def _reply(update: Update, text: str, images: list[str],
+                 docs: list[str] | None = None) -> None:
     for chunk in (text[i:i + TG_LIMIT] for i in range(0, len(text), TG_LIMIT)) if text else []:
         await update.message.reply_text(chunk)
     for img in images:
         with open(img, "rb") as f:
             await update.message.reply_photo(f)
+    for doc in docs or []:
+        with open(doc, "rb") as f:
+            await update.message.reply_document(f, filename=Path(doc).name)
 
 
 async def _run(update: Update, prompt: str) -> None:
@@ -150,7 +154,7 @@ async def _run(update: Update, prompt: str) -> None:
     agent = _agent(chat_id)
     try:
         try:
-            text, images = await agent.ask(prompt)
+            text, images, docs = await agent.ask(prompt)
         except asyncio.CancelledError:
             # A user /stop cancelled this turn. Distinguish from a genuine
             # shutdown cancellation: only the former is in `_stopping`.
@@ -176,7 +180,7 @@ async def _run(update: Update, prompt: str) -> None:
             return
         # Persist the exchange for the dev dashboard + cold-store recall (best-effort).
         memory.log_turn(chat_id, agent._session_id, prompt, text)
-        await _reply(update, text or "(no response)", images)
+        await _reply(update, text or "(no response)", images, docs)
     finally:
         _untrack_task(chat_id, task)
 
@@ -339,7 +343,6 @@ async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
         from .committee.translate import normalize_lang
         lang = normalize_lang(ctx.args[1] if len(ctx.args) > 1 else None)
-        lang_label = " (繁體中文)" if lang == "tc" else ""
 
         # ── 2. Acknowledge ────────────────────────────────────────────────
         await update.message.reply_text(
@@ -349,72 +352,17 @@ async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         )
         await update.effective_chat.send_action(ChatAction.TYPING)
 
-        # ── 3. Run committee ──────────────────────────────────────────────
-        from .committee import run_committee, build_report
-        try:
-            result = await run_committee(sym)
-        except Exception as e:
-            log.exception("run_committee error for %s", sym)
-            await update.message.reply_text(f"⚠️ Committee error: {e}")
+        # ── 3. Run + render via the shared pipeline ───────────────────────
+        from .committee.delivery import produce_report
+        art = await produce_report(sym, lang, REPORTS_DIR)
+        if art.error:
+            await update.message.reply_text(art.error)
             return
 
-        # ── 4. No data ────────────────────────────────────────────────────
-        if result.error:
-            await update.message.reply_text(
-                f"No data for {sym}. Check the symbol (TW codes need .TW/.TWO)."
-            )
-            return
-
-        # ── 5. Build markdown (+ translate when tc) ───────────────────────
-        md = build_report(sym, result)
-        date_str = datetime.date.today().isoformat()
-        lang_suffix = "_zh" if lang == "tc" else ""
-
-        from .committee.translate import translate_report
-        md = await translate_report(md, lang)
-
-        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-        # ── 6. Render PDF (preferred); .md only on render failure ─────────
-        pdf_path = REPORTS_DIR / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.pdf"
-        report_title = f"Investment Committee Report: {sym}{lang_label}"
-        try:
-            from .committee.render_pdf import markdown_to_pdf
-            markdown_to_pdf(md, pdf_path, title=report_title)
-            with open(pdf_path, "rb") as fh:
-                await update.message.reply_document(fh, filename=pdf_path.name)
-        except Exception:
-            log.exception("PDF render failed for %s; falling back to .md", sym)
-            md_path = REPORTS_DIR / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.md"
-            md_path.write_text(md, encoding="utf-8")
-            with open(md_path, "rb") as fh:
-                await update.message.reply_document(fh, filename=md_path.name)
-
-        # ── 7. Short summary message ──────────────────────────────────────
-        from .committee.report import confidence_band
-
-        cio = result.cio or {}
-        tally = result.vote_tally or {}
-        consensus = result.consensus or {}
-
-        final_rec = cio.get("final_recommendation") or "N/A"
-        conf_score = cio.get("confidence_score")
-        band = confidence_band(conf_score) if conf_score is not None else "N/A"
-        conf_str = f"{conf_score}" if conf_score is not None else "N/A"
-        buy_c = tally.get("buy_count", 0)
-        hold_c = tally.get("hold_count", 0)
-        sell_c = tally.get("sell_count", 0)
-        agree = consensus.get("agreement_score") or "N/A"
-
-        summary = (
-            f"📋 *{sym} Committee Summary{lang_label}*\n\n"
-            f"*Recommendation:* {final_rec}\n"
-            f"*Confidence:* {conf_str} — {band}\n"
-            f"*Vote Tally:* BUY {buy_c} | HOLD {hold_c} | SELL {sell_c}\n"
-            f"*Agreement Score:* {agree}\n\n"
-            f"_Full report attached above._"
-        )
-        await update.message.reply_text(summary, parse_mode="Markdown")
+        # ── 4. Send report document + short summary ───────────────────────
+        with open(art.doc_path, "rb") as fh:
+            await update.message.reply_document(fh, filename=art.doc_path.name)
+        await update.message.reply_text(art.summary, parse_mode="Markdown")
 
     except Exception as e:
         log.exception("cmd_committee crashed unexpectedly")
