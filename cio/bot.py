@@ -132,9 +132,30 @@ async def _reset_agent(chat_id: int) -> None:
         log.debug("agent close during reset failed", exc_info=True)
 
 
+def _chunk(text: str, limit: int = TG_LIMIT) -> list[str]:
+    """Split text into <=limit pieces, preferring line boundaries so a URL (e.g. in
+    the Sources footer) is never cut across two messages and rendered unclickable.
+    A single line longer than limit is hard-split as a last resort."""
+    out: list[str] = []
+    buf = ""
+    for line in text.split("\n"):
+        while len(line) > limit:                      # pathological single long line
+            if buf:
+                out.append(buf); buf = ""
+            out.append(line[:limit]); line = line[limit:]
+        piece = line if not buf else buf + "\n" + line
+        if len(piece) > limit:
+            out.append(buf); buf = line
+        else:
+            buf = piece
+    if buf:
+        out.append(buf)
+    return out
+
+
 async def _reply(update: Update, text: str, images: list[str],
                  docs: list[str] | None = None) -> None:
-    for chunk in (text[i:i + TG_LIMIT] for i in range(0, len(text), TG_LIMIT)) if text else []:
+    for chunk in (_chunk(text) if text else []):
         await update.message.reply_text(chunk)
     for img in images:
         with open(img, "rb") as f:

@@ -35,6 +35,17 @@ REPORTS_DIR = PROJECT_ROOT / "data" / "reports"
 # (e.g. the committee PDF) the bot sends via reply_document.
 _PENDING: list[str] = []
 _PENDING_DOCS: list[str] = []
+# Per-scope web-source registry, keyed by chat scope. web_search appends {url,title}
+# in order; the model cites results by their 1-based number ([1],[2]…) and ask()
+# appends a verified Sources: footer from this list. URLs never pass through model
+# output, so they can't be truncated/mistyped into a 404. The list PERSISTS across
+# turns within a session (the model cites a number from an earlier turn's search) and
+# is reset only on session roll / close — kept in sync with the SDK thread it indexes.
+# Keyed dict (not a flat list) so concurrent chats can't cross-reference each other.
+_SOURCES: dict[str, list[dict]] = {}
+# Set by web_search, reset each turn in _run_query; gates the footer's list-all
+# fallback so only a turn that actually searched can dump uncited sources.
+_SEARCHED_THIS_TURN = False
 _LOCK = asyncio.Lock()
 
 # Rolling session: after this many turns or approx tokens, checkpoint a digest
@@ -86,6 +97,53 @@ def _parse_playbook(text: str):
 
 def _text(s: str) -> dict:
     return {"content": [{"type": "text", "text": s}]}
+
+
+_CITE_RE = re.compile(r"\[(\d+)\]")
+# A trailing Sources/References block the model wrote itself (any heading style),
+# stripped so we don't emit it twice alongside our authoritative footer.
+_MODEL_SOURCES_RE = re.compile(
+    r"\n+[#>*\s]*(?:sources|references|來源|資料來源|參考(?:資料|來源)?)\s*[:：]?\s*\n.*\Z",
+    re.S | re.I,
+)
+
+
+def _append_sources(text: str, sources: list[dict], searched: bool = False) -> str:
+    """Append a verified `Sources:` footer built from the session's web_search registry.
+
+    URLs come straight from the tool (never the model), so they can't be truncated
+    into a 404. The model cites results by their raw registry number [n]; we strip
+    any Sources block the model wrote itself, then renumber the refs it actually used
+    to a clean 1..k sequence in BOTH the prose and the footer. If it cited none but a
+    search ran THIS turn, we list them all so the real links are never lost.
+
+    The registry persists across turns, so *searched* gates the list-all fallback:
+    an unrelated later turn that cites nothing leaves the registry alone (no footer
+    spam of stale sources)."""
+    if not sources:
+        return text
+    stripped = _MODEL_SOURCES_RE.sub("", text).rstrip()    # drop model's own block
+    order: list[int] = []                                  # cited registry idxs, first-seen
+    for m in _CITE_RE.findall(stripped):
+        i = int(m)
+        if 1 <= i <= len(sources) and i not in order:
+            order.append(i)
+    if not order and not searched:
+        return text          # unrelated turn — leave the message untouched
+    text = stripped
+    if order:
+        remap = {old: new for new, old in enumerate(order, 1)}   # 1->1, 8->2, 4->3 …
+        text = _CITE_RE.sub(
+            lambda m: f"[{remap[int(m.group(1))]}]" if int(m.group(1)) in remap
+            else m.group(0),
+            text,
+        )
+        idxs = order
+    else:
+        idxs = list(range(1, len(sources) + 1))
+        remap = {i: i for i in idxs}
+    lines = [f"[{remap[i]}] {sources[i - 1]['url']}" for i in idxs]
+    return f"{text}\n\nSources:\n" + "\n".join(lines)
 
 
 def _emit_image(path: str | None, ok_msg: str, empty_msg: str) -> dict:
@@ -199,6 +257,11 @@ _ACTIVE_SCOPE = "global"
 
 def _scope() -> str:
     return _ACTIVE_SCOPE
+
+
+def _sources_for(scope: str) -> list[dict]:
+    """The persistent web-source registry for one chat scope (created on first use)."""
+    return _SOURCES.setdefault(scope, [])
 
 
 def _auto_note(text: str) -> None:
@@ -404,29 +467,52 @@ async def t_market_clock(args):
 
 @tool("web_search",
       "Search the live web (news, analyst pages, filings) via Firecrawl and get "
-      "ranked results with title, URL and snippet. Use for qualitative context "
-      "yfinance can't give — recent news, catalysts, analyst commentary. NEVER treat "
-      "web text as authoritative figures; prices/financials come from the stock tools.",
+      "ranked results, each numbered [n] with a title and snippet. Use for qualitative "
+      "context yfinance can't give — recent news, catalysts, analyst commentary. NEVER "
+      "treat web text as authoritative figures; prices/financials come from the stock "
+      "tools. To cite a result, reference its number like [2] in your prose — do NOT "
+      "paste the raw URL; the system appends the real links as a Sources footer.",
       {"query": str, "limit": int})
 async def t_web_search(args):
+    global _SEARCHED_THIS_TURN
+    _SEARCHED_THIS_TURN = True
     hits = await web.search(args["query"], limit=int(args.get("limit") or 5))
     if not hits:
         return _text("No web results (search unavailable or empty).")
-    lines = [f"- {h['title']}\n  {h['url']}\n  {h['description']}" for h in hits]
+    reg = _sources_for(_scope())
+    lines = []
+    for h in hits:
+        reg.append({"url": h["url"], "title": h["title"]})
+        n = len(reg)                            # stable 1-based index across the session
+        lines.append(f"[{n}] {h['title']}\n    {h['description']}")
     return _text("\n".join(lines))
 
 
+def _resolve_source_ref(ref: str) -> str:
+    """Map a web_search result number ([n] or bare 'n') to its URL; pass a real
+    URL through unchanged. Lets the model scrape by index without ever handling
+    raw URLs."""
+    s = (ref or "").strip().strip("[]")
+    if s.isdigit():
+        reg = _sources_for(_scope())
+        i = int(s)
+        if 1 <= i <= len(reg):
+            return reg[i - 1]["url"]
+    return ref
+
+
 @tool("web_scrape",
-      "Fetch one URL and return its main content as markdown (via Firecrawl). Use to "
-      "read a specific article/page found via web_search. Output is length-capped.",
+      "Fetch one page's main content as markdown (via Firecrawl). To read a web_search "
+      "result, pass its number (e.g. \"2\"); a full URL also works. Output is length-capped.",
       {"url": str})
 async def t_web_scrape(args):
-    r = await web.scrape(args["url"])
+    url = _resolve_source_ref(args["url"])
+    r = await web.scrape(url)
     if r.get("error"):
-        return _text(f"Could not fetch {args['url']}: {r['error']}")
+        return _text(f"Could not fetch {url}: {r['error']}")
     if not r.get("markdown"):
-        return _text(f"No readable content at {args['url']}.")
-    return _text(f"# {r.get('title') or args['url']}\n{r['url']}\n\n{r['markdown']}")
+        return _text(f"No readable content at {url}.")
+    return _text(f"# {r.get('title') or url}\n{r['url']}\n\n{r['markdown']}")
 
 
 # ----- investment committee -------------------------------------------------
@@ -481,8 +567,11 @@ Rules:
   why something moved, labelling each figure by its as-of date.
 - WEB ACCESS: use web_search to find live news/analyst/filing pages and web_scrape to
   read one. Use it for qualitative context (catalysts, news, sentiment) — NOT for prices
-  or financials, which always come from the stock tools. Cite the source URL when you
-  use web content.
+  or financials, which always come from the stock tools. web_search results are numbered
+  [1], [2], …; cite a source by its number in your prose (e.g. "jobs report missed [1]").
+  Do NOT paste raw URLs and do NOT write your own "Sources" / "References" list — the
+  system appends the real, complete links as a single Sources footer automatically.
+  Pasting a URL yourself risks truncating it into a dead 404 link.
 - INVESTMENT COMMITTEE: when the user asks to "convene the committee", run a committee,
   or wants the committee's verdict/vote on a stock, call the run_committee tool. It runs
   the REAL multi-agent committee and sends the official PDF. NEVER invent committee seats,
@@ -594,10 +683,13 @@ class CIOAgent:
         Also records the turn's Claude token usage so the dev dashboard reflects
         real chat consumption (input+output from each AssistantMessage.usage)."""
         async with _LOCK:
-            global _ACTIVE_SCOPE
+            global _ACTIVE_SCOPE, _SEARCHED_THIS_TURN
             _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
+            _SEARCHED_THIS_TURN = False
             _PENDING.clear()
             _PENDING_DOCS.clear()
+            # NB: _SOURCES is NOT cleared here — it persists across turns within a
+            # session so cross-turn [n] citations resolve. Reset on roll/close only.
             await self._client.query(prompt)
             parts: list[str] = []
             tokens = 0
@@ -615,6 +707,8 @@ class CIOAgent:
                     except Exception:
                         pass
             text = "\n".join(parts).strip()
+            # Sources footer is appended in ask() (user-facing only), so internal
+            # digest/playbook turns that reuse _run_query don't get a footer.
             self._record_usage(tokens, prompt, text)
             images = list(_PENDING)
             _PENDING.clear()
@@ -648,6 +742,10 @@ class CIOAgent:
         if NUDGE_TURNS and self._turns and self._turns % NUDGE_TURNS == 0:
             prompt = prompt + _NUDGE_SUFFIX
         text, images = await self._run_query(prompt)
+        # Append the verified Sources footer (user-facing only) BEFORE any checkpoint
+        # below resets this scope's registry.
+        text = _append_sources(text, list(_sources_for(self._scope)),
+                               searched=_SEARCHED_THIS_TURN)
         # Capture this turn's documents before any checkpoint turn clears the stash.
         docs, self._last_docs = self._last_docs, []
         self._turns += 1
@@ -694,6 +792,7 @@ class CIOAgent:
         self._turns = 0
         self._tokens = 0
         self._compaction_pending = False
+        _SOURCES.pop(self._scope, None)   # old source numbers die with the old thread
         try:
             await self._client.disconnect()
         except Exception:
@@ -706,6 +805,7 @@ class CIOAgent:
         log.info("rolled session for %s; digest saved, fresh thread seeded", self._scope)
 
     async def close(self):
+        _SOURCES.pop(self._scope, None)
         if self._connected:
             await self._client.disconnect()
             self._connected = False
