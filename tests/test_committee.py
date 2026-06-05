@@ -1308,30 +1308,30 @@ class TestModelsConfig:
         load_config.cache_clear()
 
     def test_resolve_chain_cio_returns_three_links(self):
-        """Default YAML maps cio → a 3-link chain: openai → claude → nim."""
+        """Default YAML maps cio → a 3-link chain: nim → openai → claude."""
         from cio.committee.models import resolve_chain
         chain = resolve_chain("cio")
         assert len(chain) == 3
-        assert chain[0]["service"] == "openai"
-        assert chain[1]["service"] == "claude"
-        assert chain[2]["service"] == "nim"
+        assert chain[0]["service"] == "nim"
+        assert chain[1]["service"] == "openai"
+        assert chain[2]["service"] == "claude"
         assert chain[0].get("daily_limit") == 200000
         assert chain[1].get("daily_limit") == 200000
         assert "daily_limit" not in chain[2]
 
     def test_resolve_market_returns_nim(self):
-        """Default YAML maps market → ('nim', 'minimaxai/minimax-m2.7')."""
+        """Default YAML maps market → ('nim', 'nvidia/nemotron-3-ultra-550b-a55b')."""
         from cio.committee.models import resolve
         service, model = resolve("market")
         assert service == "nim"
-        assert model == "minimaxai/minimax-m2.7"
+        assert model == "nvidia/nemotron-3-ultra-550b-a55b"
 
     def test_resolve_unknown_key_falls_back_to_defaults(self):
-        """An unrecognised role_key falls through to defaults (nim)."""
+        """An unrecognised role_key falls through to defaults (nim/nemotron)."""
         from cio.committee.models import resolve
         service, model = resolve("nonexistent_role_xyz")
         assert service == "nim"
-        assert model == "minimaxai/minimax-m2.7"
+        assert model == "nvidia/nemotron-3-ultra-550b-a55b"
 
     def test_missing_file_uses_builtin_defaults(self, tmp_path):
         """Missing config file → built-in defaults, no crash."""
@@ -1413,8 +1413,8 @@ class TestAskRoleRouting:
         monkeypatch.setattr("cio.committee.engine._usage.record", lambda *a, **kw: None)
         monkeypatch.setattr("cio.committee.engine._usage.over_budget", lambda *a, **kw: False)
 
-    def test_role_key_cio_routes_to_openai_first(self, monkeypatch):
-        """ask_role with role_key='cio' hits _ask_openai (chain head) when budget is fresh."""
+    def test_role_key_cio_routes_to_nim_first(self, monkeypatch):
+        """ask_role with role_key='cio' hits _ask_nim (chain head) when budget is fresh."""
         openai_calls = []
         claude_calls = []
         nim_calls = []
@@ -1438,10 +1438,10 @@ class TestAskRoleRouting:
 
         from cio.committee.engine import ask_role
         result = self._run(ask_role("sys", "user", role_key="cio"))
-        assert result == "openai-response"
-        assert len(openai_calls) == 1
+        assert result == "nim-response"
+        assert len(nim_calls) == 1
         assert len(claude_calls) == 0
-        assert len(nim_calls) == 0
+        assert len(openai_calls) == 0
 
     def test_role_key_market_routes_to_nim(self, monkeypatch):
         """ask_role with role_key='market' hits _ask_nim (single-link chain)."""
@@ -1520,6 +1520,8 @@ class TestNIMBackend:
         import httpx
 
         class FakeResponse:
+            status_code = 200
+            is_success = True
             def json(self):
                 return {
                     "choices": [{"message": {"content": "hi from nim"}}],
@@ -1583,6 +1585,8 @@ class TestNIMBackend:
         monkeypatch.setenv("NVIDIA_API_KEY", "fake-test-key")
 
         class FakeResponse:
+            status_code = 200
+            is_success = True
             def json(self):
                 return {"choices": [{"message": {"content": "usage limit reached, try again later"}}]}
             def raise_for_status(self):

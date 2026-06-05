@@ -21,33 +21,33 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _BUILTIN: dict[str, Any] = {
-    "defaults": {"service": "nim", "model": "minimaxai/minimax-m2.7"},
+    "defaults": {"service": "nim", "model": "nvidia/nemotron-3-ultra-550b-a55b"},
     "agents": {
-        "market":    {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "macro":     {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "equity":    {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "industry":  {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "valuation": {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "quant":     {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "etf":       {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "risk":      {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "catalyst":  {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
-        "moderator":  {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
+        "market":    {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "macro":     {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "equity":    {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "industry":  {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "valuation": {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "quant":     {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "etf":       {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "risk":      {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "catalyst":  {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "moderator": {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
         "cio": {
             "chain": [
-                {"service": "openai", "model": "gpt-5.5-2026-04-23",    "daily_limit": 200000},
-                {"service": "claude", "model": "claude-opus-4-8",         "daily_limit": 200000},
-                {"service": "nim",    "model": "minimaxai/minimax-m2.7"},  # last resort
+                {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b", "daily_limit": 200000},
+                {"service": "claude", "model": "claude-opus-4-8",                   "daily_limit": 200000},
+                {"service": "openai", "model": "gpt-5.5-2026-04-23"},  # last resort
             ]
         },
         "wma": {
             "chain": [
-                {"service": "openai", "model": "gpt-5.5-2026-04-23",    "daily_limit": 200000},
-                {"service": "claude", "model": "claude-opus-4-8",         "daily_limit": 200000},
-                {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
+                {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b", "daily_limit": 200000},
+                {"service": "claude", "model": "claude-opus-4-8",                   "daily_limit": 200000},
+                {"service": "openai", "model": "gpt-5.5-2026-04-23"},  # last resort
             ]
         },
-        "translator": {"service": "nim",    "model": "minimaxai/minimax-m2.7"},
+        "translator": {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
     },
     "nim": {
         "base_url": "https://integrate.api.nvidia.com/v1",
@@ -75,6 +75,7 @@ MODEL_SUGGESTIONS: dict[str, list[str]] = {
         "claude-haiku-4-5-20251001",
     ],
     "nim": [
+        "nvidia/nemotron-3-ultra-550b-a55b",
         "minimaxai/minimax-m2.7", "moonshotai/kimi-k2.6",
         "deepseek-ai/deepseek-r1", "qwen/qwen3-235b-a22b",
         "meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1",

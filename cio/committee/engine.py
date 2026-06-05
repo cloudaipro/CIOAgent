@@ -237,7 +237,9 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
 
     Reads the API key from the env var named by nim_settings()["api_key_env"].
     If the key is absent → log.warning + return ("", 0) (graceful, never raises).
-    On any HTTP/parse error → log.warning + return ("", 0).
+    Retries up to CIO_NIM_MAX_RETRIES (default 3) on HTTP 429/503, honouring the
+    Retry-After response header when present, else exponential backoff (1s, 2s, 4s).
+    On any other HTTP/parse error → log.warning + return ("", 0).
     Returns (text, tokens); tokens from response["usage"]["total_tokens"] or estimated.
     """
     import httpx
@@ -251,8 +253,12 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
         )
         return ("", 0)
 
-    nim_model = model or "minimaxai/minimax-m2.7"
+    nim_model = model or "nvidia/nemotron-3-ultra-550b-a55b"
     url = settings["base_url"].rstrip("/") + "/chat/completions"
+    max_retries = int(os.getenv("CIO_NIM_MAX_RETRIES", "3"))
+    # Large models (e.g. nemotron-550B) can take >120s under concurrent load.
+    # Configurable via CIO_NIM_TIMEOUT; default 300s.
+    req_timeout = float(os.getenv("CIO_NIM_TIMEOUT", "300"))
 
     payload = {
         "model": nim_model,
@@ -269,11 +275,67 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
         "Accept": "application/json",
     }
 
+    # Retry connection-level errors (server reset, broken pipe) but NOT timeouts.
+    # A ReadTimeout means the model is still processing — retrying immediately
+    # just burns another attempt against the same slow request; fall through instead.
+    _retryable_exc = (
+        httpx.RemoteProtocolError,
+        httpx.ReadError,
+        httpx.ConnectError,
+    )
+
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+        async with httpx.AsyncClient(timeout=req_timeout) as client:
+            data: dict | None = None
+            for attempt in range(max_retries + 1):
+                try:
+                    resp = await client.post(url, headers=headers, json=payload)
+                except httpx.TimeoutException as te:
+                    log.warning(
+                        "_ask_nim: %s after %.0fs (model=%s); falling through",
+                        type(te).__name__, req_timeout, nim_model,
+                    )
+                    return ("", 0)
+                except _retryable_exc as conn_err:
+                    if attempt >= max_retries:
+                        log.warning(
+                            "_ask_nim: %s after %d retries (model=%s)",
+                            type(conn_err).__name__, max_retries, nim_model,
+                        )
+                        return ("", 0)
+                    wait = 2 ** attempt
+                    log.warning(
+                        "_ask_nim: %s (attempt %d/%d, model=%s); retrying in %.1fs",
+                        type(conn_err).__name__, attempt + 1, max_retries, nim_model, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                if resp.status_code in (429, 503):
+                    if attempt >= max_retries:
+                        log.warning(
+                            "_ask_nim: HTTP %d after %d retries (model=%s); body=%s",
+                            resp.status_code, max_retries, nim_model, resp.text[:200],
+                        )
+                        return ("", 0)
+                    wait = float(resp.headers.get("retry-after", 2 ** attempt))
+                    log.warning(
+                        "_ask_nim: HTTP %d (attempt %d/%d, model=%s); retrying in %.1fs",
+                        resp.status_code, attempt + 1, max_retries, nim_model, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                if not resp.is_success:
+                    log.warning(
+                        "_ask_nim: HTTP %d (model=%s) — %s",
+                        resp.status_code, nim_model, resp.text[:200],
+                    )
+                    return ("", 0)
+                data = resp.json()
+                break
+
+            if data is None:
+                return ("", 0)
+
         # Tolerant extraction: reasoning models (e.g. minimax) may omit `content`
         # or return None and carry the answer in `reasoning_content`; the cap being
         # spent on reasoning yields finish_reason="length" with empty content.
@@ -302,7 +364,7 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
             tok = count_tokens(system_prompt + user_prompt + text)
         return (text, tok)
     except Exception as e:
-        log.warning("_ask_nim failed: %s", e)
+        log.warning("_ask_nim failed: %s (%s)", e or repr(e), type(e).__name__)
         return ("", 0)
 
 
