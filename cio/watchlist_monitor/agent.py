@@ -75,6 +75,34 @@ def _score100(val, default: int = 0) -> int:
         return default
 
 
+def _recent_8k(filings, *, within_days: int = 3, today=None) -> bool:
+    """True if a material-event 8-K was filed within the last *within_days*.
+
+    The WMA escalates such names to the full committee even when the LLM read is
+    calm — a fresh 8-K (acquisition, CEO change, buyback, guidance cut) is exactly
+    the thesis-moving event the cheap daily layer exists to catch (PRD §11).
+    Filings come from the committee bundle (cio.data.edgar); empty when EDGAR is
+    not configured, so this is a no-op until the operator sets CIO_SEC_UA.
+    """
+    if not filings:
+        return False
+    from datetime import date as _date, datetime as _dt
+    today = today or _date.today()
+    for f in filings:
+        if not isinstance(f, dict) or str(f.get("form", "")).upper() != "8-K":
+            continue
+        filed = f.get("filed")
+        if not filed:
+            continue
+        try:
+            d = _dt.strptime(str(filed), "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if 0 <= (today - d).days <= within_days:
+            return True
+    return False
+
+
 def _headlines_text(news: list[dict]) -> str:
     """Render web results as a compact numbered block for the prompt."""
     if not news:
@@ -163,6 +191,7 @@ async def monitor_symbol(symbol: str, *, bundle_fn=None, news_fn=None) -> dict:
 
     importance = _one_of(parsed.get("event_importance"), _IMPORTANCE, "low")
     thesis = _one_of(parsed.get("investment_thesis_change"), _THESIS, "unchanged")
+    recent_8k = _recent_8k(bundle.get("filings"))
     return {
         "ticker": resolved,
         "company": str(parsed.get("company") or company),
@@ -182,8 +211,9 @@ async def monitor_symbol(symbol: str, *, bundle_fn=None, news_fn=None) -> dict:
         "new_risks": _as_list(parsed.get("new_risks")),
         "upcoming_catalysts": _as_list(parsed.get("upcoming_catalysts")),
         "summary": str(parsed.get("summary") or parsed.get("_raw") or "").strip(),
-        # Escalate to the full committee on a thesis-breaking event (PRD §11).
-        "escalate": importance in ("high", "critical") or thesis == "negative",
+        # Escalate to the full committee on a thesis-breaking event (PRD §11):
+        # a high/critical LLM read, a negative thesis change, or a fresh 8-K.
+        "escalate": importance in ("high", "critical") or thesis == "negative" or recent_8k,
         "error": None,
         "_raw": raw,
     }

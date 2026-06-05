@@ -53,12 +53,35 @@ def _latest_signal(signals_df) -> str:
         return "neutral"
 
 
+def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any]:
+    """Opt-in EDGAR + Finnhub extras for the bundle.
+
+    Returns (filings, analyst, earnings). Both sources are config-gated and
+    offline-safe (see cio.data): unset CIO_SEC_UA / FINNHUB_API_KEY -> empty,
+    no network. Analyst/earnings are skipped for ETFs (not meaningful). This
+    never raises, so a flaky source never breaks bundle gathering.
+    """
+    filings: list = []
+    analyst = None
+    earnings = None
+    try:
+        from .. import data
+        filings = data.recent_filings(symbol, limit=4)
+        if not is_etf:
+            analyst = data.analyst_recs(symbol)
+            earnings = data.earnings_calendar(symbol)
+    except Exception as e:
+        log.debug("external data fetch failed for %s: %s", symbol, e)
+    return filings, analyst, earnings
+
+
 def gather_bundle(symbol: str) -> dict[str, Any]:
     """
     Gather all available data for *symbol*.
 
     Returns a dict with keys:
-      symbol, resolved, quote, fundamentals, ta_signals, is_etf, as_of
+      symbol, resolved, quote, fundamentals, ta_signals, is_etf, as_of,
+      filings, analyst, earnings
 
     If the symbol cannot be resolved (no data), resolved=None and the engine
     should abort with a clean "no data" result.
@@ -102,6 +125,9 @@ def gather_bundle(symbol: str) -> dict[str, Any]:
             "ta_signals": {},
             "is_etf": False,
             "as_of": datetime.utcnow().isoformat(),
+            "filings": [],
+            "analyst": None,
+            "earnings": None,
         }
 
     # TA signals — best-effort, each guarded
@@ -120,6 +146,8 @@ def gather_bundle(symbol: str) -> dict[str, Any]:
         except Exception as e:
             log.debug("strategy %s failed for %s: %s", name, resolved, e)
 
+    filings, analyst, earnings = _external(resolved, is_etf)
+
     return {
         "symbol": symbol,
         "resolved": resolved,
@@ -128,6 +156,9 @@ def gather_bundle(symbol: str) -> dict[str, Any]:
         "ta_signals": ta_signals,
         "is_etf": is_etf,
         "as_of": datetime.utcnow().isoformat(),
+        "filings": filings,
+        "analyst": analyst,
+        "earnings": earnings,
     }
 
 
@@ -192,6 +223,35 @@ def format_bundle(bundle: dict) -> str:
         lines.append(f"TA_SIGNALS: {ta_str}")
     else:
         lines.append("TA_SIGNALS: N/A (no source)")
+
+    # SEC EDGAR filings — primary-source material events / reports (opt-in).
+    filings = bundle.get("filings") or []
+    if filings:
+        parts = [f"{f.get('form')}({f.get('filed')})" for f in filings[:4] if isinstance(f, dict)]
+        lines.append("FILINGS: " + "  ".join(parts))
+    else:
+        lines.append("FILINGS: N/A (no source)")
+
+    # Finnhub analyst recommendation trend — buy/hold/sell counts (opt-in).
+    rec = bundle.get("analyst")
+    if rec:
+        lines.append(
+            f"ANALYST: strong_buy={_fmt(rec.get('strong_buy'))}  buy={_fmt(rec.get('buy'))}  "
+            f"hold={_fmt(rec.get('hold'))}  sell={_fmt(rec.get('sell'))}  "
+            f"strong_sell={_fmt(rec.get('strong_sell'))}  (period {rec.get('period') or 'N/A'})"
+        )
+    else:
+        lines.append("ANALYST: N/A (no source)")
+
+    # Finnhub earnings calendar — next scheduled report + estimates (opt-in).
+    earn = bundle.get("earnings")
+    if earn:
+        lines.append(
+            f"EARNINGS: next={earn.get('date') or 'N/A'}  "
+            f"eps_est={_fmt(earn.get('eps_estimate'))}  eps_actual={_fmt(earn.get('eps_actual'))}"
+        )
+    else:
+        lines.append("EARNINGS: N/A (no source)")
 
     lines.append(f"IS_ETF: {bundle.get('is_etf', False)}")
 

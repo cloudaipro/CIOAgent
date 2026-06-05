@@ -244,6 +244,9 @@ data/models/
 # CFOAgent: stock data cache (regenerable per-symbol pickles)
 data/stock_cache/
 
+# cio.data external-source cache (regenerable EDGAR/Finnhub JSON responses)
+data/data_cache/
+
 # Committee reports (generated user data)
 data/reports/
 
