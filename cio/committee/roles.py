@@ -18,14 +18,34 @@ _MEMORY_NOTE_RULE = (
     "recomputed from data, not remembered."
 )
 
+# TIRF (Transparent Investment Research Framework) — every conclusion must be
+# backed by documented evidence, assumptions, reasoning, counterarguments, and
+# sources, emitted in the SAME yaml block (no extra LLM call). See docs/TIRF-PRD.md.
+_TIRF_RULE = (
+    "TRANSPARENCY (TIRF) — in the SAME yaml block, document your research so the "
+    "committee can audit it:\n"
+    "- evidence: a list of AT LEAST 3 items; each item has source, date "
+    "(YYYY-MM-DD), finding, impact (positive|negative|neutral), relevance "
+    "(direct|related|indirect), confidence (high|medium|low). Draw findings ONLY "
+    "from the DATA block; do not invent figures.\n"
+    "- assumptions: a map of the explicit assumptions your view rests on "
+    "(no hidden assumptions).\n"
+    "- reasoning: an ordered list of short steps forming the logical chain from "
+    "evidence to your vote.\n"
+    "- counterarguments: a list of AT LEAST 3 opposing points — the strongest "
+    "case against your own view.\n"
+    "- sources: a list of the references you relied on."
+)
+
 _BASE_RULES = (
     "The DATA block below is the authoritative source of numbers. "
     "Do NOT invent or estimate specific figures that are not present in DATA. "
     "Macro conditions, news, and catalysts are qualitative judgment — "
     "label them explicitly as 'qualitative assessment'. "
-    "End your response with a single fenced ```yaml block containing exactly "
+    "End your response with a single fenced ```yaml block containing "
     "the specified fields plus vote (BUY|HOLD|SELL), confidence (0-100), reason, "
-    "and memory_note. " + _MEMORY_NOTE_RULE
+    "evidence, assumptions, reasoning, counterarguments, sources, "
+    "and memory_note. " + _MEMORY_NOTE_RULE + "\n\n" + _TIRF_RULE
 )
 
 SPECIALISTS: list[dict] = [

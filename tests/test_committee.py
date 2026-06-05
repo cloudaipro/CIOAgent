@@ -23,9 +23,15 @@ def _isolate_committee_db(monkeypatch, tmp_path):
     """Route ALL committee per-agent memory to a throwaway db. Without this any
     test that drives run_committee() would write real notes (+768-dim vectors) to
     the live data/committee.db. Per-test temp db = full isolation. Tests that need
-    their own handle still monkeypatch agent_memory.DB_PATH explicitly (overrides)."""
+    their own handle still monkeypatch agent_memory.DB_PATH explicitly (overrides).
+
+    Also routes the TIRF research store: run_committee now persists a TIRF report
+    at the end of every run, so without this it would write to the live
+    committee.db during the offline tests."""
     monkeypatch.setattr("cio.committee.agent_memory.DB_PATH",
                         tmp_path / "committee_test.db")
+    monkeypatch.setattr("cio.committee.tirf.store.DB_PATH",
+                        tmp_path / "committee_tirf_test.db")
 
 
 # ---------------------------------------------------------------------------

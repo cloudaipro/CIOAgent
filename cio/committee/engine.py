@@ -487,6 +487,9 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
         "confidence": parsed.get("confidence", 50),
         "reason": parsed.get("reason", parsed.get("_raw", "")),
         "_raw": raw_clean,
+        # Full parsed yaml — TIRF (cio.committee.tirf) reads evidence/assumptions/
+        # reasoning/counterarguments/sources from here without a second LLM call.
+        "_parsed": parsed,
     }
     # Merge role-specific fields (including memory_note — private, not rendered)
     for f in role["fields"]:
@@ -565,6 +568,9 @@ class CommitteeResult:
     error: str | None = None
     round1_opinions: list[dict] = field(default_factory=list)
     debate: dict = field(default_factory=dict)
+    # TIRF research report (cio.committee.tirf.ResearchReport) — scored, validated,
+    # persisted. None if the TIRF layer was unavailable; never blocks a run.
+    tirf: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +713,25 @@ async def run_committee(
         except Exception as _e:
             log.debug("reflect failed for %s: %s", rk, _e)
 
+    # Step 6 — TIRF: build, score, validate, review, and persist the research
+    # report (deterministic; ZERO new LLM calls). Never block the run on a TIRF
+    # failure — the committee result must always come back.
+    tirf_report = None
+    try:
+        from . import tirf as _tirf
+        tirf_report = _tirf.build_research_report(
+            ticker=resolved,
+            bundle=bundle,
+            opinions=opinions,
+            cio=cio,
+            debate_result=debate_result,
+            source=_RUN_SOURCE.get(),
+            run_id=_RUN_ID.get(),
+        )
+        _tirf.persist(tirf_report)
+    except Exception as _e:
+        log.warning("TIRF report build/persist failed: %s", _e, exc_info=True)
+
     return CommitteeResult(
         symbol=symbol,
         resolved=resolved,
@@ -718,4 +743,5 @@ async def run_committee(
         cio=cio,
         round1_opinions=round1_opinions,
         debate=debate_result,
+        tirf=tirf_report,
     )

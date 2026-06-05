@@ -227,6 +227,9 @@ async def revise_opinion(
         "confidence": parsed.get("confidence", round1_opinion.get("confidence", 50)),
         "reason": parsed.get("reason", round1_opinion.get("reason", "")),
         "_raw": raw,
+        # Preserve the revised TIRF deliverables for the research report; fall back
+        # to the Round-1 parse if this revision omitted them.
+        "_parsed": parsed if parsed and "_raw" not in parsed else round1_opinion.get("_parsed", parsed),
     }
     for f in role.get("fields", []):
         result[f] = parsed.get(f, round1_opinion.get(f))
