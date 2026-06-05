@@ -588,9 +588,9 @@ class TestBuildReport:
 # ---------------------------------------------------------------------------
 
 def test_cio_tools_count():
-    """CIO_TOOLS must still be exactly 24 (portfolio/memory/stock/web + run_committee)."""
+    """CIO_TOOLS must still be exactly 25 (portfolio/memory/stock/web + market_clock + run_committee)."""
     from cio.agent import CIO_TOOLS
-    assert len(CIO_TOOLS) == 24, f"CIO_TOOLS count changed: {len(CIO_TOOLS)}"
+    assert len(CIO_TOOLS) == 25, f"CIO_TOOLS count changed: {len(CIO_TOOLS)}"
 
 
 # ---------------------------------------------------------------------------
