@@ -406,6 +406,19 @@ def build_report(symbol: str, result) -> str:
         final_body = "_Insufficient data._"
     sections.append(_section("Final Recommendation", final_body))
 
+    # ── TIRF Transparency Appendix (evidence/assumptions/counterargs/scores) ──
+    # Folded in so committee members receive the audit layer inline (proposal §12).
+    # Never breaks the report if the TIRF layer is absent or errors.
+    tirf_report = _get("tirf")
+    if tirf_report is not None:
+        try:
+            from .tirf import tirf_appendix
+            appendix = tirf_appendix(tirf_report)
+            if appendix and appendix.strip():
+                sections.append("\n" + appendix)
+        except Exception:
+            pass
+
     # ── Assemble ──────────────────────────────────────────────────────────
     header = f"# Investment Committee Report: {resolved}\n\n_Generated: {as_of}_\n"
     return header + "\n".join(sections)
