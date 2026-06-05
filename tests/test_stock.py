@@ -120,6 +120,53 @@ def test_latest_quote_offline(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# 4b. latest_quote freshness signal (market_status / is_live / quote_kind)
+# ---------------------------------------------------------------------------
+
+def _freshness_quote(monkeypatch, *, status, bar_date, session_date):
+    """latest_quote with the market status and bar/session dates pinned."""
+    import cio.stock.data as data_mod
+    from datetime import datetime
+
+    df = pd.DataFrame(
+        {"Open": [1, 2], "High": [1, 2], "Low": [1, 2], "Close": [10, 9], "Volume": [1, 2]},
+        index=pd.to_datetime(["2020-01-01", bar_date]),
+    )
+    monkeypatch.setattr(data_mod, "load_or_download_stock_data", lambda *a, **k: df)
+    monkeypatch.setattr(data_mod, "nasdaq_trading_status", lambda now=None: status)
+    monkeypatch.setattr(
+        data_mod, "closest_trading_day",
+        lambda x, method="prev": datetime.strptime(session_date, "%Y-%m-%d"),
+    )
+    return s.latest_quote("X")
+
+
+def test_latest_quote_live_intraday(monkeypatch):
+    """Market open + bar is the latest session -> live_intraday, is_live True."""
+    q = _freshness_quote(monkeypatch, status=2, bar_date="2026-06-05", session_date="2026-06-05")
+    assert q["market_status"] == "open"
+    assert q["is_live"] is True
+    assert q["quote_kind"] == "live_intraday"
+    assert q["session_date"] == "2026-06-05"
+
+
+def test_latest_quote_settled_close(monkeypatch):
+    """Market closed + bar IS the latest session -> settled_close, not live."""
+    q = _freshness_quote(monkeypatch, status=0, bar_date="2026-06-05", session_date="2026-06-05")
+    assert q["market_status"] == "closed"
+    assert q["is_live"] is False
+    assert q["quote_kind"] == "settled_close"
+
+
+def test_latest_quote_stale_close(monkeypatch):
+    """Market closed + bar is BEHIND the latest session -> stale_close."""
+    q = _freshness_quote(monkeypatch, status=0, bar_date="2026-06-04", session_date="2026-06-05")
+    assert q["is_live"] is False
+    assert q["quote_kind"] == "stale_close"
+    assert q["date"] == "2026-06-04" and q["session_date"] == "2026-06-05"
+
+
+# ---------------------------------------------------------------------------
 # 5. run_strategy on a DataFrame
 # ---------------------------------------------------------------------------
 

@@ -23,7 +23,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from . import charts, context, memory, portfolio, recall, watchlist, web
+from . import charts, context, memory, portfolio, recall, timeutil, watchlist, web
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = PROJECT_ROOT / "data" / "reports"
@@ -93,6 +93,40 @@ def _emit_image(path: str | None, ok_msg: str, empty_msg: str) -> dict:
         return _text(empty_msg)
     _PENDING.append(path)
     return _text(ok_msg)
+
+
+def _clock_context() -> str:
+    """Authoritative 'now': local + US/Eastern wall clock, NASDAQ status and the
+    latest settled trading session. The agent has no other reliable source for
+    today's date — without this it guesses and mislabels stale closes as 'today'."""
+    from datetime import datetime
+    from .stock.data import _EASTERN, nasdaq_trading_status, closest_trading_day
+
+    tz = timeutil.local_tz()
+    now_local = datetime.now(tz)
+    now_et = datetime.now(_EASTERN)
+    status = {0: "closed", 1: "premarket", 2: "open", 3: "afterhours"}[
+        nasdaq_trading_status(now_et)]
+    session = closest_trading_day(now_et.replace(tzinfo=None), method="prev").date()
+    return (
+        f"now: {now_local:%Y-%m-%d %H:%M} {now_local.tzname()} | "
+        f"ET: {now_et:%Y-%m-%d %H:%M} | "
+        f"NASDAQ: {status} | latest settled session: {session:%Y-%m-%d}"
+    )
+
+
+def _quote_freshness_note(quote: dict | None) -> str:
+    """Advisory appended to a quote tool result when the bar is NOT a live intraday
+    quote, so the agent labels it by date instead of calling it 'today's move'."""
+    if not quote or quote.get("quote_kind") == "live_intraday":
+        return ""
+    sess = quote.get("session_date") or quote.get("date")
+    return (
+        f"\n\nNOTE: NASDAQ {quote.get('market_status', 'closed')} — this is the "
+        f"SETTLED {sess} close (final, latest real price), NOT a live \"now\" quote. "
+        f"Report it with that date; do NOT present it as today's move. For *why* it "
+        f"moved, use web_search (narrative only, not the figure)."
+    )
 
 
 # ----- tools ----------------------------------------------------------------
@@ -266,7 +300,7 @@ async def t_stock_quote(args):
     q = stock.get_quote(args["symbol"].upper())
     if not q:
         return _text(f"No quote available for {args['symbol'].upper()}.")
-    return _text(json.dumps(q, indent=2))
+    return _text(json.dumps(q, indent=2) + _quote_freshness_note(q))
 
 
 @tool("stock_history",
@@ -352,7 +386,18 @@ async def t_watchlist_prices(args):
     snap = watchlist.prices()
     if snap["id"] is None:
         return _text("No active watchlist yet. The user can create one in the dashboard.")
-    return _text(json.dumps(snap, indent=2))
+    # Freshness is uniform across the snapshot; derive the note from any quote.
+    note = _quote_freshness_note(snap["quotes"][0] if snap.get("quotes") else None)
+    return _text(json.dumps(snap, indent=2) + note)
+
+
+@tool("market_clock",
+      "Authoritative current date/time: local + US/Eastern wall clock, NASDAQ "
+      "open/closed status, and the latest settled trading session. Call this whenever "
+      "the answer depends on what 'today' or 'now' is, or to check if a quote is live.",
+      {})
+async def t_market_clock(args):
+    return _text(_clock_context())
 
 
 # ----- web tools (live search / fetch via Firecrawl) ------------------------
@@ -413,7 +458,7 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_save_playbook, t_list_playbooks,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
              t_refresh_prices, t_stock_panel, t_watchlist_prices,
-             t_web_search, t_web_scrape, t_committee]
+             t_market_clock, t_web_search, t_web_scrape, t_committee]
 _TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock portfolio.
@@ -425,6 +470,15 @@ Rules:
   refresh_prices to update all open positions with live closes before valuing the
   portfolio. set_price is only a MANUAL OVERRIDE for symbols Yahoo can't price
   (e.g. private/illiquid holdings) — do NOT tell the user "no live feed".
+- DATA FRESHNESS. The first line of each turn is a [context] clock (local + ET time,
+  NASDAQ status, latest settled session) — it is the ONLY source of truth for what
+  "today"/"now" is. Trust it; never assume the date. market_clock returns the same.
+  Quotes carry market_status / session_date / is_live / quote_kind. ALWAYS report a
+  price with its as-of date. When NASDAQ is closed the latest settled close IS the
+  current price — say "as of <date> close"; NEVER present a prior-session close as
+  "today's" move. Do NOT use web tools to obtain a price (the stock tools are
+  authoritative for figures); use web_search/web_scrape only for the *narrative* of
+  why something moved, labelling each figure by its as-of date.
 - WEB ACCESS: use web_search to find live news/analyst/filing pages and web_scrape to
   read one. Use it for qualitative context (catalysts, news, sentiment) — NOT for prices
   or financials, which always come from the stock tools. Cite the source URL when you
@@ -587,6 +641,9 @@ class CIOAgent:
         """Send a turn; return (assistant_text, image_paths, doc_paths). May trigger
         a rolling-session checkpoint afterwards if the transcript is getting large."""
         await self._ensure()
+        # Inject the authoritative clock as the turn's first line so the agent never
+        # guesses the date or mislabels a settled close as "today" (see DATA FRESHNESS).
+        prompt = f"[context] {_clock_context()}\n\n{prompt}"
         # Periodic nudge to persist notable context (cheap; no extra LLM call).
         if NUDGE_TURNS and self._turns and self._turns % NUDGE_TURNS == 0:
             prompt = prompt + _NUDGE_SUFFIX

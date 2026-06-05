@@ -21,6 +21,8 @@ import yfinance as yfin
 import joblib
 import pandas_market_calendars as mcal
 
+from ..timeutil import is_trading_day
+
 log = logging.getLogger(__name__)
 
 # Cache config — same per-symbol-pickle mechanism as the source codebase.
@@ -77,8 +79,8 @@ def nasdaq_trading_status(now=None):
     """NASDAQ trading status for *now* (US/Eastern; defaults to current time).
 
     Mirrors AI4StockMarket/StockPricePrediction/build_stocks_data.NASDAQTradingStatus,
-    but uses the NASDAQ market calendar (already a dependency) for holiday/weekend
-    detection instead of the `holidays` package.
+    but delegates holiday/weekend detection to timeutil.is_trading_day (single
+    source of truth, with its own calendar cache + weekday fallback).
 
     Returns:
         0 — market closed (weekend or holiday)
@@ -90,10 +92,9 @@ def nasdaq_trading_status(now=None):
         now = datetime.now(_EASTERN)
     elif now.tzinfo is None:
         now = now.replace(tzinfo=_EASTERN)
-    d = now.date()
-    # Trading day? NASDAQ calendar covers weekends and holidays in one check.
-    schedule = mcal.get_calendar("NASDAQ").schedule(start_date=d, end_date=d)
-    if schedule.empty:
+    # Day-level check (weekend/holiday) is the single source of truth in timeutil;
+    # this function only adds the intraday open/close granularity on top of it.
+    if not is_trading_day(now.date()):
         return 0
     t = now.timetz().replace(tzinfo=None)
     if t < _NASDAQ_OPEN:
@@ -345,6 +346,22 @@ def latest_quote(symbol, lookback_days=10):
     prev_close = float(df.iloc[-2]["Close"]) if len(df) >= 2 else None
     change = (close - prev_close) if prev_close is not None else None
     change_pct = (change / prev_close * 100) if prev_close not in (None, 0) else None
+
+    # Freshness signal so callers (the LLM agent) can tell a *live intraday* quote
+    # from a *settled prior-session close*. The bar itself is always the latest real
+    # price for the current market state; what matters is how it should be labelled.
+    now_et = datetime.now(_EASTERN)
+    status_code = nasdaq_trading_status(now_et)
+    market_status = {0: "closed", 1: "premarket", 2: "open", 3: "afterhours"}[status_code]
+    session_date = closest_trading_day(now_et.replace(tzinfo=None), method="prev").date()
+    bar_date = df.index[-1].date()
+    is_live = status_code in (2, 3) and bar_date == session_date
+    if is_live:
+        quote_kind = "live_intraday"
+    elif bar_date == session_date:
+        quote_kind = "settled_close"
+    else:
+        quote_kind = "stale_close"
     return {
         "symbol": symbol,
         "date": df.index[-1].strftime("%Y-%m-%d"),
@@ -357,4 +374,8 @@ def latest_quote(symbol, lookback_days=10):
         "change": change,
         "change_pct": change_pct,
         "volume": int(row["Volume"]),
+        "market_status": market_status,
+        "session_date": session_date.strftime("%Y-%m-%d"),
+        "is_live": is_live,
+        "quote_kind": quote_kind,
     }
