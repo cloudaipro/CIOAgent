@@ -35,12 +35,17 @@ REPORTS_DIR = PROJECT_ROOT / "data" / "reports"
 # (e.g. the committee PDF) the bot sends via reply_document.
 _PENDING: list[str] = []
 _PENDING_DOCS: list[str] = []
-# Per-turn web-source registry. web_search appends {url,title} in order; the
-# model cites results by their 1-based number ([1],[2]…) and _run_query appends
-# a verified Sources: footer from this list. URLs never pass through model output,
-# so they can't be truncated/mistyped into a 404. Same module-global pattern as
-# _PENDING (safe because _LOCK serializes turns).
-_PENDING_SOURCES: list[dict] = []
+# Per-scope web-source registry, keyed by chat scope. web_search appends {url,title}
+# in order; the model cites results by their 1-based number ([1],[2]…) and ask()
+# appends a verified Sources: footer from this list. URLs never pass through model
+# output, so they can't be truncated/mistyped into a 404. The list PERSISTS across
+# turns within a session (the model cites a number from an earlier turn's search) and
+# is reset only on session roll / close — kept in sync with the SDK thread it indexes.
+# Keyed dict (not a flat list) so concurrent chats can't cross-reference each other.
+_SOURCES: dict[str, list[dict]] = {}
+# Set by web_search, reset each turn in _run_query; gates the footer's list-all
+# fallback so only a turn that actually searched can dump uncited sources.
+_SEARCHED_THIS_TURN = False
 _LOCK = asyncio.Lock()
 
 # Rolling session: after this many turns or approx tokens, checkpoint a digest
@@ -103,22 +108,29 @@ _MODEL_SOURCES_RE = re.compile(
 )
 
 
-def _append_sources(text: str, sources: list[dict]) -> str:
-    """Append a verified `Sources:` footer built from the turn's web_search registry.
+def _append_sources(text: str, sources: list[dict], searched: bool = False) -> str:
+    """Append a verified `Sources:` footer built from the session's web_search registry.
 
     URLs come straight from the tool (never the model), so they can't be truncated
     into a 404. The model cites results by their raw registry number [n]; we strip
     any Sources block the model wrote itself, then renumber the refs it actually used
-    to a clean 1..k sequence in BOTH the prose and the footer. If it cited none but
-    searches happened, we list them all so the real links are never lost."""
+    to a clean 1..k sequence in BOTH the prose and the footer. If it cited none but a
+    search ran THIS turn, we list them all so the real links are never lost.
+
+    The registry persists across turns, so *searched* gates the list-all fallback:
+    an unrelated later turn that cites nothing leaves the registry alone (no footer
+    spam of stale sources)."""
     if not sources:
         return text
-    text = _MODEL_SOURCES_RE.sub("", text).rstrip()        # drop model's own block
+    stripped = _MODEL_SOURCES_RE.sub("", text).rstrip()    # drop model's own block
     order: list[int] = []                                  # cited registry idxs, first-seen
-    for m in _CITE_RE.findall(text):
+    for m in _CITE_RE.findall(stripped):
         i = int(m)
         if 1 <= i <= len(sources) and i not in order:
             order.append(i)
+    if not order and not searched:
+        return text          # unrelated turn — leave the message untouched
+    text = stripped
     if order:
         remap = {old: new for new, old in enumerate(order, 1)}   # 1->1, 8->2, 4->3 …
         text = _CITE_RE.sub(
@@ -245,6 +257,11 @@ _ACTIVE_SCOPE = "global"
 
 def _scope() -> str:
     return _ACTIVE_SCOPE
+
+
+def _sources_for(scope: str) -> list[dict]:
+    """The persistent web-source registry for one chat scope (created on first use)."""
+    return _SOURCES.setdefault(scope, [])
 
 
 def _auto_note(text: str) -> None:
@@ -457,13 +474,16 @@ async def t_market_clock(args):
       "paste the raw URL; the system appends the real links as a Sources footer.",
       {"query": str, "limit": int})
 async def t_web_search(args):
+    global _SEARCHED_THIS_TURN
+    _SEARCHED_THIS_TURN = True
     hits = await web.search(args["query"], limit=int(args.get("limit") or 5))
     if not hits:
         return _text("No web results (search unavailable or empty).")
+    reg = _sources_for(_scope())
     lines = []
     for h in hits:
-        _PENDING_SOURCES.append({"url": h["url"], "title": h["title"]})
-        n = len(_PENDING_SOURCES)               # stable 1-based index across the turn
+        reg.append({"url": h["url"], "title": h["title"]})
+        n = len(reg)                            # stable 1-based index across the session
         lines.append(f"[{n}] {h['title']}\n    {h['description']}")
     return _text("\n".join(lines))
 
@@ -474,9 +494,10 @@ def _resolve_source_ref(ref: str) -> str:
     raw URLs."""
     s = (ref or "").strip().strip("[]")
     if s.isdigit():
+        reg = _sources_for(_scope())
         i = int(s)
-        if 1 <= i <= len(_PENDING_SOURCES):
-            return _PENDING_SOURCES[i - 1]["url"]
+        if 1 <= i <= len(reg):
+            return reg[i - 1]["url"]
     return ref
 
 
@@ -662,11 +683,13 @@ class CIOAgent:
         Also records the turn's Claude token usage so the dev dashboard reflects
         real chat consumption (input+output from each AssistantMessage.usage)."""
         async with _LOCK:
-            global _ACTIVE_SCOPE
+            global _ACTIVE_SCOPE, _SEARCHED_THIS_TURN
             _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
+            _SEARCHED_THIS_TURN = False
             _PENDING.clear()
             _PENDING_DOCS.clear()
-            _PENDING_SOURCES.clear()
+            # NB: _SOURCES is NOT cleared here — it persists across turns within a
+            # session so cross-turn [n] citations resolve. Reset on roll/close only.
             await self._client.query(prompt)
             parts: list[str] = []
             tokens = 0
@@ -684,8 +707,8 @@ class CIOAgent:
                     except Exception:
                         pass
             text = "\n".join(parts).strip()
-            text = _append_sources(text, list(_PENDING_SOURCES))
-            _PENDING_SOURCES.clear()
+            # Sources footer is appended in ask() (user-facing only), so internal
+            # digest/playbook turns that reuse _run_query don't get a footer.
             self._record_usage(tokens, prompt, text)
             images = list(_PENDING)
             _PENDING.clear()
@@ -719,6 +742,10 @@ class CIOAgent:
         if NUDGE_TURNS and self._turns and self._turns % NUDGE_TURNS == 0:
             prompt = prompt + _NUDGE_SUFFIX
         text, images = await self._run_query(prompt)
+        # Append the verified Sources footer (user-facing only) BEFORE any checkpoint
+        # below resets this scope's registry.
+        text = _append_sources(text, list(_sources_for(self._scope)),
+                               searched=_SEARCHED_THIS_TURN)
         # Capture this turn's documents before any checkpoint turn clears the stash.
         docs, self._last_docs = self._last_docs, []
         self._turns += 1
@@ -765,6 +792,7 @@ class CIOAgent:
         self._turns = 0
         self._tokens = 0
         self._compaction_pending = False
+        _SOURCES.pop(self._scope, None)   # old source numbers die with the old thread
         try:
             await self._client.disconnect()
         except Exception:
@@ -777,6 +805,7 @@ class CIOAgent:
         log.info("rolled session for %s; digest saved, fresh thread seeded", self._scope)
 
     async def close(self):
+        _SOURCES.pop(self._scope, None)
         if self._connected:
             await self._client.disconnect()
             self._connected = False
