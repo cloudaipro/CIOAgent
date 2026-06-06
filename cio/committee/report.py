@@ -77,6 +77,34 @@ def _v(val: Any, default: str = "_Insufficient data._") -> str:
     return s if s else default
 
 
+def _num(x: Any, default: str = "_Insufficient data._", pct: bool = False) -> str:
+    """Render a number rounded to <=2 dp (trailing zeros stripped). Non-numeric → _v."""
+    if x is None:
+        return default
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return _v(x, default)
+    s = f"{v:.2f}".rstrip("0").rstrip(".")
+    return f"{s}%" if pct else s
+
+
+def _field(label: str, value: Any) -> str:
+    """
+    Labeled markdown block.
+
+    List/tuple value → label line followed by a bullet list (avoids the raw
+    Python `['a', 'b']` repr leaking into the report). Scalar → inline bold line.
+    """
+    if isinstance(value, (list, tuple)):
+        items = [str(x).strip() for x in value if str(x).strip()]
+        if items:
+            body = "\n".join(f"- {it}" for it in items)
+            return f"**{label}:**\n\n{body}"
+        return f"**{label}:** _Insufficient data._"
+    return f"**{label}:** {_v(value)}"
+
+
 def _section(title: str, content: str) -> str:
     return f"## {title}\n\n{content}\n"
 
@@ -248,19 +276,19 @@ def build_report(symbol: str, result) -> str:
         f"**Name:** {_v(name)}",
         f"**Market Cap:** {mktcap_str}",
         f"**52W High:** {_v(fund.get('wk52_high'))}  |  **52W Low:** {_v(fund.get('wk52_low'))}",
-        f"**Last Price:** {_v(quote.get('close'))}  |  **Change:** {_v(quote.get('change_pct'))}%",
+        f"**Last Price:** {_v(quote.get('close'))}  |  **Change:** {_num(quote.get('change_pct'), pct=True)}",
     ]
     sections.append(_section("Company Overview", "\n".join(overview_lines)))
 
     # ── 3. Market Analysis ────────────────────────────────────────────────
     mkt = next((op for op in opinions if op.get("key") == "market"), None)
     if mkt:
-        mkt_body = (
-            f"**Market Trend:** {_v(mkt.get('market_trend'))}  \n"
-            f"**Market Score:** {_v(mkt.get('market_score'))}  \n"
-            f"**Macro Risks:** {_v(mkt.get('macro_risks'))}  \n"
-            f"**Capital Flows:** {_v(mkt.get('capital_flows'))}"
-        )
+        mkt_body = "\n\n".join([
+            _field("Market Trend", mkt.get("market_trend")),
+            _field("Market Score", mkt.get("market_score")),
+            _field("Macro Risks", mkt.get("macro_risks")),
+            _field("Capital Flows", mkt.get("capital_flows")),
+        ])
     else:
         mkt_body = "_Insufficient data._"
     sections.append(_section("Market Analysis", mkt_body))
@@ -292,12 +320,12 @@ def build_report(symbol: str, result) -> str:
     # ── 4. Industry Analysis ──────────────────────────────────────────────
     ind = next((op for op in opinions if op.get("key") == "industry"), None)
     if ind:
-        ind_body = (
-            f"**Industry Score:** {_v(ind.get('industry_score'))}  \n"
-            f"**Industry Cycle:** {_v(ind.get('industry_cycle'))}  \n"
-            f"**Tailwinds:** {_v(ind.get('tailwinds'))}  \n"
-            f"**Headwinds:** {_v(ind.get('headwinds'))}"
-        )
+        ind_body = "\n\n".join([
+            _field("Industry Score", ind.get("industry_score")),
+            _field("Industry Cycle", ind.get("industry_cycle")),
+            _field("Tailwinds", ind.get("tailwinds")),
+            _field("Headwinds", ind.get("headwinds")),
+        ])
     else:
         ind_body = "_Insufficient data._"
     sections.append(_section("Industry Analysis", ind_body))
@@ -305,10 +333,10 @@ def build_report(symbol: str, result) -> str:
     # ── 5. Financial Analysis ─────────────────────────────────────────────
     eq = next((op for op in opinions if op.get("key") == "equity"), None)
     fin_lines = [
-        f"**PE:** {_v(fund.get('pe'))}  |  **PB:** {_v(fund.get('pb'))}",
-        f"**EPS:** {_v(fund.get('eps'))}  |  **ROE:** {_v(fund.get('roe_pct'))}%",
-        f"**Profit Margin:** {_v(fund.get('margin_pct'))}%",
-        f"**Dividend Yield:** {_v(fund.get('yield_pct'))}%",
+        f"**PE:** {_num(fund.get('pe'))}  |  **PB:** {_num(fund.get('pb'))}",
+        f"**EPS:** {_num(fund.get('eps'))}  |  **ROE:** {_num(fund.get('roe_pct'), pct=True)}",
+        f"**Profit Margin:** {_num(fund.get('margin_pct'), pct=True)}",
+        f"**Dividend Yield:** {_num(fund.get('yield_pct'), pct=True)}",
     ]
     if eq:
         fin_lines += [
@@ -334,11 +362,11 @@ def build_report(symbol: str, result) -> str:
     # ── 7. Risk Analysis ──────────────────────────────────────────────────
     risk = next((op for op in opinions if op.get("key") == "risk"), None)
     if risk:
-        risk_body = (
-            f"**Risk Score:** {_v(risk.get('risk_score'))}  \n"
-            f"**Major Risks:** {_v(risk.get('major_risks'))}  \n"
-            f"**Worst Case Scenario:** {_v(risk.get('worst_case_scenario'))}"
-        )
+        risk_body = "\n\n".join([
+            _field("Risk Score", risk.get("risk_score")),
+            _field("Major Risks", risk.get("major_risks")),
+            _field("Worst Case Scenario", risk.get("worst_case_scenario")),
+        ])
     else:
         risk_body = "_Insufficient data._"
     sections.append(_section("Risk Analysis", risk_body))
@@ -346,11 +374,11 @@ def build_report(symbol: str, result) -> str:
     # ── 8. Catalyst Analysis ──────────────────────────────────────────────
     cat = next((op for op in opinions if op.get("key") == "catalyst"), None)
     if cat:
-        cat_body = (
-            f"**Bullish Catalysts:** {_v(cat.get('bullish_catalysts'))}  \n"
-            f"**Bearish Catalysts:** {_v(cat.get('bearish_catalysts'))}  \n"
-            f"**Event Timeline:** {_v(cat.get('event_timeline'))}"
-        )
+        cat_body = "\n\n".join([
+            _field("Bullish Catalysts", cat.get("bullish_catalysts")),
+            _field("Bearish Catalysts", cat.get("bearish_catalysts")),
+            _field("Event Timeline", cat.get("event_timeline")),
+        ])
     else:
         cat_body = "_Insufficient data._"
     sections.append(_section("Catalyst Analysis", cat_body))
