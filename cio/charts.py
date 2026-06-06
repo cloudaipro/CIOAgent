@@ -123,6 +123,74 @@ def watchlist_table(snapshot: dict, index_symbol: str = "^IXIC") -> str | None:
     return str(path)
 
 
+_C_HI_BG = "#fdeaec"   # light-red band behind HIGH-impact rows
+_IMPACT_COLOR = {"high": _C_DOWN, "medium": "#f5a623", "low": _C_UP}
+
+
+def econ_events_table(events: list[dict], title: str = "Economic Red-Events") -> str | None:
+    """Render upcoming high-impact economic events as a table image (Date / Day /
+    Time ET / Event / Impact), styled like the quote-board: impact-colored dot,
+    HIGH rows on a light-red band. Returns the PNG path, or None if no events.
+
+    *events* are dicts from econ_calendar.list_upcoming(): event_date, name,
+    impact, time_et."""
+    from datetime import date as _date
+    if not events:
+        return None
+
+    rows = len(events)
+    fig_h = 0.7 + 0.42 * (rows + 1)               # +1 for the header row
+    fig, ax = plt.subplots(figsize=(8.6, fig_h))
+    fig.patch.set_facecolor(_C_BG)
+    ax.set_facecolor(_C_BG)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, rows + 1.6)
+    ax.axis("off")
+
+    X_DATE, X_DAY, X_TIME, X_EVENT, X_DOT, X_IMP = 0.02, 0.20, 0.30, 0.44, 0.85, 0.995
+    top = rows + 1
+
+    def cell(x, y, s, color, ha="left", size=12, weight="normal"):
+        ax.text(x, y, s, color=color, ha=ha, va="center", fontsize=size,
+                fontweight=weight)
+
+    # title
+    cell(X_DATE, top + 0.45, title, _C_TEXT, size=15, weight="bold")
+
+    # header
+    yh = top - 0.5
+    cell(X_DATE, yh, "Date", _C_HEADER, size=11)
+    cell(X_DAY, yh, "Day", _C_HEADER, size=11)
+    cell(X_TIME, yh, "Time ET", _C_HEADER, size=11)
+    cell(X_EVENT, yh, "Event", _C_HEADER, size=11)
+    cell(X_IMP, yh, "Impact", _C_HEADER, ha="right", size=11)
+    ax.plot([0, 1], [yh - 0.5, yh - 0.5], color=_C_RULE, lw=1)
+
+    for r, e in enumerate(events):
+        y = top - 0.5 - (r + 1)
+        impact = (e.get("impact") or "high").lower()
+        col = _IMPACT_COLOR.get(impact, _C_DOWN)
+        if impact == "high":                       # light-red highlight band
+            ax.add_patch(plt.Rectangle((0, y - 0.5), 1, 1, color=_C_HI_BG, zorder=0))
+        d = e.get("event_date", "")
+        try:
+            dow = _date.fromisoformat(d).strftime("%a")
+        except ValueError:
+            dow = ""
+        cell(X_DATE, y, d, _C_TEXT, size=12, weight="bold")
+        cell(X_DAY, y, dow, _C_FLAT, size=12)
+        cell(X_TIME, y, e.get("time_et") or "—", _C_TEXT, size=12)
+        cell(X_EVENT, y, e.get("name") or "", _C_TEXT, size=11)
+        ax.plot([X_DOT], [y], "o", ms=7, color=col)
+        cell(X_IMP, y, impact.upper(), col, ha="right", size=11, weight="bold")
+        ax.plot([0, 1], [y - 0.5, y - 0.5], color=_C_RULE, lw=0.8)
+
+    path = _out("econ_events.png")
+    fig.savefig(path, bbox_inches="tight", dpi=150, facecolor=_C_BG)
+    plt.close(fig)
+    return str(path)
+
+
 def allocation_pie(db_path=portfolio.db.DB_PATH) -> str | None:
     """Pie chart of market value by symbol. None if no priced positions."""
     pos = portfolio.positions(db_path)

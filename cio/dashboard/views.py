@@ -205,7 +205,8 @@ _NAV = [
     ("Overview", "/"), ("Token usage", "/usage"), ("Telegram", "/telegram"),
     ("Committee", "/committee"), ("Watchlist", "/watchlist"),
     ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
-    ("Memory", "/memory"), ("Sanitizer", "/sanitizer"),
+    ("Memory", "/memory"), ("Playbooks", "/playbooks"),
+    ("Econ events", "/econ"), ("Sanitizer", "/sanitizer"),
     ("Configure", "/configure"),
 ]
 
@@ -438,6 +439,83 @@ def render_sanitizer(rows, level: int) -> str:
         f"{body_rows}</table>"
     )
     return _page("Sanitizer", body, level)
+
+
+def render_playbooks(rows, level: int, flash: str = "", flash_err: bool = False) -> str:
+    """Saved reusable procedures (memory.list_all_playbooks). Steps reference tools,
+    not cached numbers, so a playbook never goes stale. Per-row delete (PRG, confirmed).
+
+    *rows* are dicts: id, scope, name, steps, hits, created_at."""
+    def _row(r: dict) -> str:
+        del_btn = _wipe_form(
+            "delete", f"Delete",
+            f"Delete playbook {r.get('name')!r}? This cannot be undone.",
+            path="/playbooks", pid=r.get("id"),
+        )
+        return (f"<tr><td>{esc(r.get('name'))}</td>"
+                f"<td>{esc(r.get('scope'))}</td>"
+                f"<td class='num'>{esc(r.get('hits'))}</td>"
+                f"<td class='msg'><pre class='steps'>{esc(r.get('steps'))}</pre></td>"
+                f"<td>{esc_ts(r.get('created_at'))}</td>"
+                f"<td>{del_btn}</td></tr>")
+
+    body_rows = "".join(_row(r) for r in rows) or (
+        "<tr><td class='empty' colspan='6'>no playbooks saved yet — the agent saves "
+        "them with save_playbook, or auto-distills them from recurring tasks.</td></tr>")
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
+    )
+    body = (
+        "<h1>Playbooks</h1>" + flash_html +
+        "<p>Reusable procedures the agent can replay by name. Steps reference "
+        "<em>tools</em>, not cached numbers, so a playbook never goes stale — each "
+        "run fetches fresh data. <code>hits</code> counts how often it has been recalled.</p>"
+        "<table><tr><th>Name</th><th>Scope</th><th>Hits</th><th>Steps</th>"
+        f"<th>Created</th><th></th></tr>{body_rows}</table>"
+    )
+    return _page("Playbooks", body, level)
+
+
+def render_econ_events(rows, level: int, flash: str = "", flash_err: bool = False) -> str:
+    """High-impact economic events the bot alerts on (econ_calendar.list_all).
+    Per-row delete (PRG, confirmed). *rows*: id, event_date, name, impact, time_et,
+    source, alerted, created_at."""
+    def _row(r: dict) -> str:
+        del_btn = _wipe_form(
+            "delete", "Delete",
+            f"Delete event {r.get('name')!r} on {r.get('event_date')}?",
+            path="/econ", eid=r.get("id"),
+        )
+        src = r.get("source") or ""
+        src_html = (f"<a href='{esc(src)}' target='_blank' rel='noopener'>link</a>"
+                    if src.startswith("http") else esc(src) or "—")
+        alerted = "<span class='badge up'>sent</span>" if r.get("alerted") else "—"
+        return (f"<tr><td>{esc(r.get('event_date'))}</td>"
+                f"<td>{esc(r.get('name'))}</td>"
+                f"<td>{esc((r.get('impact') or '').upper())}</td>"
+                f"<td>{esc(r.get('time_et'))}</td>"
+                f"<td>{src_html}</td>"
+                f"<td>{alerted}</td>"
+                f"<td>{del_btn}</td></tr>")
+
+    body_rows = "".join(_row(r) for r in rows) or (
+        "<tr><td class='empty' colspan='7'>no economic events recorded — NFP auto-seeds, "
+        "and the agent adds the rest via the monthly_red_events playbook.</td></tr>")
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
+    )
+    body = (
+        "<h1>Economic events</h1>" + flash_html +
+        "<p>High-impact releases the bot warns subscribed chats about, ahead of time. "
+        "NFP is seeded deterministically (first Friday); CPI/PPI/PCE/FOMC/GDP/Retail are "
+        "populated by the agent from verified sources. <code>sent</code> = a heads-up "
+        "already went out.</p>"
+        "<table><tr><th>Date</th><th>Event</th><th>Impact</th><th>Time</th>"
+        f"<th>Source</th><th>Alerted</th><th></th></tr>{body_rows}</table>"
+    )
+    return _page("Econ events", body, level)
 
 
 def _wipe_form(action: str, label: str, confirm: str, **hidden) -> str:

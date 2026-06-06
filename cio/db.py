@@ -171,6 +171,21 @@ CREATE TABLE IF NOT EXISTS playbooks (
     UNIQUE (scope, name)
 );
 
+-- High-impact economic events to warn the operator about before they hit.
+-- Dates are populated by the agent (monthly_red_events playbook, via web lookup)
+-- plus deterministic NFP seeding; the scheduler alerts ahead of each one once.
+CREATE TABLE IF NOT EXISTS econ_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_date TEXT    NOT NULL,                     -- ISO YYYY-MM-DD
+    name       TEXT    NOT NULL,
+    impact     TEXT    NOT NULL DEFAULT 'high',      -- high | medium | low
+    time_et    TEXT    NOT NULL DEFAULT '',          -- e.g. '08:30 ET'
+    source     TEXT    NOT NULL DEFAULT '',
+    alerted    INTEGER NOT NULL DEFAULT 0,           -- 1 once a heads-up was sent
+    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (event_date, name)
+);
+
 -- FTS5 keyword layer (external-content, kept in sync by triggers).
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(value, content='mem_notes', content_rowid='id');
 CREATE TRIGGER IF NOT EXISTS mem_notes_ai AFTER INSERT ON mem_notes BEGIN

@@ -20,7 +20,7 @@ fallback chain across them.
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 23 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 27 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
                   │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
@@ -30,7 +30,8 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   │     cio/stock/*       yfinance quotes, cache, 38 TA strategies, panel
                   │     cio/web.py        Firecrawl-backed web search + scrape
                   │     cio/timeutil.py   local TZ + is_trading_day (NYSE calendar)
-                  │     cio/scheduler.py  APScheduler: daily digest + EOD price refresh + 06:00 briefing
+                  │     cio/econ_calendar.py  high-impact econ-event store + deterministic NFP seeding
+                  │     cio/scheduler.py  APScheduler: daily digest + EOD price refresh + 06:00 briefing + econ-event alert
                   │     cio/db.py         SQLite (transactions = source of truth)
                   │
                   ├─► cio/committee/*   investment committee pipeline:
@@ -184,6 +185,30 @@ what deserves a deeper look.
 - **Model chain** (`config/committee_models.yaml`, role `wma`): OpenAI `gpt-5.5-2026-04-23`
   → Claude Opus → NVIDIA NIM `kimi-k2.6`, same daily-budget fallback as the CIO.
 
+## Economic-event alerts
+
+A 24/7 CIO should warn you *before* a market-moving release, not explain the drop
+after. The bot keeps a small calendar of high-impact economic events and pushes a
+deterministic, **zero-token** heads-up to subscribed chats ahead of each one.
+
+- **NFP is computed** — the monthly jobs report falls on the first Friday (08:30 ET),
+  so it is seeded by rule and can never drift.
+- **Everything else is fetched** — CPI/PPI/PCE/FOMC/GDP/Retail have no clean monthly
+  rule, so the agent looks up and **verifies** real dates rather than guessing. A wrong
+  date is worse than no date.
+- **Auto-alert** — `cio/scheduler.py` runs daily (default 07:00 local), warns once per
+  event within the lead window (`CIO_ECON_ALERT_LEAD_DAYS`, default 1), and marks it
+  sent so it never repeats — even across restarts.
+
+Populate a month via the **`monthly_red_events` playbook**: ask the bot "run
+monthly_red_events" and it web-searches the month's releases, verifies them against
+BLS/BEA/the Fed or a reputable calendar, and records each with `add_econ_event`. NFP
+auto-fills regardless. Inspect/manage everything on the dashboard's **Econ events** and
+**Playbooks** tabs.
+
+Agent tools: `add_econ_event`, `list_econ_events`. Timing knobs under
+[Run 24/7](#run-247-systemd). Full write-up: **[docs/ECON-EVENT-ALERTS.md](docs/ECON-EVENT-ALERTS.md)**.
+
 ## Setup
 
 ```bash
@@ -264,6 +289,18 @@ CIO_WMA_CONCURRENCY=4    # securities assessed in parallel
 CIO_TZ=America/Vancouver # local timezone for all schedule times
 ```
 
+**Economic-event alert timing** — a daily heads-up before high-impact economic
+releases (NFP/CPI/FOMC/…) is pushed to subscribed chats:
+
+```
+CIO_ECON_ALERT_HOUR=7        # hour 0–23, or "off" to disable
+CIO_ECON_ALERT_MINUTE=0
+CIO_ECON_ALERT_LEAD_DAYS=1   # warn this many days ahead of each event
+```
+
+See **[Economic-event alerts](#economic-event-alerts)** below. A boot one-shot
+re-checks the window (and seeds NFP) shortly after start.
+
 ## Test without Telegram
 
 ```bash
@@ -282,8 +319,8 @@ Sample data: `data/sample_transactions.csv`.
 A localhost-only web view to verify the agent is behaving correctly. Mostly read-only;
 write surfaces are the **Watchlist** / **Portfolio** / **Configure** pages (manage lists,
 set prices, import CSVs, edit model routing) and **delete** controls on the Telegram /
-Memory / Committee pages. Every mutation POSTs then redirects (PRG), behind the same auth
-gate, and destructive deletes ask for confirmation first.
+Memory / Committee / Playbooks / Econ-events pages. Every mutation POSTs then redirects
+(PRG), behind the same auth gate, and destructive deletes ask for confirmation first.
 
 ```bash
 .venv/bin/python -m cio.dashboard          # http://127.0.0.1:8787
@@ -305,6 +342,12 @@ Pages:
   both stores (`chat:*` / `global` in `cio.db`, `committee:<role>` in `committee.db`)
   with each note's tier, key, value, hits, importance, source, and update time. Each store
   and each scope has a **delete** button.
+- **Playbooks** — the agent's saved reusable procedures (name, scope, hit count, steps,
+  created) with a per-row **delete**. Steps reference *tools*, not cached numbers, so a
+  playbook never goes stale.
+- **Econ events** — high-impact economic events the bot alerts on (date, event, impact,
+  time, source, whether a heads-up was sent) with a per-row **delete**. NFP auto-seeds;
+  the rest are populated by the agent from verified sources.
 - **Sanitizer** — audit trail of the figures-sanitizer: every note it rewrote (figures
   stripped) or rejected, with the agent, symbol, what was removed, and the stored result.
 - **Configure** — edit `config/committee_models.yaml` from the UI instead of a text editor.

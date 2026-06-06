@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import memory, portfolio, timeutil
+from . import econ_calendar, memory, portfolio, timeutil
 
 log = logging.getLogger("cio.scheduler")
 
@@ -184,6 +184,53 @@ async def watchlist_briefing(bot) -> None:
         memory.set_meta(_LAST_WMA_KEY, today)
 
 
+def _format_econ_alert(events: list[dict], lead_days: int) -> str:
+    """Deterministic heads-up text for upcoming high-impact econ events. Zero tokens."""
+    when = "tomorrow" if lead_days == 1 else f"the next {lead_days} days"
+    lines = [f"🗓️ *High-impact economic events {when}*", ""]
+    for e in events:
+        d = date.fromisoformat(e["event_date"])
+        dow = d.strftime("%a")
+        t = f" {e['time_et']}" if e.get("time_et") else ""
+        impact = (e.get("impact") or "high").upper()
+        lines.append(f"• {e['event_date']} ({dow}){t} — {e['name']} [{impact}]")
+    lines += [
+        "",
+        "These releases historically move markets (esp. vs. consensus). "
+        "Consider trimming risk 1–2 days prior, per your monthly_red_events playbook.",
+    ]
+    return "\n".join(lines)
+
+
+async def econ_event_alert(bot) -> None:
+    """Warn subscribed chats ahead of high-impact economic events.
+
+    Seeds the deterministic NFP dates, then sends one heads-up per event within the
+    lead window and marks it alerted so it never double-sends. Never raises into the
+    scheduler. CIO_ECON_ALERT_LEAD_DAYS (default 1) sets how far ahead to warn."""
+    try:
+        econ_calendar.seed_nfp(months_ahead=2)
+        lead = int(os.getenv("CIO_ECON_ALERT_LEAD_DAYS", "1"))
+        events = econ_calendar.upcoming(lead_days=lead)
+        if not events:
+            return
+        chats = memory.subscribed_chats()
+        if not chats:
+            return
+        text = _format_econ_alert(events, lead)
+        sent_any = False
+        for chat_id in chats:
+            try:
+                await bot.send_message(chat_id=chat_id, text=text)
+                sent_any = True
+            except Exception:  # one bad chat must not block the rest
+                log.exception("econ alert send failed for chat %s", chat_id)
+        if sent_any:
+            econ_calendar.mark_alerted([e["id"] for e in events])
+    except Exception:
+        log.exception("econ_event_alert job failed")
+
+
 def start(bot) -> AsyncIOScheduler:
     """Start the scheduler on the running loop. Returns it so the caller can stop it.
 
@@ -262,5 +309,24 @@ def start(bot) -> AsyncIOScheduler:
                           args=[bot], id="wma_catchup", replace_existing=True)
     else:
         log.info("watchlist briefing disabled (CIO_WMA_HOUR=off)")
+
+    # ----- economic-event alert -----------------------------------------------
+    # Daily heads-up before high-impact econ events (NFP/CPI/FOMC/…). Default 07:00
+    # local, every day. CIO_ECON_ALERT_HOUR=off disables. CIO_ECON_ALERT_MINUTE and
+    # CIO_ECON_ALERT_LEAD_DAYS (read inside the job) tune it.
+    ea_hour = os.getenv("CIO_ECON_ALERT_HOUR", "7")
+    if ea_hour.lower() != "off":
+        ea_hour = int(ea_hour)
+        ea_minute = int(os.getenv("CIO_ECON_ALERT_MINUTE", "0"))
+        sched.add_job(econ_event_alert, "cron", hour=ea_hour, minute=ea_minute,
+                      args=[bot], id="econ_event_alert", replace_existing=True,
+                      coalesce=True, misfire_grace_time=3600)
+        log.info("econ-event alert scheduled daily at %02d:%02d local", ea_hour, ea_minute)
+        # Boot one-shot so a fresh start re-checks the window and seeds NFP.
+        sched.add_job(econ_event_alert, "date",
+                      run_date=now.replace(microsecond=0) + timedelta(seconds=45),
+                      args=[bot], id="econ_alert_boot", replace_existing=True)
+    else:
+        log.info("econ-event alert disabled (CIO_ECON_ALERT_HOUR=off)")
 
     return sched
