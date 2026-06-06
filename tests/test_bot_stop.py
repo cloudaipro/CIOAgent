@@ -60,6 +60,10 @@ class FakeUpdate:
     def effective_chat(self) -> FakeChat:
         return self.message.chat
 
+    @property
+    def effective_message(self) -> "FakeMessage":
+        return self.message
+
 
 @dataclass
 class FakeCtx:

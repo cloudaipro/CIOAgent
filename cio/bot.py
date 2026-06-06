@@ -13,11 +13,18 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -52,6 +59,46 @@ _SAFE_NAME = __import__("re").compile(r"[^A-Za-z0-9.\-^=]")
 def _safe_name(text: str, fallback: str = "report") -> str:
     s = _SAFE_NAME.sub("", str(text)).lstrip(".")[:24]
     return s or fallback
+
+
+# Commands surfaced in Telegram's "/" autocomplete and the ☰ Menu button.
+# Registered once at boot via set_my_commands (see _post_init). The (command,
+# description) pairs are what the user sees when they type "/".
+BOT_COMMANDS = [
+    ("watchlist", "Latest watchlist prices"),
+    ("playbooks", "List saved playbooks you can ask me to run"),
+    ("committee", "Investment committee on a symbol — /committee AAPL [zh]"),
+    ("briefing", "Pre-market watchlist briefing — /briefing [SYMBOL…] [zh]"),
+    ("subscribe", "Daily digest + 06:00 briefing"),
+    ("unsubscribe", "Stop the daily digest"),
+    ("stop", "Cancel whatever I'm running for you"),
+    ("help", "Show what I can do"),
+]
+
+# Persistent tap-button grid shown under the text box. Button text must be the
+# literal "/command" — Telegram only parses a tap as a command if it starts with
+# "/", so emoji labels can't go here (they'd be sent as plain text to the agent).
+_REPLY_KEYBOARD = ReplyKeyboardMarkup(
+    [["/watchlist", "/briefing"],
+     ["/committee", "/playbooks"],
+     ["/subscribe", "/unsubscribe"],
+     ["/help"]],
+    resize_keyboard=True,
+    input_field_placeholder="Tap a command or just ask…",
+)
+
+# Inline buttons attached under the /start message. These carry callback_data
+# (free of the "/" constraint, so they get friendly emoji labels) handled by
+# on_callback. Only light, no-argument actions are wired here. /committee and
+# /briefing take arguments and run long, tracked jobs, so they stay on the reply
+# keyboard / "/" autocomplete where the normal command path handles args + /stop.
+_INLINE_MENU = InlineKeyboardMarkup(
+    [[InlineKeyboardButton("📋 Watchlist", callback_data="cb:watchlist"),
+      InlineKeyboardButton("📒 Playbooks", callback_data="cb:playbooks")],
+     [InlineKeyboardButton("🔔 Subscribe", callback_data="cb:subscribe"),
+      InlineKeyboardButton("🔕 Unsubscribe", callback_data="cb:unsubscribe")],
+     [InlineKeyboardButton("❓ Help", callback_data="cb:help")]],
+)
 
 # One conversational agent per chat, created lazily.
 _agents: dict[int, CIOAgent] = {}
@@ -156,20 +203,20 @@ def _chunk(text: str, limit: int = TG_LIMIT) -> list[str]:
 async def _reply(update: Update, text: str, images: list[str],
                  docs: list[str] | None = None) -> None:
     for chunk in (_chunk(text) if text else []):
-        await update.message.reply_text(chunk)
+        await update.effective_message.reply_text(chunk)
     for img in images:
         with open(img, "rb") as f:
-            await update.message.reply_photo(f)
+            await update.effective_message.reply_photo(f)
     for doc in docs or []:
         with open(doc, "rb") as f:
-            await update.message.reply_document(f, filename=Path(doc).name)
+            await update.effective_message.reply_document(f, filename=Path(doc).name)
 
 
 async def _run(update: Update, prompt: str) -> None:
     chat_id = update.effective_chat.id
     task = asyncio.current_task()
     if not _try_acquire(chat_id, task):
-        await update.message.reply_text(_BUSY_MSG)
+        await update.effective_message.reply_text(_BUSY_MSG)
         return
     await update.effective_chat.send_action(ChatAction.TYPING)
     agent = _agent(chat_id)
@@ -187,7 +234,7 @@ async def _run(update: Update, prompt: str) -> None:
                 # turn is NOT logged — it never completed.
                 await _reset_agent(chat_id)
                 try:
-                    await update.message.reply_text(
+                    await update.effective_message.reply_text(
                         "🛑 Stopped. Anything already saved or charged before the "
                         "stop stands — I can only halt the remaining steps."
                     )
@@ -197,7 +244,7 @@ async def _run(update: Update, prompt: str) -> None:
             raise  # not a user stop (e.g. shutdown) — let it propagate
         except Exception as e:  # never let the bot die on one bad turn
             log.exception("agent error")
-            await update.message.reply_text(f"⚠️ Agent error: {e}")
+            await update.effective_message.reply_text(f"⚠️ Agent error: {e}")
             return
         # Persist the exchange for the dev dashboard + cold-store recall (best-effort).
         memory.log_turn(chat_id, agent._session_id, prompt, text)
@@ -219,10 +266,8 @@ async def _gate(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         raise ApplicationHandlerStop
 
 
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    log.info("/start from chat %s", chat_id)
-    await update.message.reply_text(
+def _help_text(chat_id: int) -> str:
+    return (
         "📊 CIO agent online.\n\n"
         f"🪪 Your chat id: {chat_id}\n"
         "   (put this in CIO_ALLOWED_CHATS in .env to lock the bot to you)\n\n"
@@ -231,18 +276,34 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
         "• Send a broker screenshot or receipt photo and I'll read it\n"
         "• /watchlist — latest prices for your active watchlist\n"
+        "• /playbooks — list saved playbooks, then ask me to run one "
+        "(e.g. \"Run the monthly_red_events playbook\")\n"
         "• /subscribe — opt in to the daily portfolio digest AND the 06:00 "
         "pre-market watchlist briefing on trading days (/unsubscribe to stop)\n"
         "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)\n"
         "• /briefing [SYMBOL…] [zh] — pre-market watchlist briefing as PDF "
         "(add zh for 繁體中文; auto-runs 06:00 on trading days)\n"
-        "• /stop — cancel whatever I'm currently working on for you"
+        "• /stop — cancel whatever I'm currently working on for you\n\n"
+        "💡 Type \"/\" for the command list, tap the ☰ menu, or use the buttons below."
+    )
+
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    log.info("/start from chat %s", chat_id)
+    # Inline buttons ride on the help text; a single message can carry only one
+    # reply_markup, so a short follow-up installs the persistent reply keyboard.
+    await update.effective_message.reply_text(
+        _help_text(chat_id), reply_markup=_INLINE_MENU
+    )
+    await update.effective_message.reply_text(
+        "Tap-command keyboard ready. ⌨️", reply_markup=_REPLY_KEYBOARD
     )
 
 
 async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     memory.set_subscribed(update.effective_chat.id, True)
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "✅ Subscribed. You'll get the daily portfolio digest and the 06:00 "
         "pre-market watchlist briefing on trading days."
     )
@@ -250,7 +311,68 @@ async def cmd_subscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_unsubscribe(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     memory.set_subscribed(update.effective_chat.id, False)
-    await update.message.reply_text("🔕 Unsubscribed from the daily digest.")
+    await update.effective_message.reply_text("🔕 Unsubscribed from the daily digest.")
+
+
+async def cmd_playbooks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """List this chat's saved playbooks (named, reusable procedures) so the user
+    can discover what to run. Deterministic — no model tokens. Invoke one by
+    asking in plain language, e.g. \"Run the monthly_red_events playbook\"."""
+    chat_id = update.effective_chat.id
+    log.info("/playbooks from chat %s", chat_id)
+    pbs = memory.list_playbooks(scope=f"chat:{chat_id}")
+    if not pbs:
+        await update.effective_message.reply_text(
+            "No playbooks saved yet. I build them as I learn recurring tasks, "
+            "or you can ask me to \"save a playbook\". Manage them in the dashboard."
+        )
+        return
+    lines = ["📒 Your playbooks — tap a button to run, or just ask:\n"]
+    buttons: list[list[InlineKeyboardButton]] = []
+    for pb in pbs[:12]:  # cap the button grid; all are still listed in text
+        name = pb["name"]
+        steps = " ".join(str(pb.get("steps") or "").split())
+        if len(steps) > 140:
+            steps = steps[:139] + "…"
+        used = f"  ·  used {pb['hits']}×" if pb.get("hits") else ""
+        lines.append(f"▶️ *{name}*{used}\n   {steps}")
+        # callback_data is capped at 64 bytes by Telegram; skip the button for an
+        # over-long name (it stays listed in the text, runnable by asking).
+        if len(f"pb:{name}".encode()) <= 64:
+            buttons.append([InlineKeyboardButton(f"▶️ {name}", callback_data=f"pb:{name}")])
+    await update.effective_message.reply_text(
+        "\n\n".join(lines), parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+    )
+
+
+async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Dispatch taps on the inline buttons. The cb:* menu actions and pb:* run
+    actions reuse the command/run paths, which read update.effective_message and
+    so work for both message and callback updates."""
+    q = update.callback_query
+    await q.answer()  # ack so Telegram stops the button's loading spinner
+    data = q.data or ""
+    if data.startswith("pb:"):
+        # Tap-to-run a saved playbook. Routes through _run so it gets the same
+        # busy-guard, /stop tracking, and reply chunking as a typed message.
+        name = data[3:]
+        log.info("run playbook %r from chat %s", name, update.effective_chat.id)
+        await _run(update, f"Run the {name} playbook.")
+        return
+    action = data.removeprefix("cb:")
+    if action == "watchlist":
+        await cmd_watchlist(update, ctx)
+    elif action == "subscribe":
+        await cmd_subscribe(update, ctx)
+    elif action == "unsubscribe":
+        await cmd_unsubscribe(update, ctx)
+    elif action == "playbooks":
+        await cmd_playbooks(update, ctx)
+    elif action == "help":
+        await update.effective_message.reply_text(_help_text(update.effective_chat.id))
+    else:
+        log.warning("unknown callback data: %r", q.data)
 
 
 async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -264,7 +386,7 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_chat.send_action(ChatAction.TYPING)
     snap = await asyncio.to_thread(watchlist.prices)
     if snap["id"] is None:
-        await update.message.reply_text(watchlist.format_prices(snap))
+        await update.effective_message.reply_text(watchlist.format_prices(snap))
         return
     # Render the quote-board image (broker-style table). Fall back to the plain
     # text layout if rendering fails for any reason — the user still gets prices.
@@ -276,9 +398,9 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         path = None
     if path:
         with open(path, "rb") as f:
-            await update.message.reply_photo(f, caption=f"📋 {snap['watchlist']}")
+            await update.effective_message.reply_photo(f, caption=f"📋 {snap['watchlist']}")
     else:
-        await update.message.reply_text(watchlist.format_prices(snap))
+        await update.effective_message.reply_text(watchlist.format_prices(snap))
 
 
 async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -508,6 +630,11 @@ async def _prewarm_chat(chat_id: int) -> None:
 
 async def _post_init(app: Application) -> None:
     """Start the scheduler and eagerly resume known chat sessions at boot."""
+    # Register the slash-command list so Telegram shows it in the "/" autocomplete
+    # and the ☰ menu button. Idempotent — safe to call on every boot.
+    await app.bot.set_my_commands(
+        [BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS]
+    )
     if memory.get_meta("vec_reindex_needed"):   # embedding dim/model changed
         log.info("re-embedding memory after model change…")
         n, t = recall.reindex_all()
@@ -548,11 +675,13 @@ def main() -> None:
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
+    app.add_handler(CommandHandler("playbooks", cmd_playbooks))
     app.add_handler(CommandHandler("stop", cmd_stop))
     # Long handlers run block=False so the dispatcher keeps reading updates while
     # one is in flight — that is what lets a /stop arrive and cancel it.
     app.add_handler(CommandHandler("committee", cmd_committee, block=False))
     app.add_handler(CommandHandler("briefing", cmd_briefing, block=False))
+    app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^(cb|pb):", block=False))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo, block=False))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document, block=False))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text, block=False))
