@@ -548,3 +548,24 @@ def list_playbooks(scope: str = "global", db_path=db.DB_PATH) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def list_all_playbooks(db_path=db.DB_PATH) -> list[dict]:
+    """Every playbook across all scopes — for the dashboard management view."""
+    conn = db.connect(db_path)
+    rows = conn.execute(
+        "SELECT id, scope, name, steps, hits, created_at FROM playbooks "
+        "ORDER BY scope, hits DESC, name"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_playbook(pid: int, db_path=db.DB_PATH) -> int:
+    """Delete one playbook by id. Returns rows removed (0 if not found)."""
+    conn = db.connect(db_path)
+    with conn:
+        cur = conn.execute("DELETE FROM playbooks WHERE id=?", (pid,))
+    n = cur.rowcount
+    conn.close()
+    return n

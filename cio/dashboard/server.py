@@ -11,6 +11,8 @@ Routes:
   /telegram             Telegram conversation history
   /subscribers          chats opted in to the digest + watchlist briefing
   /memory               per-agent / per-chat memory contents (debug)
+  /playbooks            saved reusable procedures (GET renders, POST deletes one)
+  /econ                 high-impact economic events + alert status (GET/POST delete)
   /sanitizer            figures-sanitizer audit trail (what was stripped/rejected)
   /committee            list committee runs
   /committee/<run_id>   full sent/returned transcript for one run
@@ -26,7 +28,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from cio import db, devcapture, memory, portfolio, watchlist
+from cio import db, devcapture, econ_calendar, memory, portfolio, watchlist
 from cio.committee import agent_memory, models, sanitizer_log, transcript, usage
 from . import views
 
@@ -147,6 +149,17 @@ class _Handler(BaseHTTPRequestHandler):
                     self._memory_sections(), level,
                     flash=query.get("msg", [""])[0],
                     flash_err=query.get("err", ["0"])[0] == "1")
+            elif path == "/playbooks":
+                html = views.render_playbooks(
+                    memory.list_all_playbooks(), level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
+            elif path == "/econ":
+                econ_calendar.seed_nfp(months_ahead=2)
+                html = views.render_econ_events(
+                    econ_calendar.list_all(), level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/sanitizer":
                 html = views.render_sanitizer(sanitizer_log.recent(200), level)
             elif path == "/watchlist":
@@ -218,6 +231,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._committee_post(form, set_cookie)
         elif path == "/telegram":
             self._telegram_post(form, set_cookie)
+        elif path == "/playbooks":
+            self._playbooks_post(form, set_cookie)
+        elif path == "/econ":
+            self._econ_post(form, set_cookie)
         elif path == "/configure":
             self._configure_post(form, set_cookie)
         else:
@@ -245,6 +262,53 @@ class _Handler(BaseHTTPRequestHandler):
         if err:
             params["err"] = "1"
         self._redirect("/telegram?" + urlencode(params), set_cookie)
+
+    def _playbooks_post(self, form: dict, set_cookie: str | None) -> None:
+        """Playbooks page mutation. Only action: delete pid=<id> — remove one saved
+        playbook. Irreversible; confirmed client-side. PRG back."""
+        action = form.get("action", [""])[0].strip()
+        pid = form.get("pid", [""])[0].strip()
+        msg, err = "", False
+        try:
+            if action == "delete":
+                if not pid.isdigit():
+                    raise ValueError("missing/invalid pid")
+                n = memory.delete_playbook(int(pid))
+                msg = f"deleted playbook ({n} row(s))" if n else "playbook not found"
+                err = n == 0
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("playbooks POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/playbooks?" + urlencode(params), set_cookie)
+
+    def _econ_post(self, form: dict, set_cookie: str | None) -> None:
+        """Econ-events page mutation. Only action: delete eid=<id>. PRG back."""
+        action = form.get("action", [""])[0].strip()
+        eid = form.get("eid", [""])[0].strip()
+        msg, err = "", False
+        try:
+            if action == "delete":
+                if not eid.isdigit():
+                    raise ValueError("missing/invalid eid")
+                n = econ_calendar.delete_event(int(eid))
+                msg = f"deleted event ({n} row(s))" if n else "event not found"
+                err = n == 0
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("econ POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/econ?" + urlencode(params), set_cookie)
 
     def _committee_post(self, form: dict, set_cookie: str | None) -> None:
         """Committee page mutation. Only action: wipe_runs — delete every captured

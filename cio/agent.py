@@ -153,6 +153,14 @@ def _emit_image(path: str | None, ok_msg: str, empty_msg: str) -> dict:
     return _text(ok_msg)
 
 
+def _emit_doc(path: str | None, ok_msg: str, empty_msg: str) -> dict:
+    """Queue a file (e.g. PDF) for the bot to send as a document this turn."""
+    if not path:
+        return _text(empty_msg)
+    _PENDING_DOCS.append(path)
+    return _text(ok_msg)
+
+
 def _clock_context() -> str:
     """Authoritative 'now': local + US/Eastern wall clock, NASDAQ status and the
     latest settled trading session. The agent has no other reliable source for
@@ -351,6 +359,93 @@ async def t_list_playbooks(args):
     return _text("\n\n".join(f"## {p['name']}\n{p['steps']}" for p in pbs))
 
 
+# ----- economic-event calendar (auto-alert before high-impact releases) ------
+
+@tool("add_econ_event",
+      "Record a high-impact economic event so the bot warns the operator ahead of it. "
+      "Use real, verified release dates (look them up). NFP is auto-seeded, so add the "
+      "others: CPI, Core CPI, PPI, PCE, FOMC decision, GDP, Retail Sales, JOLTS. "
+      "event_date is YYYY-MM-DD; impact is high/medium/low; time_et like '08:30 ET'.",
+      {"event_date": str, "name": str, "impact": str, "time_et": str, "source": str})
+async def t_add_econ_event(args):
+    from . import econ_calendar
+    try:
+        new = econ_calendar.add_event(
+            args["event_date"], args["name"],
+            impact=args.get("impact") or "high",
+            time_et=args.get("time_et") or "",
+            source=args.get("source") or "")
+    except ValueError as e:
+        return _text(f"Could not add event: {e}")
+    verb = "Added" if new else "Updated"
+    return _text(f"{verb} econ event: {args['event_date']} {args['name']}.")
+
+
+@tool("list_econ_events",
+      "List upcoming high-impact economic events the bot will alert on (next ~45 days).",
+      {})
+async def t_list_econ_events(args):
+    from . import econ_calendar
+    econ_calendar.seed_nfp(months_ahead=2)
+    evs = econ_calendar.list_upcoming(days=45)
+    if not evs:
+        return _text("No upcoming econ events recorded. Run the monthly_red_events playbook to populate them.")
+    lines = []
+    for e in evs:
+        t = f" {e['time_et']}" if e.get("time_et") else ""
+        flag = " (alerted)" if e.get("alerted") else ""
+        lines.append(f"- {e['event_date']}{t} — {e['name']} [{(e.get('impact') or 'high').upper()}]{flag}")
+    return _text("Upcoming high-impact events:\n" + "\n".join(lines))
+
+
+@tool("econ_events_pdf",
+      "Render the upcoming high-impact economic events as a PDF and send it to the user. "
+      "Call this at the end of the monthly_red_events playbook so the user gets a clean "
+      "table (Telegram cannot render Markdown tables in text).",
+      {})
+async def t_econ_events_pdf(args):
+    from . import econ_calendar
+    from datetime import date
+    econ_calendar.seed_nfp(months_ahead=2)
+    evs = econ_calendar.list_upcoming(days=45)
+    if not evs:
+        return _text("No upcoming econ events to render. Add events first.")
+    md = econ_calendar.render_report_md(evs)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    pdf_path = REPORTS_DIR / f"econ_events_{date.today():%Y-%m}.pdf"
+    try:
+        from .committee.render_pdf import markdown_to_pdf
+        markdown_to_pdf(md, pdf_path, title="Economic Red-Events")
+    except Exception:
+        import logging
+        logging.getLogger("cio.agent").exception(
+            "econ_events_pdf render failed; sending markdown instead")
+        md_path = REPORTS_DIR / f"econ_events_{date.today():%Y-%m}.md"
+        md_path.write_text(md, encoding="utf-8")
+        return _emit_doc(str(md_path), "Econ-events file generated; it will be sent.",
+                         "Could not render the econ-events file.")
+    return _emit_doc(str(pdf_path), "Econ-events PDF generated; it will be sent to the user.",
+                     "Could not render the econ-events PDF.")
+
+
+@tool("econ_events_image",
+      "Render the upcoming high-impact economic events as a TABLE IMAGE and send it. "
+      "Telegram renders images inline, so prefer this over the PDF for the "
+      "monthly_red_events playbook — the user sees the table without downloading.",
+      {})
+async def t_econ_events_image(args):
+    from . import econ_calendar
+    from datetime import date
+    econ_calendar.seed_nfp(months_ahead=2)
+    evs = econ_calendar.list_upcoming(days=45)
+    if not evs:
+        return _text("No upcoming econ events to render. Add events first.")
+    title = f"Economic Red-Events — {date.today():%B %Y}"
+    path = charts.econ_events_table(evs, title=title)
+    return _emit_image(path, "Econ-events table image generated; it will be sent to the user.",
+                       "Could not render the econ-events image.")
+
+
 # ----- stock market tools (live price/volume + cache + TA strategies) --------
 # The stock subsystem is imported lazily inside each tool so the agent (and the
 # TA engine's heavier deps) only load when a stock tool is actually used.
@@ -542,6 +637,7 @@ async def t_committee(args):
 CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
+             t_add_econ_event, t_list_econ_events, t_econ_events_pdf, t_econ_events_image,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
              t_refresh_prices, t_stock_panel, t_watchlist_prices,
              t_market_clock, t_web_search, t_web_scrape, t_committee]
