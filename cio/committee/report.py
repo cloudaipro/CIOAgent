@@ -93,11 +93,30 @@ def _field(label: str, value: Any) -> str:
     """
     Labeled markdown block.
 
-    List/tuple value → label line followed by a bullet list (avoids the raw
-    Python `['a', 'b']` repr leaking into the report). Scalar → inline bold line.
+    Dict value (e.g. a specialist wrapping its answer as
+    ``{'qualitative_assessment': [...]}``) → flattened to its values, so the raw
+    Python dict repr never leaks into the report. List/tuple value → label line
+    followed by a bullet list (avoids the raw `['a', 'b']` repr leaking); dict
+    items inside the list (e.g. ``{'catalyst': 'X', 'date': 'Y'}``) are joined to
+    a readable line rather than leaking the dict repr. Scalar → inline bold line.
     """
+    def _coerce(x: Any) -> str:
+        # dict item (e.g. {'catalyst': 'X', 'date': 'Y'}) → "X — Y", no repr leak
+        if isinstance(x, dict):
+            parts = [str(v).strip() for v in x.values() if str(v).strip()]
+            return " — ".join(parts)
+        return str(x).strip()
+
+    if isinstance(value, dict):
+        flat: list = []
+        for v in value.values():
+            if isinstance(v, (list, tuple)):
+                flat.extend(v)
+            else:
+                flat.append(v)
+        value = flat
     if isinstance(value, (list, tuple)):
-        items = [str(x).strip() for x in value if str(x).strip()]
+        items = [c for x in value if (c := _coerce(x))]
         if items:
             body = "\n".join(f"- {it}" for it in items)
             return f"**{label}:**\n\n{body}"

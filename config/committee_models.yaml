@@ -3,16 +3,16 @@
 #          "openai" = OpenAI API (needs OPENAI_API_KEY)
 defaults: {service: claude, model: claude-opus-4-8}
 agents:
-  market: {service: openai, model: gpt-5.5-2026-04-23}
-  macro: {service: openai, model: gpt-5.5-2026-04-23}
-  equity: {service: openai, model: gpt-5.5-2026-04-23}
-  industry: {service: openai, model: gpt-5.5-2026-04-23}
-  valuation: {service: openai, model: gpt-5.5-2026-04-23}
-  quant: {service: openai, model: gpt-5.5-2026-04-23}
-  etf: {service: openai, model: gpt-5.5-2026-04-23}
-  risk: {service: openai, model: gpt-5.5-2026-04-23}
-  catalyst: {service: openai, model: gpt-5.5-2026-04-23}
-  moderator: {service: openai, model: gpt-5.5-2026-04-23}
+  market: {service: claude, model: claude-opus-4-8}
+  macro: {service: claude, model: claude-opus-4-8}
+  equity: {service: claude, model: claude-opus-4-8}
+  industry: {service: claude, model: claude-opus-4-8}
+  valuation: {service: claude, model: claude-opus-4-8}
+  quant: {service: claude, model: claude-opus-4-8}
+  etf: {service: claude, model: claude-opus-4-8}
+  risk: {service: claude, model: claude-opus-4-8}
+  catalyst: {service: claude, model: claude-opus-4-8}
+  moderator: {service: claude, model: claude-opus-4-8}
   cio:
     chain:
     - service: openai
@@ -38,7 +38,7 @@ agents:
   # TC translation: Claude is reliable on long markdown + strong Traditional Chinese.
   # Output is ALSO post-converted with OpenCC s2twp (translate.py) to GUARANTEE
   # Traditional (Taiwan) glyphs/phrasing regardless of which backend answers.
-  translator: {service: openai, model: gpt-5.5-2026-04-23}
+  translator: {service: claude, model: claude-sonnet-4-6}
 # nim.max_tokens = output cap value (env CIO_NIM_MAX_TOKENS overrides).
 nim: {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY, max_tokens: 20480}
 # claude (claude-agent-sdk) has no plain output max_tokens; only a thinking-token
