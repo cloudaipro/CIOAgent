@@ -152,6 +152,37 @@ def test_evidence_log_on_empty_input_guards(caplog):
             f"{marker} did not log on empty-input guard"
 
 
+def test_committee_bundle_logs_evidence(monkeypatch, caplog):
+    # The committee uses EDGAR/Finnhub via bundle._external (NOT the chat tools),
+    # so it must emit its own cio.evidence lines, tagged via=committee.
+    from cio.committee import bundle
+    from cio import data
+    monkeypatch.setattr(data.edgar, "_user_agent", lambda: "UA test@example.com")
+    monkeypatch.setattr(data.finnhub, "_token", lambda: "k")
+    monkeypatch.setattr(data, "recent_filings", lambda sym, limit=4: [{"form": "8-K"}])
+    monkeypatch.setattr(data, "analyst_recs", lambda sym: {"buy": 5})
+    monkeypatch.setattr(data, "earnings_calendar", lambda sym: {"date": "2026-07-01"})
+    with caplog.at_level(logging.INFO, logger="cio.evidence"):
+        bundle._external("NBIX", is_etf=False)
+    msgs = [r.getMessage() for r in caplog.records if r.name == "cio.evidence"]
+    assert any("tool=sec_filings" in m and "via=committee" in m for m in msgs)
+    assert any("tool=analyst_ratings" in m and "found=True" in m for m in msgs)
+    assert any("tool=earnings_info" in m and "via=committee" in m for m in msgs)
+
+
+def test_committee_bundle_logs_etf_skips(monkeypatch, caplog):
+    from cio.committee import bundle
+    from cio import data
+    monkeypatch.setattr(data.edgar, "_user_agent", lambda: None)     # EDGAR off
+    monkeypatch.setattr(data.finnhub, "_token", lambda: None)        # Finnhub off
+    monkeypatch.setattr(data, "recent_filings", lambda sym, limit=4: [])
+    with caplog.at_level(logging.INFO, logger="cio.evidence"):
+        bundle._external("SPY", is_etf=True)
+    msgs = [r.getMessage() for r in caplog.records if r.name == "cio.evidence"]
+    assert any("tool=sec_filings" in m and "configured=False" in m for m in msgs)
+    assert any("tool=analyst_ratings" in m and "skipped=etf" in m for m in msgs)
+
+
 def test_ev_no_trailing_space(caplog):
     import cio.agent as agent
     with caplog.at_level(logging.INFO, logger="cio.evidence"):

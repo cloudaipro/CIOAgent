@@ -11,6 +11,9 @@ from datetime import datetime
 from typing import Any
 
 log = logging.getLogger(__name__)
+# Shared evidence stream (same logger the chat tools use) so a committee run's
+# EDGAR/Finnhub usage is visible in the logs too — tagged via=committee.
+_evlog = logging.getLogger("cio.evidence")
 
 # Lazy import so the stock subsystem is not loaded at module import time.
 _stock = None
@@ -66,10 +69,25 @@ def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any]:
     earnings = None
     try:
         from .. import data
+        edgar_on = bool(data.edgar._user_agent())
+        finnhub_on = bool(data.finnhub._token())
+
         filings = data.recent_filings(symbol, limit=4)
-        if not is_etf:
+        _evlog.info("tool=sec_filings symbol=%s configured=%s source=EDGAR filings=%d via=committee",
+                    symbol, edgar_on, len(filings))
+
+        if is_etf:
+            _evlog.info("tool=analyst_ratings symbol=%s configured=%s skipped=etf via=committee",
+                        symbol, finnhub_on)
+            _evlog.info("tool=earnings_info symbol=%s configured=%s skipped=etf via=committee",
+                        symbol, finnhub_on)
+        else:
             analyst = data.analyst_recs(symbol)
+            _evlog.info("tool=analyst_ratings symbol=%s configured=%s source=Finnhub found=%s via=committee",
+                        symbol, finnhub_on, analyst is not None)
             earnings = data.earnings_calendar(symbol)
+            _evlog.info("tool=earnings_info symbol=%s configured=%s source=Finnhub found=%s via=committee",
+                        symbol, finnhub_on, earnings is not None)
     except Exception as e:
         log.debug("external data fetch failed for %s: %s", symbol, e)
     return filings, analyst, earnings
