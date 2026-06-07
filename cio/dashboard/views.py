@@ -952,7 +952,9 @@ def _configure_js(catalog: dict) -> str:
 
 
 def render_configure(cfg, level: int, services, model_suggestions,
-                     path: str = "", flash: str = "", flash_err: bool = False) -> str:
+                     path: str = "", flash: str = "", flash_err: bool = False,
+                     log_to_file: bool = False, log_file: str = "",
+                     log_dir: str = "", log_locked_by_env: bool = False) -> str:
     """Edit committee model routing. One big POST form → /configure.
 
     Simple agents render as service combo + model box; chain agents (cio/wma)
@@ -1055,6 +1057,35 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + "".join(catalog_rows) + "</table></details>"
     )
 
+    # --- logging section: indicator + toggle for date-based file logging ---
+    if log_to_file:
+        status = (f"<strong style='color:#1a7f37'>ON</strong> — writing to "
+                  f"<code>{esc(log_file or '(opening…)')}</code>")
+    else:
+        status = "<strong>OFF</strong> — logs go to the console only"
+    if log_locked_by_env:
+        toggle = ("<p class='hint'>Locked by the <code>CIO_LOG_TO_FILE</code> "
+                  "environment variable; unset it to control this from here.</p>")
+    else:
+        want = "0" if log_to_file else "1"
+        btn = "Disable file logging" if log_to_file else "Enable file logging"
+        toggle = (
+            "<form method='post' action='/configure' style='margin-top:8px'>"
+            "<input type='hidden' name='form_kind' value='logging'>"
+            f"<input type='hidden' name='log_to_file' value='{want}'>"
+            f"<button type='submit' class='primary'>{btn}</button>"
+            "</form>"
+        )
+    logging_section = (
+        "<h2>Logging</h2>"
+        f"<p>Date-based log file on disk: {status}.</p>"
+        f"<p class='hint'>Directory: <code>{esc(log_dir)}</code> · one file per day "
+        "(<code>cio-YYYY-MM-DD.log</code>). Captures the <code>cio.evidence</code> "
+        "lines that confirm which primary-source tools (EDGAR / Finnhub / "
+        "ClinicalTrials) actually fired.</p>"
+        + toggle
+    )
+
     body = (
         "<h1>Configure committee models</h1>"
         + flash_html
@@ -1062,6 +1093,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
            "Pick service and model from the dropdowns; add model names under "
            "“Manage model catalog” below. Saving applies to the next committee run.</p>")
         + "<form method='post' action='/configure'>"
+        + "<input type='hidden' name='form_kind' value='models'>"
         + "<h2>Defaults</h2>" + def_rows
         + "<h2>Agents</h2>" + simple_tbl
         + "".join(chain_blocks)
@@ -1069,6 +1101,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + catalog_ui
         + "<p style='margin-top:16px'><button type='submit' class='primary'>Save changes</button></p>"
         + "</form>"
+        + logging_section
         + _configure_js({s: list(model_suggestions.get(s, []) or []) for s in services})
     )
     return _page("Configure", body, level)

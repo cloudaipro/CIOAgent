@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -23,10 +24,26 @@ from claude_agent_sdk import (
     tool,
 )
 
+import urllib.parse
+
 from . import charts, context, memory, portfolio, recall, timeutil, watchlist, web
+from .data import source_policy as _sp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = PROJECT_ROOT / "data" / "reports"
+
+# Dedicated logger for the evidence/primary-source tools. Every call emits one
+# INFO line — tool, symbol, whether the source was configured, and the result
+# count — so an operator can confirm from the logs that EDGAR/Finnhub/CT are
+# actually wired and firing (and whether they hit the real source). Mirrored to
+# a date-based file when file logging is on (see cio.logsetup).
+_evlog = logging.getLogger("cio.evidence")
+
+
+def _ev(tool: str, symbol: str, configured: bool, **extra) -> None:
+    base = f"tool={tool} symbol={symbol} configured={configured}"
+    kv = " ".join(f"{k}={v}" for k, v in extra.items())
+    _evlog.info("%s %s" % (base, kv) if kv else base)
 
 # Collector for image paths produced by chart tools during a turn. A plain
 # module global (not a contextvar) because the SDK runs MCP tool callbacks in a
@@ -43,6 +60,10 @@ _PENDING_DOCS: list[str] = []
 # is reset only on session roll / close — kept in sync with the SDK thread it indexes.
 # Keyed dict (not a flat list) so concurrent chats can't cross-reference each other.
 _SOURCES: dict[str, list[dict]] = {}
+# Per-scope issuer domains resolved from company_profile weburl. Passed to
+# source_policy.classify() so the company's own IR pages rank as Tier 1.
+# (v1: set is empty until company_profile runs in this scope — documented.)
+_ISSUER_DOMAINS: dict[str, set[str]] = {}
 # Set by web_search, reset each turn in _run_query; gates the footer's list-all
 # fallback so only a turn that actually searched can dump uncited sources.
 _SEARCHED_THIS_TURN = False
@@ -108,7 +129,8 @@ _MODEL_SOURCES_RE = re.compile(
 )
 
 
-def _append_sources(text: str, sources: list[dict], searched: bool = False) -> str:
+def _append_sources(text: str, sources: list[dict], searched: bool = False,
+                    scope: str | None = None) -> str:
     """Append a verified `Sources:` footer built from the session's web_search registry.
 
     URLs come straight from the tool (never the model), so they can't be truncated
@@ -119,7 +141,10 @@ def _append_sources(text: str, sources: list[dict], searched: bool = False) -> s
 
     The registry persists across turns, so *searched* gates the list-all fallback:
     an unrelated later turn that cites nothing leaves the registry alone (no footer
-    spam of stale sources)."""
+    spam of stale sources).
+
+    Each source line shows its Tier. A corroboration verdict line is appended when
+    ≥1 source is cited (✅ or ⚠️ per source_policy.is_verified)."""
     if not sources:
         return text
     stripped = _MODEL_SOURCES_RE.sub("", text).rstrip()    # drop model's own block
@@ -142,8 +167,31 @@ def _append_sources(text: str, sources: list[dict], searched: bool = False) -> s
     else:
         idxs = list(range(1, len(sources) + 1))
         remap = {i: i for i in idxs}
-    lines = [f"[{remap[i]}] {sources[i - 1]['url']}" for i in idxs]
-    return f"{text}\n\nSources:\n" + "\n".join(lines)
+
+    # Build footer lines with tier label
+    lines = []
+    cited_tiers: list[_sp.Tier] = []
+    for i in idxs:
+        src = sources[i - 1]
+        tier = src.get("tier")
+        if tier is None:
+            # Compute tier if not already stored (legacy entries)
+            tier = _classify_url(src["url"], scope or "global").value
+        cited_tiers.append(_sp.Tier(tier))
+        tier_label = {1: "PRIMARY", 2: "REPUTABLE", 3: "LOW-TRUST"}.get(int(tier), "UNKNOWN")
+        lines.append(f"[{remap[i]}] {src['url']}  (Tier {tier} {tier_label})")
+
+    footer = f"{text}\n\nSources:\n" + "\n".join(lines)
+
+    # Corroboration verdict — only when ≥1 source was cited
+    if order:
+        if _sp.is_verified(cited_tiers):
+            verdict = "✅ Material facts corroborated (≥1 primary or ≥2 reputable)."
+        else:
+            verdict = "⚠️ Single-source / unverified — treat flagged claims as provisional."
+        footer = footer + "\n" + verdict
+
+    return footer
 
 
 def _emit_image(path: str | None, ok_msg: str, empty_msg: str) -> dict:
@@ -270,6 +318,36 @@ def _scope() -> str:
 def _sources_for(scope: str) -> list[dict]:
     """The persistent web-source registry for one chat scope (created on first use)."""
     return _SOURCES.setdefault(scope, [])
+
+
+def _issuer_domains_for(scope: str) -> set[str]:
+    """The per-scope issuer domain set (populated by company_profile calls)."""
+    return _ISSUER_DOMAINS.setdefault(scope, set())
+
+
+def _register_issuer_domain(weburl: str, scope: str) -> None:
+    """Extract hostname from weburl and add to this scope's issuer-domain set."""
+    if not weburl:
+        return
+    try:
+        parsed = urllib.parse.urlparse(weburl if "://" in weburl else "https://" + weburl)
+        host = (parsed.hostname or "").strip().lower().lstrip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        if host:
+            _issuer_domains_for(scope).add(host)
+    except Exception:
+        pass
+
+
+def _classify_url(url: str, scope: str) -> _sp.Tier:
+    """Classify a URL's trust tier using the current scope's issuer domains."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").strip().lower()
+    except Exception:
+        host = ""
+    return _sp.classify(host, _issuer_domains_for(scope))
 
 
 def _auto_note(text: str) -> None:
@@ -575,11 +653,19 @@ async def t_web_search(args):
     if not hits:
         return _text("No web results (search unavailable or empty).")
     reg = _sources_for(_scope())
+    scope = _scope()
     lines = []
+    _TIER_LABEL = {1: "PRIMARY", 2: "REPUTABLE", 3: "LOW-TRUST"}
     for h in hits:
-        reg.append({"url": h["url"], "title": h["title"]})
+        tier = _classify_url(h["url"], scope)
+        tier_int = int(tier)
+        label = _TIER_LABEL.get(tier_int, "UNKNOWN")
+        reg.append({"url": h["url"], "title": h["title"], "tier": tier_int})
         n = len(reg)                            # stable 1-based index across the session
-        lines.append(f"[{n}] {h['title']}\n    {h['description']}")
+        line = f"[{n}] {h['title']}  ⟨TIER {tier_int} {label}⟩\n    {h['description']}"
+        if tier == _sp.Tier.LOW_TRUST:
+            line += "\n    — leads only; cannot back a stated fact, corroborate with a primary source"
+        lines.append(line)
     return _text("\n".join(lines))
 
 
@@ -607,7 +693,14 @@ async def t_web_scrape(args):
         return _text(f"Could not fetch {url}: {r['error']}")
     if not r.get("markdown"):
         return _text(f"No readable content at {url}.")
-    return _text(f"# {r.get('title') or url}\n{r['url']}\n\n{r['markdown']}")
+    _TIER_LABEL = {1: "PRIMARY", 2: "REPUTABLE", 3: "LOW-TRUST"}
+    tier = _classify_url(r["url"], _scope())
+    tier_int = int(tier)
+    label = _TIER_LABEL.get(tier_int, "UNKNOWN")
+    header = f"# {r.get('title') or url}  ⟨TIER {tier_int} {label}⟩\n{r['url']}\n"
+    if tier == _sp.Tier.LOW_TRUST:
+        header += "⚠️ LOW-TRUST source: leads only — cannot back a stated fact, corroborate with a primary source\n"
+    return _text(header + "\n" + r["markdown"])
 
 
 # ----- investment committee -------------------------------------------------
@@ -634,13 +727,132 @@ async def t_committee(args):
     return _text(art.summary + "\n\n(The full committee report has been sent to the user.)")
 
 
+# ----- primary-source data tools (evidence integrity) -----------------------
+
+@tool("sec_filings",
+      "Recent SEC/EDGAR filings (8-K/10-Q/10-K) for a symbol — PRIMARY source for "
+      "financial facts. Returns form type, filing date, title and SEC.gov URL. "
+      "Requires CIO_SEC_UA to be set (format: 'AppName YourName your@email.com').",
+      {"symbol": str})
+async def t_sec_filings(args):
+    from .data import edgar
+    sym = (args.get("symbol") or "").strip().upper()
+    if not sym:
+        _ev("sec_filings", "", False, reason="no_symbol")
+        return _text("Provide a stock symbol.")
+    ua = edgar._user_agent()
+    if not ua:
+        _ev("sec_filings", sym, False, reason="no_CIO_SEC_UA")
+        return _text("EDGAR not configured — set CIO_SEC_UA to enable (format: 'AppName Name email@example.com').")
+    filings = edgar.recent_filings(sym)
+    _ev("sec_filings", sym, True, source="EDGAR", filings=len(filings))
+    if not filings:
+        return _text(f"No recent EDGAR filings found for {sym} (symbol may not file with the SEC).")
+    import json
+    return _text(json.dumps(filings, indent=2))
+
+
+@tool("analyst_ratings",
+      "Latest analyst buy/hold/sell counts (Finnhub) — authoritative source for "
+      "analyst ratings. Returns period, strong_buy, buy, hold, sell, strong_sell. "
+      "Requires FINNHUB_API_KEY.",
+      {"symbol": str})
+async def t_analyst_ratings(args):
+    from .data import finnhub
+    sym = (args.get("symbol") or "").strip().upper()
+    if not sym:
+        _ev("analyst_ratings", "", False, reason="no_symbol")
+        return _text("Provide a stock symbol.")
+    if not finnhub._token():
+        _ev("analyst_ratings", sym, False, reason="no_FINNHUB_API_KEY")
+        return _text("Finnhub not configured — set FINNHUB_API_KEY to enable.")
+    rec = finnhub.analyst_recs(sym)
+    _ev("analyst_ratings", sym, True, source="Finnhub", found=rec is not None)
+    if rec is None:
+        return _text(f"No analyst recommendations found for {sym}.")
+    import json
+    return _text(json.dumps(rec, indent=2))
+
+
+@tool("earnings_info",
+      "Next/most-recent earnings date and estimates (Finnhub). Returns date, "
+      "eps_estimate, eps_actual, revenue_estimate, and timing (bmo/amc). "
+      "Requires FINNHUB_API_KEY.",
+      {"symbol": str})
+async def t_earnings_info(args):
+    from .data import finnhub
+    sym = (args.get("symbol") or "").strip().upper()
+    if not sym:
+        _ev("earnings_info", "", False, reason="no_symbol")
+        return _text("Provide a stock symbol.")
+    if not finnhub._token():
+        _ev("earnings_info", sym, False, reason="no_FINNHUB_API_KEY")
+        return _text("Finnhub not configured — set FINNHUB_API_KEY to enable.")
+    earn = finnhub.earnings_calendar(sym)
+    _ev("earnings_info", sym, True, source="Finnhub", found=earn is not None)
+    if earn is None:
+        return _text(f"No earnings data found for {sym}.")
+    import json
+    return _text(json.dumps(earn, indent=2))
+
+
+@tool("company_profile",
+      "Company profile including official website (Finnhub) — PRIMARY identity source. "
+      "Returns name, weburl, finnhubIndustry, ipo date, and marketCap. Also registers "
+      "the company's domain so its IR pages are treated as Tier-1 primary sources. "
+      "Requires FINNHUB_API_KEY.",
+      {"symbol": str})
+async def t_company_profile(args):
+    from .data import finnhub
+    sym = (args.get("symbol") or "").strip().upper()
+    if not sym:
+        _ev("company_profile", "", False, reason="no_symbol")
+        return _text("Provide a stock symbol.")
+    if not finnhub._token():
+        _ev("company_profile", sym, False, reason="no_FINNHUB_API_KEY")
+        return _text("Finnhub not configured — set FINNHUB_API_KEY to enable.")
+    profile = finnhub.company_profile(sym)
+    _ev("company_profile", sym, True, source="Finnhub", found=profile is not None,
+        weburl=(profile or {}).get("weburl") or "-")
+    if profile is None:
+        return _text(f"No company profile found for {sym}.")
+    # Register the issuer domain for tier-1 IR-page resolution.
+    _register_issuer_domain(profile.get("weburl") or "", _scope())
+    import json
+    return _text(json.dumps(profile, indent=2))
+
+
+@tool("clinical_trials",
+      "Search clinicaltrials.gov — the ONLY authoritative registry for trial phase, "
+      "indication, endpoint, and status. Use this before stating any clinical fact. "
+      "Returns nct_id, title, phase, status, conditions, interventions, and URL. "
+      "No API key required.",
+      {"query": str, "limit": int})
+async def t_clinical_trials(args):
+    from .data import clinicaltrials
+    q = (args.get("query") or "").strip()
+    if not q:
+        _ev("clinical_trials", "", False, reason="no_query")
+        return _text("Provide a search query (e.g. company name + drug + indication).")
+    limit = int(args.get("limit") or 5)
+    results = clinicaltrials.search_trials(q, limit=limit)
+    _ev("clinical_trials", q[:40], True, source="clinicaltrials.gov", results=len(results))
+    if not results:
+        return _text(f"No clinical trials found for query: {q!r}. "
+                     "The trial may not be registered or the query needs adjustment.")
+    import json
+    return _text(json.dumps(results, indent=2))
+
+
 CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
              t_add_econ_event, t_list_econ_events, t_econ_events_pdf, t_econ_events_image,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
              t_refresh_prices, t_stock_panel, t_watchlist_prices,
-             t_market_clock, t_web_search, t_web_scrape, t_committee]
+             t_market_clock, t_web_search, t_web_scrape, t_committee,
+             t_sec_filings, t_analyst_ratings, t_earnings_info, t_company_profile,
+             t_clinical_trials]
 _TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock portfolio.
@@ -663,11 +875,33 @@ Rules:
   why something moved, labelling each figure by its as-of date.
 - WEB ACCESS: use web_search to find live news/analyst/filing pages and web_scrape to
   read one. Use it for qualitative context (catalysts, news, sentiment) — NOT for prices
-  or financials, which always come from the stock tools. web_search results are numbered
-  [1], [2], …; cite a source by its number in your prose (e.g. "jobs report missed [1]").
+  or financials, which always come from the stock tools. Each web_search result is
+  labelled ⟨TIER n LABEL⟩ — trust that label. web_search results are numbered [1], [2], …;
+  cite a source by its number in your prose (e.g. "jobs report missed [1]").
   Do NOT paste raw URLs and do NOT write your own "Sources" / "References" list — the
   system appends the real, complete links as a single Sources footer automatically.
   Pasting a URL yourself risks truncating it into a dead 404 link.
+- EVIDENCE INTEGRITY — enforced rules for material facts (clinical / financial /
+  corporate-action / regulatory / analyst):
+  1. MATERIAL FACTS FROM RIGHT-CLASS TIER-1 ONLY: clinical facts (trial phase,
+     indication, endpoint, p-value, approval status) → clinical_trials tool
+     (clinicaltrials.gov). Financial facts (revenue, EPS, guidance) → sec_filings or
+     earnings_info. Analyst ratings → analyst_ratings. Prices/valuation figures →
+     stock tools (NEVER web). A Tier-1 finance page is the WRONG CLASS for a clinical
+     claim — even reputable sources can be wrong-class.
+  2. TIER-3 CANNOT BACK A STATED FACT: sources marked ⟨TIER 3 LOW-TRUST⟩ are leads
+     only. Read them for direction, then confirm via a primary tool before asserting.
+     A web_search snippet is NOT evidence — web_scrape (or call a primary tool) the
+     source before asserting its content.
+  3. RIGHT CLASS: a clinical endpoint must come from the trial registry, not a
+     finance or news page — even Tier-1 financial sources are wrong-class for clinical.
+  4. CORROBORATION: a material fact needs ≥1 Tier-1 OR ≥2 independent Tier-2 sources;
+     otherwise prefix the sentence [unverified] before stating it.
+  5. LABEL EVERY FACTUAL LINE: cite facts with their [n] source number(s). Anything
+     you reasoned/estimated yourself (ratios, projections, sentiment, "worth buying")
+     must be prefixed [inference]. Never blend cited fact and inference in one sentence.
+  6. BUY/SELL DECISIONS: for a genuine buy/sell verdict, offer run_committee (the
+     verified gold-path with locked process) rather than free-handing a verdict.
 - INVESTMENT COMMITTEE: when the user asks to "convene the committee", run a committee,
   or wants the committee's verdict/vote on a stock, call the run_committee tool. It runs
   the REAL multi-agent committee and sends the official PDF. NEVER invent committee seats,
@@ -698,6 +932,64 @@ def build_options(model: str | None = None, resume: str | None = None,
         resume=resume,
         hooks=hooks,
     )
+
+
+_MATERIAL_CLAIM_RE = re.compile(
+    r"\b(trial|phase|endpoint|p[<-]\s*0\.\d+|efficacy|revenue|EPS|earnings|"
+    r"guidance|acquisition|merger|dividend|buyback|rating|target price|approval|"
+    r"FDA|PDUFA|MADRS|indication)\b",
+    re.I,
+)
+_WEB_CITE_RE = re.compile(r"\[\d+\]")
+
+
+def _has_material_or_web_claim(text: str) -> bool:
+    """Quick heuristic: True if the answer contains a material claim or a web citation."""
+    return bool(_MATERIAL_CLAIM_RE.search(text)) or bool(_WEB_CITE_RE.search(text))
+
+
+async def _run_verifier(answer: str, sources: list[dict]) -> str | None:
+    """Item 5 — optional Haiku post-pass to flag unsupported material claims.
+
+    Gated by CIO_VERIFY_CLAIMS=1 (default off). At most 1 call per turn.
+    Skipped entirely if no material/web claim is present.
+    Returns a formatted ⚠️ Verifier note to append, or None.
+    """
+    if _env("VERIFY_CLAIMS", "0") != "1":
+        return None
+    if not _has_material_or_web_claim(answer):
+        return None
+
+    # Build a minimal source context (title + tier) to keep the prompt small.
+    src_ctx = "\n".join(
+        f"[{i+1}] (Tier {s.get('tier', '?')}) {s.get('title', s.get('url', ''))}"
+        for i, s in enumerate(sources)
+    ) or "(no sources cited)"
+
+    prompt = (
+        "You are a claim verifier. Review the ANSWER below and the SOURCES list.\n"
+        "Flag any material claim (clinical, financial, corporate-action, regulatory, "
+        "analyst) that (a) cites no source or cites only a Tier-3 (LOW-TRUST) source, "
+        "or (b) cannot be confirmed from a right-class Tier-1 source.\n"
+        "Reply ONLY with a short bulleted list of flagged claims (one line each), "
+        "or 'PASS' if no issues found. Do not rewrite the answer.\n\n"
+        f"SOURCES:\n{src_ctx}\n\nANSWER:\n{answer}"
+    )
+    try:
+        import anthropic
+        client = anthropic.Anthropic()
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result = (msg.content[0].text if msg.content else "").strip()
+        if result and result.upper() != "PASS":
+            return f"\n\n⚠️ Verifier (Haiku):\n{result}"
+    except Exception as e:
+        import logging
+        logging.getLogger("cio.agent").warning("verifier call failed: %s", e)
+    return None
 
 
 class CIOAgent:
@@ -841,7 +1133,12 @@ class CIOAgent:
         # Append the verified Sources footer (user-facing only) BEFORE any checkpoint
         # below resets this scope's registry.
         text = _append_sources(text, list(_sources_for(self._scope)),
-                               searched=_SEARCHED_THIS_TURN)
+                               searched=_SEARCHED_THIS_TURN, scope=self._scope)
+        # Optional claim verifier (CIO_VERIFY_CLAIMS=1, default off) — runs before any
+        # checkpoint resets this scope's registry. No-op when disabled / no material claim.
+        note = await _run_verifier(text, list(_sources_for(self._scope)))
+        if note:
+            text = text + note
         # Capture this turn's documents before any checkpoint turn clears the stash.
         docs, self._last_docs = self._last_docs, []
         self._turns += 1
@@ -889,6 +1186,7 @@ class CIOAgent:
         self._tokens = 0
         self._compaction_pending = False
         _SOURCES.pop(self._scope, None)   # old source numbers die with the old thread
+        _ISSUER_DOMAINS.pop(self._scope, None)   # issuer set is rebuilt on demand
         try:
             await self._client.disconnect()
         except Exception:
@@ -902,6 +1200,7 @@ class CIOAgent:
 
     async def close(self):
         _SOURCES.pop(self._scope, None)
+        _ISSUER_DOMAINS.pop(self._scope, None)
         if self._connected:
             await self._client.disconnect()
             self._connected = False

@@ -178,11 +178,18 @@ class _Handler(BaseHTTPRequestHandler):
                     flash=query.get("msg", [""])[0],
                     flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/configure":
+                from .. import logsetup
+                from . import settings as _settings
+                _logfile = logsetup.current_log_file()
                 html = views.render_configure(
                     models.load_config(), level, models.SERVICES,
                     models.model_catalog(), path=models.config_path(),
                     flash=query.get("msg", [""])[0],
-                    flash_err=query.get("err", ["0"])[0] == "1")
+                    flash_err=query.get("err", ["0"])[0] == "1",
+                    log_to_file=logsetup.file_logging_enabled(),
+                    log_file=str(_logfile) if _logfile else "",
+                    log_dir=str(logsetup.log_dir()),
+                    log_locked_by_env=os.getenv("CIO_LOG_TO_FILE") is not None)
             elif path.startswith("/committee/"):
                 run_id = path.split("/committee/", 1)[1]
                 html = views.render_committee_run(run_id, transcript.get_run(run_id), level)
@@ -383,6 +390,12 @@ class _Handler(BaseHTTPRequestHandler):
         def f(name: str) -> str:
             return form.get(name, [""])[0].strip()
 
+        # The Logging toggle posts to the same /configure path but with
+        # form_kind=logging — handle it separately from the model-YAML save.
+        if f("form_kind") == "logging":
+            self._logging_post(f("log_to_file") == "1", set_cookie)
+            return
+
         msg, err = "", False
         try:
             doc = models.read_doc()
@@ -456,6 +469,28 @@ class _Handler(BaseHTTPRequestHandler):
             log.warning("configure POST failed: %s", exc)
             msg, err = f"error: {exc}", True
 
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/configure?" + urlencode(params), set_cookie)
+
+    def _logging_post(self, enabled: bool, set_cookie: str | None) -> None:
+        """Persist the file-logging choice and apply it live to this process's
+        root logger (no restart needed). Env override, if set, wins and locks it."""
+        from .. import logsetup
+        from . import settings as _settings
+        msg, err = "", False
+        if os.getenv("CIO_LOG_TO_FILE") is not None:
+            msg, err = "file logging is locked by the CIO_LOG_TO_FILE env var", True
+        else:
+            try:
+                _settings.set_log_to_file(enabled)
+                path = logsetup.apply_file_logging(enabled)
+                msg = (f"file logging ON → {path}" if enabled
+                       else "file logging OFF (console only)")
+            except Exception as exc:
+                log.warning("logging toggle failed: %s", exc)
+                msg, err = f"error: {exc}", True
         params = {"msg": msg}
         if err:
             params["err"] = "1"

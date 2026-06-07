@@ -36,9 +36,8 @@ from . import charts, memory, recall, scheduler, watchlist
 from .agent import CIOAgent
 
 load_dotenv()
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
-)
+from .logsetup import configure_logging
+configure_logging()   # console + optional date-based file (CIO_LOG_TO_FILE / Configure tab)
 log = logging.getLogger("cio.bot")
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"

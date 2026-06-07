@@ -30,6 +30,7 @@ _limiter = RateLimiter(1.05)
 _NEWS_TTL = 3 * 3600
 _RECS_TTL = 24 * 3600
 _EARN_TTL = 24 * 3600
+_PROFILE_TTL = 24 * 3600
 
 
 def _token() -> str | None:
@@ -123,6 +124,37 @@ def _next_earnings(rows, today: str | None = None):
         "revenue_estimate": pick.get("revenueEstimate"),
         "hour": pick.get("hour"),
     }
+
+
+# --- company profile -------------------------------------------------------
+def company_profile(symbol: str) -> dict | None:
+    """Company profile including official website URL. None when disabled/missing.
+
+    Returns a subset of Finnhub's /stock/profile2 response:
+      {name, weburl, finnhubIndustry, ipo, marketCap}
+
+    weburl is used for issuer-domain resolution (source_policy classify).
+    """
+    tok = _token()
+    if not tok:
+        return None
+    sym = symbol.strip().upper()
+    cached = _cache.read("finnhub_profile", sym, _PROFILE_TTL)
+    if cached is None:
+        data = get_json(f"{_BASE}/stock/profile2",
+                        params={"symbol": sym, "token": tok}, limiter=_limiter)
+        if not isinstance(data, dict) or not data:
+            _cache.write("finnhub_profile", sym, {})
+            return None
+        cached = {
+            "name": data.get("name") or "",
+            "weburl": data.get("weburl") or "",
+            "finnhubIndustry": data.get("finnhubIndustry") or "",
+            "ipo": data.get("ipo") or "",
+            "marketCap": data.get("marketCapitalization"),
+        }
+        _cache.write("finnhub_profile", sym, cached)
+    return cached if cached else None
 
 
 def earnings_calendar(symbol: str, days_ahead: int = 120):
