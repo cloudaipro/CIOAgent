@@ -21,6 +21,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -652,6 +653,16 @@ async def _post_shutdown(app: Application) -> None:
         sched.shutdown(wait=False)
 
 
+async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    # Transient long-poll network drops: PTB's retry loop recovers on its own,
+    # so log a one-liner instead of a full traceback.
+    if isinstance(err, (NetworkError, TimedOut)):
+        log.warning("telegram network error (will retry): %s", err)
+        return
+    log.error("unhandled telegram error", exc_info=err)
+
+
 def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -684,6 +695,7 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.PHOTO, on_photo, block=False))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document, block=False))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text, block=False))
+    app.add_error_handler(_on_error)
     log.info("CIO bot polling…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

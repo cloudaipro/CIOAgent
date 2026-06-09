@@ -20,7 +20,7 @@ import asyncio
 import inspect
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .prompts import WMA_SYSTEM, MACRO_SNAPSHOT_SYSTEM
 
@@ -287,4 +287,4 @@ async def global_macro_snapshot(*, news_fn=None) -> dict:
 
 
 def as_of_now() -> str:
-    return datetime.utcnow().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")

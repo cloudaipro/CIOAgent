@@ -85,6 +85,8 @@ async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
         from .render_pdf import markdown_to_pdf
         markdown_to_pdf(md, pdf_path, title=report_title)
         doc_path = pdf_path
+        # Also persist the markdown source next to the PDF.
+        pdf_path.with_suffix(".md").write_text(md, encoding="utf-8")
     except Exception:
         log.exception("PDF render failed for %s; falling back to .md", sym)
         md_path = reports_dir / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.md"
