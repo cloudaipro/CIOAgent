@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     fees      REAL    NOT NULL DEFAULT 0,
     currency  TEXT    NOT NULL DEFAULT 'USD',
     notes     TEXT,
-    created_at TEXT   NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT   NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS prices (
@@ -48,14 +48,14 @@ CREATE TABLE IF NOT EXISTS watchlists (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT    NOT NULL UNIQUE,
     is_active  INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS watchlist_items (
     watchlist_id INTEGER NOT NULL REFERENCES watchlists(id) ON DELETE CASCADE,
     symbol       TEXT    NOT NULL,                 -- stored upper-cased
     position     INTEGER NOT NULL DEFAULT 0,       -- display order (drag-to-rearrange)
-    added_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    added_at     TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     PRIMARY KEY (watchlist_id, symbol)             -- re-adding a symbol is a no-op
 );
 
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS imported_files (
     file_hash   TEXT PRIMARY KEY,        -- sha256 of the raw CSV bytes
     source      TEXT,                    -- original filename/path (informational)
     rows        INTEGER NOT NULL,
-    imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+    imported_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 -- Durable agent memory. Survives process restarts (24/7 runtime). Used for
@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS imported_files (
 CREATE TABLE IF NOT EXISTS agent_memory (
     key        TEXT PRIMARY KEY,
     value      TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 -- Internal key/value for runtime bookkeeping (e.g. last digest date), kept
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS chats (
     chat_id    INTEGER PRIMARY KEY,
     subscribed INTEGER NOT NULL DEFAULT 0,
     session_id TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 -- ===== MemCore: tiered memory / context (>= Hermes & OpenClaw) ==============
@@ -121,8 +121,8 @@ CREATE TABLE IF NOT EXISTS mem_notes (
     importance REAL    NOT NULL DEFAULT 1.0,
     hits       INTEGER NOT NULL DEFAULT 0,
     source     TEXT    NOT NULL DEFAULT 'agent',       -- agent|user|auto|legacy
-    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
+    updated_at TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     expires_at TEXT,
     UNIQUE (scope, key)                                -- NULL keys never collide
 );
@@ -132,7 +132,7 @@ CREATE INDEX IF NOT EXISTS idx_notes_scope_tier ON mem_notes(scope, tier);
 CREATE TABLE IF NOT EXISTS user_profile (
     scope      TEXT PRIMARY KEY,                       -- 'global' or 'chat:<id>'
     role       TEXT, stack TEXT, prefs TEXT, goals TEXT,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 -- Rolling-session checkpoints: a qualitative summary written BEFORE a fork so a
@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS session_digests (
     summary     TEXT    NOT NULL,
     turn_count  INTEGER NOT NULL DEFAULT 0,
     token_count INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_digests_chat ON session_digests(chat_id, id);
 
@@ -156,7 +156,7 @@ CREATE TABLE IF NOT EXISTS conv_turns (
     session_id TEXT,
     role       TEXT NOT NULL,
     content    TEXT NOT NULL,
-    ts         TEXT NOT NULL DEFAULT (datetime('now'))
+    ts         TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_turns_chat ON conv_turns(chat_id, id);
 
@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS playbooks (
     name       TEXT    NOT NULL,
     steps      TEXT    NOT NULL,
     hits       INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE (scope, name)
 );
 
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS econ_events (
     time_et    TEXT    NOT NULL DEFAULT '',          -- e.g. '08:30 ET'
     source     TEXT    NOT NULL DEFAULT '',
     alerted    INTEGER NOT NULL DEFAULT 0,           -- 1 once a heads-up was sent
-    created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now','localtime')),
     UNIQUE (event_date, name)
 );
 

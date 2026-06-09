@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS sanitizer_log (
     original  TEXT,                       -- note as the agent wrote it
     cleaned   TEXT,                       -- rewrite stored ('' when rejected)
     removed   TEXT,                       -- JSON array of stripped figures
-    ts        TEXT NOT NULL DEFAULT (datetime('now'))
+    ts        TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_sanlog_ts ON sanitizer_log(id DESC);
 """

@@ -59,7 +59,7 @@ def _collapse(conn, cluster: list[dict], apply: bool) -> int:
         with conn:
             conn.execute(
                 "UPDATE mem_notes SET hits=?, importance=?, tier=?, key=?, "
-                "updated_at=datetime('now') WHERE id=?",
+                "updated_at=datetime('now','localtime') WHERE id=?",
                 (total_hits, max_imp, tier, _key_for(survivor["value"]), survivor["id"]),
             )
             for r in losers:

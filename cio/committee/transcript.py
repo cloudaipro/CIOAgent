@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS committee_transcript (
     response      TEXT,                       -- content RETURNED
     tokens        INTEGER NOT NULL DEFAULT 0,
     source        TEXT,                       -- what triggered the run: command | chat | cli
-    ts            TEXT NOT NULL DEFAULT (datetime('now'))
+    ts            TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_transcript_run ON committee_transcript(run_id, id);
 """

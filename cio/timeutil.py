@@ -1,10 +1,7 @@
 """
 timeutil.py — Local-timezone helpers for the CIO agent.
 
-All persisted timestamps are stored UTC (SQLite ``datetime('now')``). The operator
-lives in one place, so the dashboard should DISPLAY local time and token usage
-should roll over on the LOCAL day boundary — not UTC.
-
+All persisted timestamps are stored in local time (SQLite ``datetime('now','localtime')``).
 Timezone is ``CIO_TZ`` (IANA name), defaulting to America/Vancouver. Every helper
 is defensive: a bad zone name or unparseable timestamp degrades gracefully instead
 of raising into a render path.
@@ -45,11 +42,11 @@ def today_local() -> str:
 
 def utc_to_local(ts: str | None) -> str:
     """
-    Convert a stored UTC timestamp string to local-zone "YYYY-MM-DD HH:MM:SS".
+    Format a stored local-time timestamp for display ("YYYY-MM-DD HH:MM:SS").
 
-    Accepts the SQLite ``datetime('now')`` format ("YYYY-MM-DD HH:MM:SS", naive UTC)
-    and ISO variants. On any parse failure returns the original string unchanged so
-    a display never breaks.
+    Timestamps are stored in local (CIO_TZ) time via ``datetime('now','localtime')``,
+    so no timezone conversion is needed — just parse and reformat for consistency.
+    On any parse failure returns the original string unchanged so a display never breaks.
     """
     if not ts:
         return ""
@@ -57,9 +54,7 @@ def utc_to_local(ts: str | None) -> str:
         dt = datetime.fromisoformat(ts.strip().replace("Z", "+00:00"))
     except ValueError:
         return ts
-    if dt.tzinfo is None:                 # SQLite datetime('now') is naive UTC
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(local_tz()).strftime("%Y-%m-%d %H:%M:%S")
+    return dt.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def local_day(ts: str | None) -> str:

@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS research_reports (
     challenge_coverage  INTEGER,
     tirf_score          INTEGER,
     review_json         TEXT,
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at          TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_research_ticker ON research_reports(ticker, version);
 
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS evidence_items (
     recency_score INTEGER,
     relevance_score INTEGER,
     item_score    INTEGER,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_report ON evidence_items(report_id);
 
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS assumptions (
     name        TEXT,
     value       TEXT,
     confidence  TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_assumptions_report ON assumptions(report_id);
 
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS reasoning_chains (
     role_key    TEXT,
     step_no     INTEGER,
     statement   TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_reasoning_report ON reasoning_chains(report_id);
 
@@ -98,7 +98,7 @@ CREATE TABLE IF NOT EXISTS counterarguments (
     report_id   TEXT,
     role_key    TEXT,
     argument    TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_counter_report ON counterarguments(report_id);
 
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS source_references (
     reference       TEXT,
     source_tier     TEXT,
     reliability_score INTEGER,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at      TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_source_report ON source_references(report_id);
 
@@ -122,7 +122,7 @@ CREATE TABLE IF NOT EXISTS committee_sessions (
     debate_on     INTEGER,
     n_specialists INTEGER,
     n_challenges  INTEGER,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 CREATE TABLE IF NOT EXISTS committee_challenges (
@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS committee_challenges (
     target_key       TEXT,
     target_title     TEXT,
     challenge        TEXT,
-    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at       TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_challenge_report ON committee_challenges(report_id);
 
@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS committee_responses (
     challenge_id  INTEGER,
     responder_key TEXT,
     response      TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 """
 

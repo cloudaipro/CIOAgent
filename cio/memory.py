@@ -95,7 +95,7 @@ def remember(value: str, key: str | None = None, scope: str = "global",
                 "VALUES (?,?,?,?,?,?) "
                 "ON CONFLICT(scope,key) DO UPDATE SET value=excluded.value, "
                 "tier=excluded.tier, importance=excluded.importance, "
-                "source=excluded.source, updated_at=datetime('now')",
+                "source=excluded.source, updated_at=datetime('now','localtime')",
                 (scope, tier, key, value, importance, source),
             )
             nid = conn.execute("SELECT id FROM mem_notes WHERE scope=? AND key=?",
@@ -181,7 +181,7 @@ def bump(note_id: int, by: int = 1, db_path=db.DB_PATH) -> None:
     """Record a use (hit) and refresh recency — feeds retention/eviction."""
     conn = db.connect(db_path)
     with conn:
-        conn.execute("UPDATE mem_notes SET hits=hits+?, updated_at=datetime('now') WHERE id=?",
+        conn.execute("UPDATE mem_notes SET hits=hits+?, updated_at=datetime('now','localtime') WHERE id=?",
                      (by, note_id))
     conn.close()
 
@@ -241,7 +241,7 @@ def evict(scope: str, max_notes: int = MAX_NOTES_PER_SCOPE, db_path=db.DB_PATH) 
     conn = db.connect(db_path)
     rows = conn.execute(
         "SELECT id, importance, hits, tier, source, "
-        "julianday('now') - julianday(updated_at) AS age FROM mem_notes WHERE scope=?",
+        "julianday('now','localtime') - julianday(updated_at) AS age FROM mem_notes WHERE scope=?",
         (scope,),
     ).fetchall()
     overflow = len(rows) - max_notes
@@ -265,7 +265,7 @@ def promote_hot(scope: str, hits_threshold: int = PROMOTE_HITS, db_path=db.DB_PA
     conn = db.connect(db_path)
     with conn:
         cur = conn.execute(
-            "UPDATE mem_notes SET tier='hot', updated_at=datetime('now') "
+            "UPDATE mem_notes SET tier='hot', updated_at=datetime('now','localtime') "
             "WHERE scope=? AND tier='warm' AND hits>=?",
             (scope, hits_threshold),
         )
@@ -404,7 +404,7 @@ def set_profile(scope: str = "global", db_path=db.DB_PATH, **fields) -> None:
     conn = db.connect(db_path)
     with conn:
         conn.execute("INSERT OR IGNORE INTO user_profile (scope) VALUES (?)", (scope,))
-        sets = ", ".join(f"{k}=?" for k in cols) + ", updated_at=datetime('now')"
+        sets = ", ".join(f"{k}=?" for k in cols) + ", updated_at=datetime('now','localtime')"
         conn.execute(f"UPDATE user_profile SET {sets} WHERE scope=?",
                      (*cols.values(), scope))
     conn.close()
@@ -448,9 +448,9 @@ def set_subscribed(chat_id: int, subscribed: bool, db_path=db.DB_PATH) -> None:
     with conn:
         conn.execute(
             "INSERT INTO chats (chat_id, subscribed, updated_at) "
-            "VALUES (?, ?, datetime('now')) "
+            "VALUES (?, ?, datetime('now','localtime')) "
             "ON CONFLICT(chat_id) DO UPDATE SET subscribed=excluded.subscribed, "
-            "updated_at=datetime('now')",
+            "updated_at=datetime('now','localtime')",
             (chat_id, 1 if subscribed else 0),
         )
     conn.close()
@@ -500,9 +500,9 @@ def set_session_id(chat_id: int, session_id: str, db_path=db.DB_PATH) -> None:
     with conn:
         conn.execute(
             "INSERT INTO chats (chat_id, session_id, updated_at) "
-            "VALUES (?, ?, datetime('now')) "
+            "VALUES (?, ?, datetime('now','localtime')) "
             "ON CONFLICT(chat_id) DO UPDATE SET session_id=excluded.session_id, "
-            "updated_at=datetime('now')",
+            "updated_at=datetime('now','localtime')",
             (chat_id, session_id),
         )
     conn.close()
