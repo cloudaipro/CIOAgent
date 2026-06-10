@@ -667,6 +667,11 @@ def main() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env (get one from @BotFather).")
+    # Stamp the code version this process runs so a stale process (running code
+    # older than the repo) is detectable — see cio/version.py for the incident.
+    from . import version as _version
+    boot = _version.stamp_boot()
+    log.info("CIO bot booting: version %s (pid %s)", boot["version"], boot["pid"])
     app = (
         Application.builder()
         .token(token)

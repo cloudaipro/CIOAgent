@@ -260,7 +260,28 @@ def _page(title: str, body: str, level: int) -> str:
     )
 
 
-def render_overview(usage_today, runs, turns, level: int, token_q: str = "") -> str:
+def render_overview(usage_today, runs, turns, level: int, token_q: str = "",
+                    runtime: dict | None = None) -> str:
+    # Runtime health strip: which code the live process runs vs what's on disk,
+    # plus last night's invariant violations. A stale process (the 2026-06-10
+    # incident: bot ran pre-fix code for hours after the commit) shows red here.
+    rt = ""
+    if runtime:
+        stale = runtime.get("stale")
+        ver_line = (f"running <code>{esc(runtime.get('boot_version') or '?')}</code> "
+                    f"since {esc(runtime.get('boot_time') or '?')} "
+                    f"(pid {esc(runtime.get('boot_pid') or '?')}) · "
+                    f"source tree <code>{esc(runtime.get('repo_version') or '?')}</code>")
+        if stale:
+            ver_line += f"<br><b style='color:#c0392b'>⚠ {esc(stale)}</b>"
+        viol = runtime.get("violations") or []
+        if viol:
+            v_line = "<br>".join(f"⚠ {esc(v)}" for v in viol)
+            v_block = f"<p style='color:#c0392b'><b>Invariant violations:</b><br>{v_line}</p>"
+        else:
+            v_block = "<p style='color:#27ae60'>invariants: OK</p>"
+        rt = f"<h2>Runtime</h2><p>{ver_line}</p>{v_block}"
+
     rows = "".join(
         f"<tr><td>{esc(u['service'])}</td><td class='num'>{esc(u['tokens'])}</td></tr>"
         for u in usage_today
@@ -283,6 +304,7 @@ def render_overview(usage_today, runs, turns, level: int, token_q: str = "") -> 
 
     body = (
         "<h1>Overview</h1>"
+        f"{rt}"
         "<h2>Tokens used today (local)</h2>"
         f"<table><tr><th>Service</th><th>Tokens</th></tr>{rows}</table>"
         "<h2>Recent committee runs</h2>"

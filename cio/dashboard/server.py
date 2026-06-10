@@ -29,11 +29,33 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from cio import convlog, db, devcapture, econ_calendar, memory, portfolio, watchlist
+from cio import convlog, db, devcapture, econ_calendar, memory, portfolio, version, watchlist
 from cio.committee import agent_memory, models, sanitizer_log, transcript, usage
 from . import views
 
 log = logging.getLogger("cio.dashboard")
+
+
+def _runtime_info() -> dict:
+    """Runtime health for the overview strip: running vs on-disk code version,
+    stale-process warning, and last maintenance's invariant violations.
+    Best-effort — the overview must render even if git/meta are unavailable."""
+    try:
+        import json
+        boot = version.boot_info()
+        raw = memory.get_meta("last_invariant_violations")
+        violations = json.loads(raw) if raw else []
+        return {
+            "boot_version": boot["version"],
+            "boot_time": boot["time"],
+            "boot_pid": boot["pid"],
+            "repo_version": version.describe(),
+            "stale": version.stale_process_check(),
+            "violations": violations,
+        }
+    except Exception:
+        log.warning("runtime info unavailable", exc_info=True)
+        return {}
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -132,7 +154,8 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/":
                 html = views.render_overview(
                     usage.recent(days=1), transcript.list_runs(10),
-                    memory.conv_history(limit=10), level)
+                    memory.conv_history(limit=10), level,
+                    runtime=_runtime_info())
             elif path == "/usage":
                 html = views.render_usage(usage.recent(days=30), level)
             elif path == "/telegram":
