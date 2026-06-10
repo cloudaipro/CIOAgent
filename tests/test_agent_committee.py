@@ -84,6 +84,10 @@ def test_produce_report_tags_source_for_capture(monkeypatch):
 
 def test_ask_threads_docs_from_run_query(monkeypatch):
     """ask() returns (text, images, docs); docs come from the turn's _last_docs."""
+    # Isolate day-boundary persistence: no real-DB writes, no day-roll.
+    monkeypatch.setattr("cio.agent.memory.get_last_turn_day", lambda *a, **k: None)
+    monkeypatch.setattr("cio.agent.memory.set_last_turn_day", lambda *a, **k: None)
+
     async def run():
         a = agent.CIOAgent(chat_id=7)
 
@@ -99,3 +103,17 @@ def test_ask_threads_docs_from_run_query(monkeypatch):
     text, images, docs, leftover = _run(run())
     assert (text, images, docs) == ("done", [], ["/tmp/report.pdf"])
     assert leftover == []   # drained so a later checkpoint turn can't resend it
+
+
+def test_usage_tokens_handles_dict_object_and_none():
+    """_usage_tokens sums input+output from an SDK usage dict OR object, 0 if absent —
+    so a chat turn logs a real token count instead of 0 (ResultMessage.usage is a dict)."""
+    from cio.agent import _usage_tokens
+    assert _usage_tokens(None) == 0
+    assert _usage_tokens({}) == 0
+    assert _usage_tokens({"input_tokens": 120, "output_tokens": 30}) == 150
+    assert _usage_tokens({"input_tokens": None, "output_tokens": 7}) == 7  # nulls -> 0
+
+    class _U:
+        input_tokens, output_tokens = 3, 4
+    assert _usage_tokens(_U()) == 7

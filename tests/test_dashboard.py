@@ -55,6 +55,31 @@ def test_render_escapes_user_content():
     assert "&lt;script&gt;" in html
 
 
+def test_render_playbooks_promote_button_only_for_chat_scope():
+    """The /playbooks page offers 'Promote to global' for chat-scoped playbooks only."""
+    rows = [
+        {"id": 2, "scope": "global", "name": "mre", "steps": "s", "hits": 3, "created_at": "t"},
+        {"id": 5, "scope": "chat:8535885767", "name": "mre", "steps": "s", "hits": 0, "created_at": "t"},
+    ]
+    html = views.render_playbooks(rows, level=1)
+    assert html.count("value='promote'") == 1        # exactly the chat-scoped row
+    assert "Promote to global" in html
+    assert "pid' value='5'" in html                  # promote targets the chat copy
+
+
+def test_render_configure_detailed_log_toggle():
+    """The Configure tab exposes an enable/disable toggle for detailed history."""
+    cfg = {"agents": {}, "defaults": {}}
+    sugg = {"claude": []}
+    off = views.render_configure(cfg, 1, ["claude"], sugg, detailed_log=False)
+    assert "Detailed conversation history" in off
+    assert "value='detailed_log'" in off and "Enable detailed history" in off
+    on = views.render_configure(cfg, 1, ["claude"], sugg, detailed_log=True)
+    assert "Disable detailed history" in on and "/detailed" in on
+    locked = views.render_configure(cfg, 1, ["claude"], sugg, detailed_locked_by_env=True)
+    assert "Locked by" in locked and "CIO_DETAILED_LOG" in locked
+
+
 def test_render_committee_run_shows_sent_and_returned():
     calls = [{
         "run_id": "r1", "symbol": "AAPL", "role_key": "risk", "service": "openai",
@@ -163,7 +188,7 @@ def _get(port, path, headers=None):
 
 
 def test_routes_render(live):
-    for path in ("/", "/usage", "/telegram", "/subscribers", "/committee",
+    for path in ("/", "/usage", "/telegram", "/detailed", "/subscribers", "/committee",
                  "/committee/r1", "/portfolio"):
         status, body, _ = _get(live, path)
         assert status == 200, path

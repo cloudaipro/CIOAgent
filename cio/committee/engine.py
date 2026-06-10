@@ -61,6 +61,11 @@ def _capture(service: str | None, model: str | None, system_prompt: str,
         tokens=tok, run_id=_RUN_ID.get(), symbol=_RUN_SYMBOL.get(),
         source=_RUN_SOURCE.get(),
     )
+    # Detailed conversation history (opt-in, off by default): full-fidelity text log.
+    from .. import convlog
+    convlog.log_call(service, model, system_prompt, user_prompt, text, tok,
+                     scope=(f"committee:{role_key}" if role_key else "committee"),
+                     role=role_key, kind="committee")
 
 # ---------------------------------------------------------------------------
 # Parallel / concurrency config

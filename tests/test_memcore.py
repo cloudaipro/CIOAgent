@@ -115,6 +115,49 @@ def test_playbooks():
         pass
 
 
+def test_promote_playbook():
+    """A chat-scoped playbook is moved to global (overwriting same-named global) and
+    its chat copy removed; promoting an already-global one is a no-op."""
+    p = _tmpdb()
+    memory.add_playbook("monthly_red_events", "old global steps", scope="global", db_path=p)
+    cid = memory.add_playbook("monthly_red_events", "Step one. fresh chat steps",
+                              scope="chat:7", db_path=p)
+    res = memory.promote_playbook(cid, db_path=p)
+    assert res["promoted"] is True and res["name"] == "monthly_red_events"
+    # global now carries the chat-scoped steps; the chat copy is gone
+    assert "fresh chat steps" in memory.get_playbook("monthly_red_events", scope="global", db_path=p)["steps"]
+    assert [r for r in memory.list_all_playbooks(db_path=p) if r["scope"] == "chat:7"] == []
+    # promoting the (now) global one is a no-op
+    res2 = memory.promote_playbook(res["global_id"], db_path=p)
+    assert res2["promoted"] is False
+    # unknown id raises
+    try:
+        memory.promote_playbook(999999, db_path=p)
+        raise AssertionError("expected ValueError for missing id")
+    except ValueError:
+        pass
+
+
+def test_add_playbook_created_at_is_local():
+    """add_playbook must stamp created_at in LOCAL time even on a legacy table whose
+    column default is UTC (the pre-timezone-fix default CREATE-IF-NOT-EXISTS can't change)."""
+    p = _tmpdb()
+    conn = db.connect(p)
+    with conn:                                   # simulate the legacy UTC-default table
+        conn.execute("DROP TABLE playbooks")
+        conn.execute("CREATE TABLE playbooks (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                     "scope TEXT NOT NULL DEFAULT 'global', name TEXT NOT NULL, "
+                     "steps TEXT NOT NULL, hits INTEGER NOT NULL DEFAULT 0, "
+                     "created_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(scope,name))")
+    conn.close()
+    memory.add_playbook("x", "Step one. do a thing", db_path=p)
+    conn = db.connect(p)
+    got = conn.execute("SELECT created_at FROM playbooks WHERE name='x'").fetchone()[0]
+    local = conn.execute("SELECT datetime('now','localtime')").fetchone()[0]
+    conn.close()
+    assert got[:16] == local[:16]                # explicit localtime, not the UTC default
+
+
 def test_rolling_session_cadence():
     """Drive ask() with stubs (no LLM): a checkpoint must fire every ROLL_TURNS."""
     import cio.agent as agent
@@ -122,7 +165,12 @@ def test_rolling_session_cadence():
     agent.ROLL_TURNS, agent.NUDGE_TURNS = 10, 0
     recorded = []
     orig_digest = agent.memory.add_digest
+    # Isolate the day-boundary persistence so this test neither touches the real DB
+    # nor day-rolls (we are exercising the ROLL_TURNS path only).
+    orig_get_day, orig_set_day = agent.memory.get_last_turn_day, agent.memory.set_last_turn_day
     agent.memory.add_digest = lambda *a, **k: recorded.append(1)
+    agent.memory.get_last_turn_day = lambda *a, **k: None
+    agent.memory.set_last_turn_day = lambda *a, **k: None
 
     class Dummy:
         async def disconnect(self): pass
@@ -145,6 +193,7 @@ def test_rolling_session_cadence():
         assert turns < agent.ROLL_TURNS                # counters reset after roll
     finally:
         agent.memory.add_digest = orig_digest
+        agent.memory.get_last_turn_day, agent.memory.set_last_turn_day = orig_get_day, orig_set_day
         agent.ROLL_TURNS, agent.NUDGE_TURNS = old_roll, old_nudge
 
 
@@ -172,6 +221,42 @@ def test_cold_boot_continuity():
     hits = recall.search("protect against the interest-rate decision downside",
                           k=3, scope="chat:1", kinds=("turn",), db_path=p)
     assert tid in [h["id"] for h in hits]           # old turn still findable
+
+
+def test_digest_hybrid_search():
+    """Past session digests are long-term searchable by MEANING, scoped per chat."""
+    p = _tmpdb()
+    did = memory.add_digest(1, "s", "Decided to trim semiconductor exposure ahead of the "
+                            "Fed and keep a cash buffer for volatility.", db_path=p)
+    # A different chat's digest must NOT leak into chat 1's recall.
+    other = memory.add_digest(2, "s2", "Talked about dividend aristocrats for income.", db_path=p)
+    hits = recall.search("how were we positioning chips before the rate decision",
+                         k=5, scope="chat:1", kinds=("digest",), db_path=p)
+    ids = [h["id"] for h in hits]
+    assert did in ids                               # found by semantic match
+    assert other not in ids                          # chat-2 digest filtered out
+    assert {h["kind"] for h in hits} == {"digest"}
+
+
+def test_log_turn_indexes_for_semantic_recall(monkeypatch):
+    """log_turn must embed each turn (not just FTS) so cold-store hybrid recall has
+    BOTH halves. Regression: turns used to land with no vector."""
+    import cio.devcapture as devcapture
+    monkeypatch.setattr(devcapture, "telegram_enabled", lambda: True)
+    p = _tmpdb()
+    memory.log_turn(5, "s", "Should I hedge tech before the Fed?",
+                    "Consider trimming semiconductor exposure into the rate decision.",
+                    db_path=p)
+    # both turns embedded
+    conn = db.connect(p)
+    turns = conn.execute("SELECT COUNT(*) FROM conv_turns").fetchone()[0]
+    vecs = conn.execute("SELECT COUNT(*) FROM turn_vec").fetchone()[0]
+    conn.close()
+    assert turns == 2 and vecs == 2          # no turn left without a vector
+    # semantic recall (phrased differently) finds it via the vector half
+    hits = recall.search("protect chip positions before the interest-rate meeting",
+                         k=5, scope="chat:5", kinds=("turn",), db_path=p)
+    assert hits and all(h["kind"] == "turn" for h in hits)
 
 
 def test_promote_hot():

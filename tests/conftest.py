@@ -12,6 +12,12 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# Force the detailed-history feature OFF for the whole suite: convlog.enabled()
+# lets the env var win and lock the value, so this overrides any persisted
+# dashboard setting and stops agent/committee tests writing to the real logs/ dir.
+# (test_convlog overrides this per-test via monkeypatch.)
+os.environ["CIO_DETAILED_LOG"] = "0"
+
 import numpy as np
 import pandas as pd
 import pytest

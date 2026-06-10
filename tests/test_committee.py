@@ -1309,30 +1309,31 @@ class TestModelsConfig:
         load_config.cache_clear()
 
     def test_resolve_chain_cio_returns_three_links(self):
-        """Default YAML maps cio → a 3-link chain: nim → openai → claude."""
+        """Default YAML maps cio → a 3-link chain: openai → claude → nim
+        (premium → premium → cheap), with daily limits on the two premium links."""
         from cio.committee.models import resolve_chain
         chain = resolve_chain("cio")
         assert len(chain) == 3
-        assert chain[0]["service"] == "nim"
-        assert chain[1]["service"] == "openai"
-        assert chain[2]["service"] == "claude"
+        assert chain[0]["service"] == "openai"
+        assert chain[1]["service"] == "claude"
+        assert chain[2]["service"] == "nim"
         assert chain[0].get("daily_limit") == 200000
         assert chain[1].get("daily_limit") == 200000
         assert "daily_limit" not in chain[2]
 
-    def test_resolve_market_returns_nim(self):
-        """Default YAML maps market → ('nim', 'nvidia/nemotron-3-ultra-550b-a55b')."""
+    def test_resolve_market_returns_claude(self):
+        """Default YAML maps the market specialist → ('claude', 'claude-opus-4-8')."""
         from cio.committee.models import resolve
         service, model = resolve("market")
-        assert service == "nim"
-        assert model == "nvidia/nemotron-3-ultra-550b-a55b"
+        assert service == "claude"
+        assert model == "claude-opus-4-8"
 
     def test_resolve_unknown_key_falls_back_to_defaults(self):
-        """An unrecognised role_key falls through to defaults (nim/nemotron)."""
+        """An unrecognised role_key falls through to defaults (claude/opus)."""
         from cio.committee.models import resolve
         service, model = resolve("nonexistent_role_xyz")
-        assert service == "nim"
-        assert model == "nvidia/nemotron-3-ultra-550b-a55b"
+        assert service == "claude"
+        assert model == "claude-opus-4-8"
 
     def test_missing_file_uses_builtin_defaults(self, tmp_path):
         """Missing config file → built-in defaults, no crash."""
@@ -1393,9 +1394,9 @@ class TestModelsConfig:
 class TestAskRoleRouting:
     """ask_role routes to the correct backend based on role_key config.
 
-    Updated for Step 8: all _ask_* backends now return (text, tokens) tuples;
-    CIO now starts at openai (chain head) not claude; usage.record is mocked to
-    avoid DB writes.
+    All _ask_* backends return (text, tokens) tuples; the CIO chain head is
+    openai (premium → premium → cheap = openai → claude → nim); specialists are
+    single-link claude. usage.record is mocked to avoid DB writes.
     """
 
     def _run(self, coro):
@@ -1414,8 +1415,8 @@ class TestAskRoleRouting:
         monkeypatch.setattr("cio.committee.engine._usage.record", lambda *a, **kw: None)
         monkeypatch.setattr("cio.committee.engine._usage.over_budget", lambda *a, **kw: False)
 
-    def test_role_key_cio_routes_to_nim_first(self, monkeypatch):
-        """ask_role with role_key='cio' hits _ask_nim (chain head) when budget is fresh."""
+    def test_role_key_cio_routes_to_openai_first(self, monkeypatch):
+        """ask_role with role_key='cio' hits _ask_openai (chain head) when budget is fresh."""
         openai_calls = []
         claude_calls = []
         nim_calls = []
@@ -1439,13 +1440,13 @@ class TestAskRoleRouting:
 
         from cio.committee.engine import ask_role
         result = self._run(ask_role("sys", "user", role_key="cio"))
-        assert result == "nim-response"
-        assert len(nim_calls) == 1
+        assert result == "openai-response"
+        assert len(openai_calls) == 1
         assert len(claude_calls) == 0
-        assert len(openai_calls) == 0
+        assert len(nim_calls) == 0
 
-    def test_role_key_market_routes_to_nim(self, monkeypatch):
-        """ask_role with role_key='market' hits _ask_nim (single-link chain)."""
+    def test_role_key_market_routes_to_claude(self, monkeypatch):
+        """ask_role with role_key='market' hits _ask_claude (single-link chain)."""
         claude_calls = []
         nim_calls = []
 
@@ -1463,9 +1464,9 @@ class TestAskRoleRouting:
 
         from cio.committee.engine import ask_role
         result = self._run(ask_role("sys", "user", role_key="market"))
-        assert result == "nim-response"
-        assert len(nim_calls) == 1
-        assert len(claude_calls) == 0
+        assert result == "claude-response"
+        assert len(claude_calls) == 1
+        assert len(nim_calls) == 0
 
     def test_explicit_service_overrides_config(self, monkeypatch):
         """Explicit service='claude' overrides the config even for a nim role."""

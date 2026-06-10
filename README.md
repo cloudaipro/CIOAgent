@@ -371,6 +371,17 @@ Bind/auth: `CIO_DASH_HOST` / `CIO_DASH_PORT`, and an optional `CIO_DASH_TOKEN`
 shared secret (append `?token=…` once; a session cookie carries it after). Keep
 the bind on `127.0.0.1` — it serves your own financial data.
 
+**Detailed conversation history** (opt-in, off by default). Logs every LLM call —
+main-agent turns and each committee agent call — verbatim to day-based text files:
+`logs/<yyyy>/<mm>/<yyyy-mm-dd>.txt` (base dir `CIO_LOG_DIR`, default `logs/`). Each
+entry records the system prompt, user prompt, response, the LLM service provider +
+model, and token usage. Toggle it from the **Configure** tab (persisted in
+`dashboard_settings.json`, shared across the bot + dashboard processes) or force it
+with the `CIO_DETAILED_LOG` env var (when set, it wins and locks the dashboard toggle).
+View on the dashboard **Detailed history** tab (`/detailed`): lists logged days, shows
+a selected day's full log, and deletes a day — mirroring the Telegram tab. Files are
+git-ignored; logging never breaks a turn.
+
 ## Roadmap
 
 - Accounting domain (ledgers, COGS, P&L) and inventory stock — share `db.py`.

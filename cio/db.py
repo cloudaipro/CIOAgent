@@ -207,11 +207,22 @@ CREATE TRIGGER IF NOT EXISTS conv_turns_ad AFTER DELETE ON conv_turns BEGIN
     INSERT INTO turns_fts(turns_fts, rowid, content) VALUES ('delete', old.id, old.content);
 END;
 
+-- Session digests are searchable too (long-term recall over past-day/period
+-- summaries), kept in sync by triggers like turns. Digests are insert/delete only.
+CREATE VIRTUAL TABLE IF NOT EXISTS digests_fts USING fts5(summary, content='session_digests', content_rowid='id');
+CREATE TRIGGER IF NOT EXISTS session_digests_ai AFTER INSERT ON session_digests BEGIN
+    INSERT INTO digests_fts(rowid, summary) VALUES (new.id, new.summary);
+END;
+CREATE TRIGGER IF NOT EXISTS session_digests_ad AFTER DELETE ON session_digests BEGIN
+    INSERT INTO digests_fts(digests_fts, rowid, summary) VALUES ('delete', old.id, old.summary);
+END;
+
 -- sqlite-vec semantic layer (vec0 virtual tables; the extension is loaded on
--- every connect, so these CREATE statements succeed). embedding dim = 384
--- (fastembed BAAI/bge-small-en-v1.5).
-CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec  USING vec0(note_id INTEGER PRIMARY KEY, embedding float[768]);
-CREATE VIRTUAL TABLE IF NOT EXISTS turn_vec USING vec0(turn_id INTEGER PRIMARY KEY, embedding float[768]);
+-- every connect, so these CREATE statements succeed). embedding dim = 768
+-- (fastembed BAAI/bge-base-en-v1.5); see EMBED_DIM below.
+CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec    USING vec0(note_id   INTEGER PRIMARY KEY, embedding float[768]);
+CREATE VIRTUAL TABLE IF NOT EXISTS turn_vec   USING vec0(turn_id   INTEGER PRIMARY KEY, embedding float[768]);
+CREATE VIRTUAL TABLE IF NOT EXISTS digest_vec USING vec0(digest_id INTEGER PRIMARY KEY, embedding float[768]);
 """
 
 # Embedding dimension for the fastembed model; sqlite-vec vec0 tables above must
@@ -273,6 +284,7 @@ def _drop_stale_vec(conn: sqlite3.Connection) -> bool:
     if recorded != EMBED_DIM:
         conn.execute("DROP TABLE IF EXISTS mem_vec")
         conn.execute("DROP TABLE IF EXISTS turn_vec")
+        conn.execute("DROP TABLE IF EXISTS digest_vec")
         return True
     return False
 
