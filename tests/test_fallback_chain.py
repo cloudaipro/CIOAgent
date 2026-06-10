@@ -108,12 +108,12 @@ class TestResolveChain:
         load_config.cache_clear()
 
     def test_cio_chain_has_three_links(self):
-        """resolve_chain('cio') → [nim/openai/claude] with two limits."""
+        """resolve_chain('cio') → [openai/claude/nim] with two limits."""
         from cio.committee.models import resolve_chain
         chain = resolve_chain("cio")
         assert len(chain) == 3
         svcs = [link["service"] for link in chain]
-        assert svcs == ["nim", "openai", "claude"]
+        assert svcs == ["openai", "claude", "nim"]
         assert chain[0].get("daily_limit") == 200000
         assert chain[1].get("daily_limit") == 200000
         assert "daily_limit" not in chain[2]
@@ -123,15 +123,15 @@ class TestResolveChain:
         from cio.committee.models import resolve_chain
         chain = resolve_chain("market")
         assert len(chain) == 1
-        assert chain[0]["service"] == "nim"
+        assert chain[0]["service"] == "claude"
         assert "daily_limit" not in chain[0]
 
-    def test_unknown_role_falls_back_to_nim(self):
-        """resolve_chain for an unknown role → 1 nim link."""
+    def test_unknown_role_falls_back_to_default(self):
+        """resolve_chain for an unknown role → 1 default (claude) link."""
         from cio.committee.models import resolve_chain
         chain = resolve_chain("xyz_unknown")
         assert len(chain) == 1
-        assert chain[0]["service"] == "nim"
+        assert chain[0]["service"] == "claude"
 
 
 # ---------------------------------------------------------------------------
@@ -277,35 +277,20 @@ class TestChainSelection:
         monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
         return calls
 
-    def test_fresh_budget_uses_nim(self, monkeypatch):
-        """With all budgets fresh, CIO call hits nim (chain head)."""
-        calls = self._patch_backends(monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("nim-answer", 100))
-
-        from cio.committee.engine import ask_role
-        result = _run(ask_role("sys", "user", role_key="cio"))
-        assert result == "nim-answer"
-        assert len(calls["nim"]) == 1
-        assert len(calls["claude"]) == 0
-        assert len(calls["openai"]) == 0
-
-    def test_nim_over_budget_uses_openai(self, monkeypatch):
-        """Pre-seeded nim at limit → skipped; CIO call hits openai."""
-        from cio.committee.usage import record
-        record("nim", 200000, db_path=self.db)
-
+    def test_fresh_budget_uses_openai(self, monkeypatch):
+        """With all budgets fresh, CIO call hits openai (chain head)."""
         calls = self._patch_backends(monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("nim-answer", 100))
 
         from cio.committee.engine import ask_role
         result = _run(ask_role("sys", "user", role_key="cio"))
         assert result == "openai-answer"
-        assert len(calls["nim"]) == 0
         assert len(calls["openai"]) == 1
         assert len(calls["claude"]) == 0
+        assert len(calls["nim"]) == 0
 
-    def test_nim_and_openai_over_budget_uses_claude(self, monkeypatch):
-        """Both nim and openai at limit → CIO call hits claude (no limit, last resort)."""
+    def test_openai_over_budget_uses_claude(self, monkeypatch):
+        """Pre-seeded openai at limit → skipped; CIO call hits claude (2nd link)."""
         from cio.committee.usage import record
-        record("nim", 200000, db_path=self.db)
         record("openai", 200000, db_path=self.db)
 
         calls = self._patch_backends(monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("nim-answer", 100))
@@ -313,20 +298,35 @@ class TestChainSelection:
         from cio.committee.engine import ask_role
         result = _run(ask_role("sys", "user", role_key="cio"))
         assert result == "claude-answer"
-        assert len(calls["nim"]) == 0
         assert len(calls["openai"]) == 0
         assert len(calls["claude"]) == 1
+        assert len(calls["nim"]) == 0
 
-    def test_nim_empty_result_falls_through_to_openai(self, monkeypatch):
-        """When _ask_nim returns ('', 0) (rate-limit/error), chain continues to openai."""
-        calls = self._patch_backends(monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("", 0))
+    def test_openai_and_claude_over_budget_uses_nim(self, monkeypatch):
+        """Both openai and claude at limit → CIO call hits nim (no limit, last resort)."""
+        from cio.committee.usage import record
+        record("openai", 200000, db_path=self.db)
+        record("claude", 200000, db_path=self.db)
+
+        calls = self._patch_backends(monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("nim-answer", 100))
 
         from cio.committee.engine import ask_role
         result = _run(ask_role("sys", "user", role_key="cio"))
-        assert result == "openai-answer"
-        assert len(calls["nim"]) == 1
-        assert len(calls["openai"]) == 1
+        assert result == "nim-answer"
+        assert len(calls["openai"]) == 0
         assert len(calls["claude"]) == 0
+        assert len(calls["nim"]) == 1
+
+    def test_openai_empty_result_falls_through_to_claude(self, monkeypatch):
+        """When _ask_openai returns ('', 0) (key missing/error), chain continues to claude."""
+        calls = self._patch_backends(monkeypatch, ("", 0), ("claude-answer", 100), ("nim-answer", 100))
+
+        from cio.committee.engine import ask_role
+        result = _run(ask_role("sys", "user", role_key="cio"))
+        assert result == "claude-answer"
+        assert len(calls["openai"]) == 1
+        assert len(calls["claude"]) == 1
+        assert len(calls["nim"]) == 0
 
     def test_all_empty_returns_empty_string(self, monkeypatch):
         """If every link returns empty, ask_role returns ''."""
@@ -349,16 +349,16 @@ class TestChainSelection:
         _run(ask_role("sys", "user", role_key="cio"))
         assert used_today("nim", db_path=self.db) == 350
 
-    def test_specialist_single_link_uses_nim(self, monkeypatch):
-        """A specialist role (e.g. market) dispatches to nim via its 1-link chain."""
+    def test_specialist_single_link_uses_claude(self, monkeypatch):
+        """A specialist role (e.g. market) dispatches to claude via its 1-link chain."""
         calls = self._patch_backends(monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("nim-answer", 50))
 
         from cio.committee.engine import ask_role
         result = _run(ask_role("sys", "user", role_key="market"))
-        assert result == "nim-answer"
-        assert len(calls["nim"]) == 1
+        assert result == "claude-answer"
+        assert len(calls["claude"]) == 1
         assert len(calls["openai"]) == 0
-        assert len(calls["claude"]) == 0
+        assert len(calls["nim"]) == 0
 
     def test_explicit_service_override_bypasses_chain(self, monkeypatch):
         """Explicit service='claude' single-dispatches; chain is not used."""

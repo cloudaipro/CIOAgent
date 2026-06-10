@@ -21,33 +21,36 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _BUILTIN: dict[str, Any] = {
-    "defaults": {"service": "nim", "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+    "defaults": {"service": "claude", "model": "claude-opus-4-8"},
     "agents": {
-        "market":    {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "macro":     {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "equity":    {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "industry":  {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "valuation": {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "quant":     {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "etf":       {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "risk":      {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "catalyst":  {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
-        "moderator": {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "market":    {"service": "claude", "model": "claude-opus-4-8"},
+        "macro":     {"service": "claude", "model": "claude-opus-4-8"},
+        "equity":    {"service": "claude", "model": "claude-opus-4-8"},
+        "industry":  {"service": "claude", "model": "claude-opus-4-8"},
+        "valuation": {"service": "claude", "model": "claude-opus-4-8"},
+        "quant":     {"service": "claude", "model": "claude-opus-4-8"},
+        "etf":       {"service": "claude", "model": "claude-opus-4-8"},
+        "risk":      {"service": "claude", "model": "claude-opus-4-8"},
+        "catalyst":  {"service": "claude", "model": "claude-opus-4-8"},
+        "moderator": {"service": "claude", "model": "claude-opus-4-8"},
+        # cio / wma fallback chain shape: premium → premium → cheap, so the
+        # critical decision/briefing roles degrade gracefully when a backend is
+        # down or over its daily budget.
         "cio": {
             "chain": [
-                {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b", "daily_limit": 200000},
-                {"service": "claude", "model": "claude-opus-4-8",                   "daily_limit": 200000},
-                {"service": "openai", "model": "gpt-5.5-2026-04-23"},  # last resort
+                {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+                {"service": "claude", "model": "claude-opus-4-8",    "daily_limit": 200000},
+                {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
             ]
         },
         "wma": {
             "chain": [
-                {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b", "daily_limit": 200000},
-                {"service": "claude", "model": "claude-opus-4-8",                   "daily_limit": 200000},
-                {"service": "openai", "model": "gpt-5.5-2026-04-23"},  # last resort
+                {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+                {"service": "claude", "model": "claude-opus-4-8",    "daily_limit": 200000},
+                {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
             ]
         },
-        "translator": {"service": "nim",    "model": "nvidia/nemotron-3-ultra-550b-a55b"},
+        "translator": {"service": "claude", "model": "claude-sonnet-4-6"},
     },
     "nim": {
         "base_url": "https://integrate.api.nvidia.com/v1",
@@ -115,7 +118,7 @@ def resolve(role_key: str) -> tuple[str, str | None]:
     """
     Return (service, model) for the given agent role_key.
 
-    Falls back to config defaults, then hard-coded ('nim', 'minimaxai/minimax-m2.7').
+    Falls back to config defaults, then hard-coded ('claude', 'claude-opus-4-8').
     Never raises.
     """
     cfg = load_config()
@@ -123,7 +126,7 @@ def resolve(role_key: str) -> tuple[str, str | None]:
     defaults: dict = cfg.get("defaults", {})
 
     agent_cfg = agents.get(role_key, {})
-    service = agent_cfg.get("service") or defaults.get("service") or "nim"
+    service = agent_cfg.get("service") or defaults.get("service") or "claude"
 
     # Use a sentinel to distinguish explicit null from missing key.
     # If the agent explicitly sets model: null → honour it (None).
@@ -132,7 +135,7 @@ def resolve(role_key: str) -> tuple[str, str | None]:
     raw_model = agent_cfg.get("model", _MISSING)
     if raw_model is _MISSING:
         # Key not present in agent config — use defaults
-        model = defaults.get("model") or "minimaxai/minimax-m2.7"
+        model = defaults.get("model") or "claude-opus-4-8"
     else:
         # Key present (may be null/None)
         model = raw_model
@@ -246,8 +249,8 @@ def resolve_chain(role_key: str) -> list[dict]:
         for link in raw:
             if not isinstance(link, dict):
                 continue
-            svc = link.get("service") or "nim"
-            mdl = link.get("model") or "minimaxai/minimax-m2.7"
+            svc = link.get("service") or "claude"
+            mdl = link.get("model") or "claude-opus-4-8"
             entry: dict = {"service": str(svc), "model": mdl}
             if "daily_limit" in link and link["daily_limit"] is not None:
                 entry["daily_limit"] = int(link["daily_limit"])

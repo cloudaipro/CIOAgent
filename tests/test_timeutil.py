@@ -15,10 +15,11 @@ def _reload(monkeypatch, tz: str | None):
     return importlib.reload(tu)
 
 
-def test_utc_to_local_vancouver_summer(monkeypatch):
-    """16:24 UTC in June (PDT, UTC-7) → 09:24 local."""
+def test_utc_to_local_reformats_without_converting(monkeypatch):
+    """Timestamps are now stored in LOCAL time (datetime('now','localtime')), so
+    utc_to_local only parses + reformats — it must NOT shift the wall clock."""
     tu = _reload(monkeypatch, "America/Vancouver")
-    assert tu.utc_to_local("2026-06-02 16:24:43") == "2026-06-02 09:24:43"
+    assert tu.utc_to_local("2026-06-02 16:24:43") == "2026-06-02 16:24:43"
 
 
 def test_utc_to_local_respects_cio_tz(monkeypatch):
@@ -43,8 +44,10 @@ def test_unparseable_returns_input(monkeypatch, bad):
 
 
 def test_iso_with_z_suffix(monkeypatch):
+    """A Z-suffixed ISO timestamp parses; tz is dropped (not converted) and the
+    wall-clock time is reformatted verbatim under the local-time storage model."""
     tu = _reload(monkeypatch, "America/Vancouver")
-    assert tu.utc_to_local("2026-06-02T16:24:43Z") == "2026-06-02 09:24:43"
+    assert tu.utc_to_local("2026-06-02T16:24:43Z") == "2026-06-02 16:24:43"
 
 
 # ---------------------------------------------------------------------------

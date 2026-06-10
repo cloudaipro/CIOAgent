@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    ResultMessage,
     TextBlock,
     create_sdk_mcp_server,
     tool,
@@ -26,7 +27,7 @@ from claude_agent_sdk import (
 
 import urllib.parse
 
-from . import charts, context, memory, portfolio, recall, timeutil, watchlist, web
+from . import charts, context, convlog, memory, portfolio, recall, timeutil, watchlist, web
 from .data import source_policy as _sp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -88,9 +89,23 @@ _NUDGE_SUFFIX = (
 
 _DIGEST_PROMPT = (
     "Summarize our conversation so far in 4-6 sentences for your own future "
-    "reference: decisions made, my stated preferences, and open threads. Do NOT "
-    "include specific dollar amounts, prices, or P&L numbers (those are recomputed "
-    "from data). Do not call any tools — just write the summary."
+    "reference: decisions made, my stated preferences, and open threads. Then, if "
+    "any mistakes surfaced this session — a wrong fact, a stale/cached figure, a "
+    "bad source, a correction I gave you — add a final 'Lessons:' line naming them "
+    "briefly so you do NOT repeat them next time. Do NOT include specific dollar "
+    "amounts, prices, or P&L numbers (those are recomputed from data). Do not call "
+    "any tools — just write the summary."
+)
+
+# Monthly rollup (digest-of-digests): consolidate a month of daily digests into one
+# durable long-term memo, stored as a HOT note so it is injected every session.
+_ROLLUP_PROMPT = (
+    "Below are this chat's daily session digests for one calendar month. Consolidate "
+    "them into a SHORT durable memo (5-8 bullet points) capturing what carries forward: "
+    "standing decisions, the operator's preferences/strategy, recurring themes, and any "
+    "lessons to avoid repeating. Drop one-off chatter. Do NOT include specific dollar "
+    "amounts, prices, or P&L numbers (those are recomputed from data). Do not call any "
+    "tools — just write the memo.\n\nDaily digests:\n"
 )
 
 # Self-improving reflection (W10): distill a reusable procedure if one occurred.
@@ -234,12 +249,24 @@ def _quote_freshness_note(quote: dict | None) -> str:
     quote, so the agent labels it by date instead of calling it 'today's move'."""
     if not quote or quote.get("quote_kind") == "live_intraday":
         return ""
-    sess = quote.get("session_date") or quote.get("date")
+    market = quote.get("market_status", "closed")
+    bar_date = quote.get("date")          # actual bar date in cache
+    session_date = quote.get("session_date") or bar_date  # expected current session
+    kind = quote.get("quote_kind", "settled_close")
+    if kind == "stale_close":
+        # Cache has an older bar; session_date data is not yet available.
+        return (
+            f"\n\nWARNING: STALE DATA — cache has {bar_date} close; "
+            f"{session_date} data is NOT yet in cache. "
+            f"Report this price as the {bar_date} close — do NOT present it as "
+            f"today's or {session_date}'s price. Call market_clock to confirm current date."
+        )
+    # settled_close: bar_date == session_date, market closed/pre-market — final bar.
     return (
-        f"\n\nNOTE: NASDAQ {quote.get('market_status', 'closed')} — this is the "
-        f"SETTLED {sess} close (final, latest real price), NOT a live \"now\" quote. "
-        f"Report it with that date; do NOT present it as today's move. For *why* it "
-        f"moved, use web_search (narrative only, not the figure)."
+        f"\n\nNOTE: NASDAQ {market} — this is the SETTLED {session_date} close "
+        f"(final, latest real price), NOT a live \"now\" quote. "
+        f"Report it as 'as of {session_date} close'; do NOT present it as today's move. "
+        f"For *why* it moved, use web_search (narrative only, not the figure)."
     )
 
 
@@ -395,12 +422,15 @@ async def t_forget(args):
 
 
 @tool("memory_search",
-      "Hybrid (keyword + semantic) search over your saved notes AND past conversation "
-      "turns. Use when the user refers to something from earlier that isn't in the "
-      "injected memory above — e.g. 'what did I say about NVDA a while back?'.",
+      "Hybrid (keyword + semantic) search over your saved notes, past conversation "
+      "turns, AND prior session digests (the long-term per-day/per-month summaries). "
+      "Use when the user refers to something from earlier that isn't in the injected "
+      "memory above — e.g. 'what did I say about NVDA a while back?' or 'what did we "
+      "conclude last month?'.",
       {"query": str, "k": int})
 async def t_search(args):
-    hits = recall.search(args["query"], k=int(args.get("k") or 5), scope=_scope())
+    hits = recall.search(args["query"], k=int(args.get("k") or 5), scope=_scope(),
+                         kinds=("note", "turn", "digest"))
     if not hits:
         return _text("No matches in memory or history.")
     return _text("\n".join(f"[{h['kind']} {h['id']}] {h['text']}" for h in hits))
@@ -622,8 +652,14 @@ async def t_watchlist_prices(args):
     snap = watchlist.prices()
     if snap["id"] is None:
         return _text("No active watchlist yet. The user can create one in the dashboard.")
-    # Freshness is uniform across the snapshot; derive the note from any quote.
-    note = _quote_freshness_note(snap["quotes"][0] if snap.get("quotes") else None)
+    # Pick the most severe freshness case: stale_close > settled_close > live_intraday.
+    _kind_rank = {"stale_close": 2, "settled_close": 1, "live_intraday": 0}
+    worst = max(
+        (q for q in snap.get("quotes", []) if q),
+        key=lambda q: _kind_rank.get(q.get("quote_kind", ""), 0),
+        default=None,
+    )
+    note = _quote_freshness_note(worst)
     return _text(json.dumps(snap, indent=2) + note)
 
 
@@ -992,6 +1028,19 @@ async def _run_verifier(answer: str, sources: list[dict]) -> str | None:
     return None
 
 
+def _usage_tokens(u) -> int:
+    """Sum input+output tokens from an SDK usage payload (dict or object), 0 if absent."""
+    if u is None:
+        return 0
+    def g(k):
+        val = u.get(k) if isinstance(u, dict) else getattr(u, k, 0)
+        return int(val or 0)
+    try:
+        return g("input_tokens") + g("output_tokens")
+    except Exception:
+        return 0
+
+
 class CIOAgent:
     """One conversational session (per chat). Reuses a connected SDK client.
 
@@ -1015,6 +1064,12 @@ class CIOAgent:
         self._tokens = 0         # approx tokens since last checkpoint
         self._compaction_pending = False   # set by PreCompact hook -> checkpoint soon
         self._last_docs: list[str] = []    # doc paths from the most recent main turn
+        # Local day of the last persisted turn (survives restarts via the meta
+        # table). Drives the day-boundary roll so one chat thread never spans days.
+        try:
+            self._last_turn_day = memory.get_last_turn_day(chat_id)
+        except Exception:
+            self._last_turn_day = None
 
     async def _on_precompact(self, input_data, tool_use_id, ctx) -> dict:
         """PreCompact hook: the SDK is about to lossily summarize old turns.
@@ -1031,6 +1086,7 @@ class CIOAgent:
         Called on init, on fresh-session fallback, and on rolling-session fork —
         so each (re)connect refreshes the injected context."""
         prompt = context.compose_system_prompt(SYSTEM_PROMPT, self._chat_id)
+        self._system_prompt = prompt   # kept for the detailed-history log (convlog)
         hooks = {"PreCompact": [HookMatcher(hooks=[self._on_precompact])]}
         return ClaudeSDKClient(
             options=build_options(self._model, resume, system_prompt=prompt, hooks=hooks))
@@ -1080,24 +1136,33 @@ class CIOAgent:
             # session so cross-turn [n] citations resolve. Reset on roll/close only.
             await self._client.query(prompt)
             parts: list[str] = []
-            tokens = 0
+            tokens = 0          # accumulated per-AssistantMessage usage (often empty)
+            result_tokens = 0   # authoritative turn total from the final ResultMessage
             async for msg in self._client.receive_response():
                 if isinstance(msg, AssistantMessage):
                     self._note_session(msg.session_id)
                     for blk in msg.content:
                         if isinstance(blk, TextBlock):
                             parts.append(blk.text)
-                    try:
-                        u = msg.usage
-                        if u is not None:
-                            tokens += (getattr(u, "input_tokens", 0) or 0) + \
-                                      (getattr(u, "output_tokens", 0) or 0)
-                    except Exception:
-                        pass
+                    tokens += _usage_tokens(msg.usage)
+                elif isinstance(msg, ResultMessage):
+                    # ResultMessage.usage is the cumulative usage for the whole turn
+                    # (the agent SDK leaves AssistantMessage.usage empty), so prefer it.
+                    self._note_session(getattr(msg, "session_id", None))
+                    result_tokens = _usage_tokens(msg.usage)
             text = "\n".join(parts).strip()
+            # Effective tokens: ResultMessage total > summed AssistantMessage usage >
+            # a local estimate (so the figure is never a misleading 0).
+            eff_tokens = result_tokens or tokens
+            if eff_tokens <= 0:
+                eff_tokens = context.count_tokens(prompt) + context.count_tokens(text)
             # Sources footer is appended in ask() (user-facing only), so internal
             # digest/playbook turns that reuse _run_query don't get a footer.
-            self._record_usage(tokens, prompt, text)
+            self._record_usage(eff_tokens, prompt, text)
+            # Detailed conversation history (opt-in, off by default): full text log.
+            convlog.log_call("claude", self._model or "claude-agent-sdk",
+                             getattr(self, "_system_prompt", "") or "", prompt, text,
+                             eff_tokens, scope=self._scope, kind="chat")
             images = list(_PENDING)
             _PENDING.clear()
             # Documents (committee PDF) are stashed on the instance, not returned,
@@ -1123,6 +1188,26 @@ class CIOAgent:
         """Send a turn; return (assistant_text, image_paths, doc_paths). May trigger
         a rolling-session checkpoint afterwards if the transcript is getting large."""
         await self._ensure()
+        # Day-boundary roll: a new local day starts a new conversation. If we
+        # resumed a prior-day thread, digest + reseed BEFORE this turn so (a) the
+        # rolling digest reliably persists even when the bot restarts daily (the
+        # per-process turn counter alone never reaches ROLL_TURNS across reboots),
+        # and (b) one SDK thread never spans multiple days — otherwise the agent
+        # treats the whole multi-day thread as "this conversation" and mis-dates an
+        # old mistake as today's. Prior days survive as the injected digest.
+        today = timeutil.today_local()
+        if self._last_turn_day and self._last_turn_day != today and self._session_id:
+            import logging
+            logging.getLogger("cio.agent").info(
+                "day boundary %s→%s for %s — rolling session",
+                self._last_turn_day, today, self._scope)
+            prev_month = self._last_turn_day[:7]
+            await self._checkpoint()
+            # Month boundary too → consolidate the month that just ended into a durable
+            # long-term HOT memo (digest-of-digests). Runs after the day roll so the
+            # final day's digest is included. Once-per-month, best-effort.
+            if prev_month != today[:7]:
+                await self._monthly_rollup(prev_month)
         # Inject the authoritative clock as the turn's first line so the agent never
         # guesses the date or mislabels a settled close as "today" (see DATA FRESHNESS).
         prompt = f"[context] {_clock_context()}\n\n{prompt}"
@@ -1141,6 +1226,13 @@ class CIOAgent:
             text = text + note
         # Capture this turn's documents before any checkpoint turn clears the stash.
         docs, self._last_docs = self._last_docs, []
+        # Record the local day of this turn so a restart on a later day can detect
+        # the boundary and roll (persisted; the in-memory counter resets on reboot).
+        self._last_turn_day = today
+        try:
+            memory.set_last_turn_day(self._chat_id, today)
+        except Exception:
+            pass
         self._turns += 1
         self._tokens += context.count_tokens(prompt) + context.count_tokens(text)
         if (self._compaction_pending or self._turns >= ROLL_TURNS
@@ -1197,6 +1289,34 @@ class CIOAgent:
         self._connected = False
         await self._ensure()
         log.info("rolled session for %s; digest saved, fresh thread seeded", self._scope)
+
+    async def _monthly_rollup(self, year_month: str) -> None:
+        """Consolidate a month of daily digests into one durable long-term memo, stored
+        as a HOT note (injected every session) and keyed `monthly_rollup:<YYYY-MM>` so a
+        re-run upserts. Best-effort; once per month (guarded by a meta marker). Runs on
+        the freshly reseeded post-day-roll thread, feeding the month's digests in-prompt."""
+        import logging
+        log = logging.getLogger("cio.agent")
+        try:
+            if memory.get_meta(f"last_rollup_month:{self._chat_id}") == year_month:
+                return                                  # already rolled this month
+            digests = memory.digests_in_month(self._chat_id, year_month)
+            if not digests:
+                return
+            joined = "\n".join(f"- [{d['created_at'][:10]}] {d['summary']}" for d in digests)
+            memo, _ = await self._run_query(_ROLLUP_PROMPT + joined)
+            if memo.strip():
+                try:
+                    memory.remember(memo.strip(), key=f"monthly_rollup:{year_month}",
+                                    scope=self._scope, tier="hot", importance=4.0,
+                                    source="auto")
+                except memory.FiguresFirewallError:
+                    log.info("monthly rollup %s rejected by figures firewall", year_month)
+            memory.set_meta(f"last_rollup_month:{self._chat_id}", year_month)
+            log.info("monthly rollup %s saved for %s (%d digests)",
+                     year_month, self._scope, len(digests))
+        except Exception:
+            log.exception("monthly rollup failed for %s", year_month)
 
     async def close(self):
         _SOURCES.pop(self._scope, None)

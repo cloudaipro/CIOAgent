@@ -203,6 +203,7 @@ ul.symlist .sym { flex: 1; font-variant-numeric: tabular-nums; font-weight: 600;
 # the current tab is highlighted — Run pages fall under Committee.
 _NAV = [
     ("Overview", "/"), ("Token usage", "/usage"), ("Telegram", "/telegram"),
+    ("Detailed history", "/detailed"),
     ("Committee", "/committee"), ("Watchlist", "/watchlist"),
     ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
     ("Memory", "/memory"), ("Playbooks", "/playbooks"),
@@ -381,6 +382,72 @@ def render_telegram(turns, level: int, days=None, selected_day: str | None = Non
     return _page("Telegram", body, level)
 
 
+def render_detailed(days, selected_day: str | None, content: str | None,
+                    enabled: bool, level: int, flash: str = "",
+                    flash_err: bool = False) -> str:
+    """Detailed conversation history viewer (convlog day files). Mirrors the Telegram
+    tab: a day selector across logged days, the selected day's full text, and a
+    per-day delete button (irreversible, confirmed, auth-gated, PRG).
+
+    *days* is convlog.list_days() — [{day, entries, bytes}], newest first.
+    *content* is the selected day's raw text (None when no day selected/missing)."""
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
+    )
+    status = (
+        "<p class='ok'>Logging is <strong>ON</strong> (CIO_DETAILED_LOG).</p>"
+        if enabled else
+        "<p class='empty'>Logging is <strong>OFF</strong>. Set "
+        "<code>CIO_DETAILED_LOG=1</code> to capture future conversations. "
+        "Existing day files (if any) are still viewable below.</p>"
+    )
+
+    def _navlink(label: str, href: str, active: bool) -> str:
+        cls = " class='badge'" if active else ""
+        return f"<a{cls} href='{esc(href)}'>{esc(label)}</a>"
+    nav_items = [_navlink("All", "/detailed", selected_day is None)]
+    for d in (days or []):
+        nav_items.append(_navlink(
+            f"{d['day']} ({d['entries']})", f"/detailed?day={d['day']}",
+            d["day"] == selected_day))
+    day_nav = ("<div class='daynav'>Days: " + " · ".join(nav_items) + "</div>"
+               if days else "")
+
+    if selected_day:
+        del_btn = _wipe_form(
+            "wipe_day", "Delete this day",
+            f"Delete all detailed history for {selected_day}? This cannot be undone.",
+            path="/detailed", day=selected_day,
+        )
+        if content is None:
+            inner = f"<p class='empty'>no detailed history for {esc(selected_day)}.</p>"
+        else:
+            inner = (f"<h2>{esc(selected_day)} {del_btn}</h2>"
+                     f"<pre class='steps'>{esc(content)}</pre>")
+    elif days:
+        def _day_row(d: dict) -> str:
+            del_btn = _wipe_form(
+                "wipe_day", "Delete",
+                f"Delete all detailed history for {d['day']}? This cannot be undone.",
+                path="/detailed", day=d["day"],
+            )
+            return (f"<tr><td><a href='/detailed?day={esc(d['day'])}'>{esc(d['day'])}</a></td>"
+                    f"<td class='num'>{esc(d['entries'])}</td>"
+                    f"<td class='num'>{esc(d['bytes'])}</td>"
+                    f"<td>{del_btn}</td></tr>")
+        rows = "".join(_day_row(d) for d in days)
+        inner = ("<table><tr><th>Day (local)</th><th>Entries</th><th>Bytes</th>"
+                 f"<th></th></tr>{rows}</table>"
+                 "<p class='empty'>Pick a day above to read its full log.</p>")
+    else:
+        inner = "<p class='empty'>no detailed history logged yet.</p>"
+
+    body = ("<h1>Detailed conversation history</h1>" + flash_html + status
+            + day_nav + inner)
+    return _page("Detailed history", body, level)
+
+
 def render_committee_list(runs, level: int, token_q: str = "",
                           flash: str = "", flash_err: bool = False) -> str:
     rows = "".join(
@@ -452,12 +519,22 @@ def render_playbooks(rows, level: int, flash: str = "", flash_err: bool = False)
             f"Delete playbook {r.get('name')!r}? This cannot be undone.",
             path="/playbooks", pid=r.get("id"),
         )
+        # Chat-scoped playbooks can be promoted to global (shared by all chats);
+        # global ones already are, so no button there.
+        promote_btn = ""
+        if (r.get("scope") or "") != "global":
+            promote_btn = _action_form(
+                "promote", "Promote to global",
+                f"Promote {r.get('name')!r} to GLOBAL (all chats)? This overwrites any "
+                f"global playbook of the same name and removes this chat-scoped copy.",
+                path="/playbooks", pid=r.get("id"),
+            )
         return (f"<tr><td>{esc(r.get('name'))}</td>"
                 f"<td>{esc(r.get('scope'))}</td>"
                 f"<td class='num'>{esc(r.get('hits'))}</td>"
                 f"<td class='msg'><pre class='steps'>{esc(r.get('steps'))}</pre></td>"
                 f"<td>{esc_ts(r.get('created_at'))}</td>"
-                f"<td>{del_btn}</td></tr>")
+                f"<td>{promote_btn} {del_btn}</td></tr>")
 
     body_rows = "".join(_row(r) for r in rows) or (
         "<tr><td class='empty' colspan='6'>no playbooks saved yet — the agent saves "
@@ -516,6 +593,20 @@ def render_econ_events(rows, level: int, flash: str = "", flash_err: bool = Fals
         f"<th>Source</th><th>Alerted</th><th></th></tr>{body_rows}</table>"
     )
     return _page("Econ events", body, level)
+
+
+def _action_form(action: str, label: str, confirm: str, **hidden) -> str:
+    """Like _wipe_form but a normal (non-danger) button — for non-destructive
+    mutations such as promoting a playbook to global. *path* defaults to /."""
+    path = hidden.pop("path", "/")
+    fields = f"<input type='hidden' name='action' value='{esc(action)}'>"
+    for name, val in hidden.items():
+        fields += f"<input type='hidden' name='{esc(name)}' value='{esc(val)}'>"
+    return (
+        f"<form class='inline' method='post' action='{esc(path)}' "
+        f"onsubmit=\"return confirm('{esc(confirm)}');\">"
+        f"{fields}<button type='submit'>{esc(label)}</button></form>"
+    )
 
 
 def _wipe_form(action: str, label: str, confirm: str, **hidden) -> str:
@@ -954,7 +1045,9 @@ def _configure_js(catalog: dict) -> str:
 def render_configure(cfg, level: int, services, model_suggestions,
                      path: str = "", flash: str = "", flash_err: bool = False,
                      log_to_file: bool = False, log_file: str = "",
-                     log_dir: str = "", log_locked_by_env: bool = False) -> str:
+                     log_dir: str = "", log_locked_by_env: bool = False,
+                     detailed_log: bool = False,
+                     detailed_locked_by_env: bool = False) -> str:
     """Edit committee model routing. One big POST form → /configure.
 
     Simple agents render as service combo + model box; chain agents (cio/wma)
@@ -1086,6 +1179,34 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + toggle
     )
 
+    # --- detailed conversation history: indicator + toggle ---
+    if detailed_log:
+        d_status = "<strong style='color:#1a7f37'>ON</strong> — capturing every LLM call"
+    else:
+        d_status = "<strong>OFF</strong> — no detailed history captured"
+    if detailed_locked_by_env:
+        d_toggle = ("<p class='hint'>Locked by the <code>CIO_DETAILED_LOG</code> "
+                    "environment variable; unset it to control this from here.</p>")
+    else:
+        d_want = "0" if detailed_log else "1"
+        d_btn = "Disable detailed history" if detailed_log else "Enable detailed history"
+        d_toggle = (
+            "<form method='post' action='/configure' style='margin-top:8px'>"
+            "<input type='hidden' name='form_kind' value='detailed_log'>"
+            f"<input type='hidden' name='detailed_log' value='{d_want}'>"
+            f"<button type='submit' class='primary'>{d_btn}</button>"
+            "</form>"
+        )
+    detailed_section = (
+        "<h2>Detailed conversation history</h2>"
+        f"<p>Full prompt/response capture: {d_status}.</p>"
+        "<p class='hint'>When ON, every LLM call (main agent + each committee agent) is "
+        "appended verbatim — system prompt, user prompt, response, provider, model, "
+        "tokens — to <code>logs/YYYY/MM/YYYY-MM-DD.txt</code>. View it on the "
+        "<a href='/detailed'>Detailed history</a> tab. Off by default.</p>"
+        + d_toggle
+    )
+
     body = (
         "<h1>Configure committee models</h1>"
         + flash_html
@@ -1102,6 +1223,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + "<p style='margin-top:16px'><button type='submit' class='primary'>Save changes</button></p>"
         + "</form>"
         + logging_section
+        + detailed_section
         + _configure_js({s: list(model_suggestions.get(s, []) or []) for s in services})
     )
     return _page("Configure", body, level)

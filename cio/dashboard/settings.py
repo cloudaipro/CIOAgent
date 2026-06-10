@@ -1,9 +1,10 @@
 """Tiny JSON store for operator-tunable dashboard settings.
 
 Separate from the committee-model YAML (cio.committee.models): this holds runtime
-operational flags the operator flips from the Configure tab — currently just
-whether logs are mirrored to a date-based file on disk. Persisted so the choice
-survives restarts; read by cio.logsetup at process start.
+operational flags the operator flips from the Configure tab — whether logs are
+mirrored to a date-based file on disk (read by cio.logsetup), and whether the
+detailed conversation history is captured (read by cio.convlog). Persisted so the
+choices survive restarts and are shared across the bot + dashboard processes.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from pathlib import Path
 
 _PATH = Path(__file__).resolve().parent.parent.parent / "data" / "dashboard_settings.json"
 _LOCK = threading.Lock()
-_DEFAULTS: dict = {"log_to_file": False}
+_DEFAULTS: dict = {"log_to_file": False, "detailed_log": False}
 
 
 def _read() -> dict:
@@ -56,3 +57,16 @@ def get_log_to_file() -> bool:
 
 def set_log_to_file(enabled: bool) -> None:
     set("log_to_file", bool(enabled))
+
+
+def get_detailed_log() -> bool:
+    """Whether detailed conversation history is captured. Robust against a
+    hand-edited file (accepts bools + common truthy strings)."""
+    val = get("detailed_log", False)
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
+def set_detailed_log(enabled: bool) -> None:
+    set("detailed_log", bool(enabled))

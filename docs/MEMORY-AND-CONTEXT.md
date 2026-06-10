@@ -1,6 +1,6 @@
 # CIO Agent — Memory & Context Management
 
-**Status:** current as of 2026-06-03
+**Status:** current as of 2026-06-09
 **Scope:** the durable memory / context subsystem (`cio/memory.py`, `cio/recall.py`,
 `cio/context.py`, `cio/committee/agent_memory.py`, `cio/committee/note_sanitizer.py`,
 `cio/committee/sanitizer_log.py`, `cio/dedup_notes.py`, and the dashboard memory/sanitizer
@@ -49,7 +49,9 @@ Two SQLite databases, same schema family:
 
 - **`data/cio.db`** (a.k.a. `db.DB_PATH`) — conversational / portfolio memory: scopes
   `global` and `chat:<id>`, plus the operator profile, session digests, conversation turns,
-  the Telegram chat registry, token-usage counters, and runtime meta.
+  the Telegram chat registry, token-usage counters, and runtime meta. *Path fallback:* if
+  `data/cio.db` is absent but a legacy `data/cfo.db` exists, `db.DB_PATH` resolves to the
+  latter so the owner's existing DB is used in place (the rename left the file untouched).
 - **`data/committee.db`** — the investment committee's isolated per-agent memory (scopes
   `committee:<role>`), the committee LLM-call transcript, token usage, and the figures-
   sanitizer audit log. Kept separate so the agents' accruing notes + 768-dim embeddings do
@@ -81,9 +83,13 @@ The central table. One row = one qualitative note.
 Supporting tables: `user_profile` (per-scope role/stack/prefs/goals), `session_digests`
 (rolling checkpoints), `conv_turns` (COLD: every conversation turn), `playbooks` (named
 tool procedures), `chats` (registry + SDK `session_id` for resume), `meta`, `token_usage`.
+`meta` also holds the per-chat `last_turn_day:<chat_id|global>` marker that drives the
+day-boundary session roll, and `last_rollup_month:<chat_id>` that guards the monthly
+rollup (§15).
 
-Search indexes: `notes_fts` / `turns_fts` (FTS5 external-content, trigger-synced) and
-`mem_vec` / `turn_vec` (sqlite-vec `vec0`, `float[768]`).
+Search indexes (all three memory kinds are hybrid-searchable): `notes_fts` / `turns_fts`
+/ `digests_fts` (FTS5 external-content, trigger-synced) and `mem_vec` / `turn_vec` /
+`digest_vec` (sqlite-vec `vec0`, `float[768]`).
 
 ---
 
@@ -114,8 +120,16 @@ additionally filtered to the chat of the active scope.
 
 Alongside the tiers: **USER profile** (injected, USER.md-equivalent), **session digests**
 (a qualitative summary written before a fork so a fresh thread can be seeded without the full
-transcript), and **playbooks** (reusable procedures whose steps reference *tools*, never
-cached numbers — so a playbook never goes stale).
+transcript — the digest prompt also asks for a trailing `Lessons:` line so mistakes/corrections
+survive into the next session), and **playbooks** (reusable procedures whose steps reference
+*tools*, never cached numbers — so a playbook never goes stale).
+
+**Long-term recall over digests.** Only the *latest* digest is auto-injected (short-term
+continuity ≈ yesterday), but **every** digest is also indexed (`digests_fts` + `digest_vec`)
+and reachable on demand via `memory_search` — so the agent can answer "what did we conclude
+last month?" by meaning, not just keywords. A **monthly rollup** (§15) consolidates a month of
+daily digests into one durable HOT note, giving always-in-context month-level memory without
+scanning every turn.
 
 ---
 
@@ -195,23 +209,27 @@ LLM does the fuzzy transformation; the regex guarantees what actually lands in t
 `memory.recall(key, scope)` — direct key hit, bumps the counter.
 
 ### Hybrid search (`recall.search`)
-The differentiator. A query is run through two rankers and fused:
+The differentiator. A query is run through two rankers and fused, over any subset of three
+**kinds** — `note`, `turn`, `digest` (default `("note","turn")`; the agent's `memory_search`
+tool passes all three):
 
-- **Keyword:** FTS5 `bm25()` over `notes_fts` / `turns_fts`.
-- **Semantic:** sqlite-vec KNN over `mem_vec` / `turn_vec` using a local embedding model.
-- **Fusion:** Reciprocal Rank Fusion (RRF, `k=60`) merges the two ranked id-lists; top-k
-  returned, best first.
+- **Keyword:** FTS5 `bm25()` over `notes_fts` / `turns_fts` / `digests_fts`.
+- **Semantic:** sqlite-vec KNN over `mem_vec` / `turn_vec` / `digest_vec` using a local
+  embedding model.
+- **Fusion:** Reciprocal Rank Fusion (RRF, `k=60`) merges the ranked id-lists per kind; top-k
+  returned, best first. Each hit carries its `kind` so the caller can tell a note from a turn
+  from a digest.
 
 Notes are scoped (`scope` + `global`, or strictly `scope` when `include_global=False`);
-turns are limited to the chat of the active scope.
+turns **and digests** are limited to the chat of the active scope.
 
 **Embedding model:** fastembed `BAAI/bge-base-en-v1.5`, **768-dim**, ONNX, cached under
 `data/models/` so the agent is offline-stable after first download. `EMBED_DIM = 768` in
 `db.py` is the single source of truth the `vec0` tables and `recall.py` agree on.
 
-> **Doc-drift note:** a couple of `db.py` comments still say "384 / bge-small" — these are
-> stale. The authoritative values are `EMBED_DIM = 768` and `recall.MODEL_NAME =
-> "BAAI/bge-base-en-v1.5"`. Worth a one-line comment fix.
+> **Doc-drift note (resolved):** the old "384 / bge-small" comments in `db.py` and the
+> `recall.py` module docstring have been corrected to 768 / bge-base. `EMBED_DIM = 768` and
+> `recall.MODEL_NAME = "BAAI/bge-base-en-v1.5"` are authoritative.
 
 ---
 
@@ -284,9 +302,10 @@ exposes:
   callback; fast-path and model-unavailable cases are intentionally not logged (no figure
   action taken).
 
-Capture is governed by `CIO_CAPTURE_LEVEL` (1–3, default 1): level 1 prunes old committee
-runs and keeps Telegram history; 2 keeps everything; 3 is committee-only (no Telegram
-history).
+Capture is governed by `CIO_CAPTURE_LEVEL` (1–3, default 1): levels **1 and 3** prune old
+committee runs (keeping the newest `CIO_TRANSCRIPT_KEEP_RUNS`); level **2** keeps everything;
+levels **1 and 2** record Telegram history while level **3** is committee-only (drops Telegram
+turns). So: 1 = prune + keep Telegram, 2 = keep everything, 3 = prune + no Telegram.
 
 ---
 
@@ -320,6 +339,37 @@ counting uses `tiktoken` (`cl100k_base`) as one consistent local estimator, with
 estimator error cannot overflow the window. The budget governs the *injected block*, not the
 whole prompt.
 
+### Day-boundary session roll
+
+A session digest fork is normally triggered by transcript growth (`ROLL_TURNS` / `ROLL_TOKENS`),
+but that per-process counter resets on every restart, so a long-lived bot that bounces daily
+could keep one SDK `session_id` (and one undivided thread) alive for many days. The agent's
+`ask()` therefore also rolls on a **local-day boundary**: if the last persisted turn day differs
+from today *and* a prior-day thread was resumed, it digests + reseeds **before** the turn. This
+(a) guarantees the rolling digest actually persists even across daily restarts, and (b) keeps a
+single thread from spanning days — otherwise the agent treats a multi-day thread as "this
+conversation" and can mis-date an old mistake as today's. The boundary is detected via the
+persisted `last_turn_day:<chat_id|global>` meta marker (`memory.get_last_turn_day` /
+`set_last_turn_day`); prior days survive as the injected digest.
+
+### Monthly rollup (digest-of-digests) — long-term memory
+
+The day roll keeps the *latest* digest as short-term continuity, but a chain of daily digests
+is not month-level memory (only the newest is injected; older ones are recall-only). So when a
+day roll also crosses a **month boundary**, `ask()` calls `CIOAgent._monthly_rollup(prev_month)`
+after the day checkpoint:
+
+1. `memory.digests_in_month(chat_id, "YYYY-MM")` gathers that month's daily digests.
+2. `_ROLLUP_PROMPT` consolidates them (on the freshly reseeded thread, digests fed in-prompt)
+   into a short durable memo — standing decisions, preferences/strategy, recurring themes,
+   lessons — figures excluded.
+3. The memo is stored as a **HOT note** keyed `monthly_rollup:<YYYY-MM>` (`importance` 4.0,
+   `source='auto'`), so it is **injected every session** *and* hybrid-searchable like any note.
+
+Guarded once-per-month by the `last_rollup_month:<chat_id>` meta marker; best-effort (a failure
+never breaks the turn) and figures-firewall-safe (a rollup that smuggles a figure is dropped,
+not stored).
+
 ---
 
 ## 16. Guarantees & failure modes
@@ -339,8 +389,15 @@ whole prompt.
 ## 17. Testing
 
 - `tests/test_memcore.py` — firewall, scope isolation, injection budget, eviction,
-  promotion, cold-boot continuity. (Note: tests that exercise the write path require the
-  fastembed model; they are skipped/failed in environments where it is not installed.)
+  promotion, cold-boot continuity, rolling-session cadence, reflection loop, and
+  **digest hybrid search** (a past digest found by meaning, scoped per chat). (Note: tests that
+  exercise the write path require the fastembed model; they are skipped/failed in environments
+  where it is not installed.)
+- `tests/test_day_roll.py` — `last_turn_day` persistence round-trip, the day-boundary roll
+  matrix (rolls on a new day with a resumed session; no roll same-day, no resumed session, or
+  brand-new chat; persists today after each turn), and the **monthly rollup** (`digests_in_month`
+  filtering; a month boundary writes a HOT `monthly_rollup:<YYYY-MM>` memo; the once-per-month
+  guard).
 - `tests/test_committee.py` — per-agent isolation, injection, promotion, agent-memory
   firewall.
 - `tests/test_note_sanitizer.py` — all sanitizer outcomes (fast-path-no-call, salvage,
@@ -353,8 +410,10 @@ whole prompt.
 
 ## 18. Known limitations & future work
 
-- **Doc drift** in `db.py` comments (384/bge-small vs the real 768/bge-base) — cosmetic fix
-  pending.
+- **Monthly rollup cost & cadence:** one extra LLM call per chat per month (the digest-of-
+  digests), on the first turn after a month boundary. Multi-month downtime rolls up only the
+  single most-recent active month, not every skipped month. Acceptable; revisit if multi-month
+  catch-up is ever needed.
 - **Semantic-dedup threshold** (0.45) is a heuristic on normalized-bge L2 distance; it
   assumes the embeddings are L2-normalized (fastembed bge default). Worth periodic tuning
   against real merge/no-merge cases.

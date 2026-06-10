@@ -289,15 +289,26 @@ def log_turn(chat_id: int | None, session_id: str | None, user_text: str,
         return
     try:
         conn = db.connect(db_path)
+        new_turns: list[tuple[int, str]] = []
         with conn:
             for role, content in (("user", user_text), ("assistant", assistant_text)):
                 if content and content.strip():
-                    conn.execute(
+                    cur = conn.execute(
                         "INSERT INTO conv_turns (chat_id,session_id,role,content) "
                         "VALUES (?,?,?,?)",
                         (chat_id, session_id, role, content),
                     )
+                    new_turns.append((cur.lastrowid, content))
         conn.close()
+        # Semantic index each turn on write (FTS stays in sync via table triggers),
+        # so cold-store hybrid recall has BOTH halves. Consistent with remember()
+        # indexing notes and add_digest() indexing digests. Best-effort per turn.
+        for tid, content in new_turns:
+            try:
+                _recall.index_turn(tid, content, db_path)
+            except Exception:
+                import logging
+                logging.getLogger("cio.memory").debug("turn index failed", exc_info=True)
     except Exception:
         import logging
         logging.getLogger("cio.memory").warning("log_turn failed", exc_info=True)
@@ -362,15 +373,23 @@ def conv_history_on_day(day: str, db_path=db.DB_PATH) -> list[dict]:
 
 def add_digest(chat_id: int | None, session_id: str | None, summary: str,
                turn_count: int = 0, token_count: int = 0, db_path=db.DB_PATH) -> int:
+    summary = summary.strip()
     conn = db.connect(db_path)
     with conn:
         cur = conn.execute(
             "INSERT INTO session_digests (chat_id,session_id,summary,turn_count,token_count) "
             "VALUES (?,?,?,?,?)",
-            (chat_id, session_id, summary.strip(), turn_count, token_count),
+            (chat_id, session_id, summary, turn_count, token_count),
         )
     nid = cur.lastrowid
     conn.close()
+    # Index for long-term hybrid recall (FTS stays in sync via table triggers).
+    # Best-effort: an embedding hiccup must not lose the digest row already written.
+    try:
+        _recall.index_digest(nid, summary, db_path)
+    except Exception:
+        import logging
+        logging.getLogger("cio.memory").debug("digest index failed", exc_info=True)
     return nid
 
 
@@ -382,6 +401,20 @@ def latest_digest(chat_id: int | None, db_path=db.DB_PATH) -> str | None:
     ).fetchone()
     conn.close()
     return row["summary"] if row else None
+
+
+def digests_in_month(chat_id: int | None, year_month: str,
+                     db_path=db.DB_PATH) -> list[dict]:
+    """All session digests for *chat_id* created in *year_month* ('YYYY-MM'), oldest
+    first. Feeds the monthly rollup (digest-of-digests). created_at is local time."""
+    conn = db.connect(db_path)
+    rows = conn.execute(
+        "SELECT id, summary, created_at FROM session_digests "
+        "WHERE chat_id IS ? AND substr(created_at,1,7)=? ORDER BY id ASC",
+        (chat_id, year_month),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # ----- user profile (USER.md equivalent) ------------------------------------
@@ -508,6 +541,22 @@ def set_session_id(chat_id: int, session_id: str, db_path=db.DB_PATH) -> None:
     conn.close()
 
 
+def _last_turn_day_key(chat_id: int | None) -> str:
+    return f"last_turn_day:{chat_id if chat_id is not None else 'global'}"
+
+
+def get_last_turn_day(chat_id: int | None, db_path=db.DB_PATH) -> str | None:
+    """Local calendar day (YYYY-MM-DD) of this chat's most recent agent turn, or
+    None if it has never spoken. Persisted across restarts so the agent can detect
+    a day boundary and roll its session even after the process bounced."""
+    return get_meta(_last_turn_day_key(chat_id), db_path=db_path)
+
+
+def set_last_turn_day(chat_id: int | None, day: str, db_path=db.DB_PATH) -> None:
+    """Record the local day of this chat's most recent agent turn."""
+    set_meta(_last_turn_day_key(chat_id), day, db_path=db_path)
+
+
 # ----- playbooks (learning loop) --------------------------------------------
 # Reusable procedures distilled from recurring tasks. Steps reference TOOLS, not
 # cached numbers — the figures firewall applies, so a playbook never goes stale.
@@ -516,8 +565,12 @@ def add_playbook(name: str, steps: str, scope: str = "global", db_path=db.DB_PAT
     _guard_figures(steps)
     conn = db.connect(db_path)
     with conn:
+        # created_at is set explicitly to LOCAL time. The table default is only
+        # localtime on DBs created after the timezone fix; older DBs kept a UTC
+        # default that CREATE TABLE IF NOT EXISTS can't change, so don't rely on it.
         conn.execute(
-            "INSERT INTO playbooks (scope,name,steps) VALUES (?,?,?) "
+            "INSERT INTO playbooks (scope,name,steps,created_at) "
+            "VALUES (?,?,?,datetime('now','localtime')) "
             "ON CONFLICT(scope,name) DO UPDATE SET steps=excluded.steps",
             (scope, name.strip(), steps.strip()),
         )
@@ -525,6 +578,36 @@ def add_playbook(name: str, steps: str, scope: str = "global", db_path=db.DB_PAT
                            (scope, name.strip())).fetchone()["id"]
     conn.close()
     return pid
+
+
+def promote_playbook(pid: int, db_path=db.DB_PATH) -> dict:
+    """Promote a chat-scoped playbook to **global**: upsert its (name, steps) into the
+    global scope and remove the chat-scoped original (so it isn't duplicated). Returns
+    ``{promoted, name, global_id}``. No-op (``promoted=False``) if it is already global.
+    Raises ValueError if *pid* doesn't exist."""
+    conn = db.connect(db_path)
+    row = conn.execute("SELECT id, scope, name, steps FROM playbooks WHERE id=?",
+                       (pid,)).fetchone()
+    if row is None:
+        conn.close()
+        raise ValueError(f"no playbook with id {pid}")
+    if row["scope"] == "global":
+        conn.close()
+        return {"promoted": False, "name": row["name"], "global_id": row["id"]}
+    name, steps = row["name"], row["steps"]
+    _guard_figures(steps)
+    with conn:
+        conn.execute(
+            "INSERT INTO playbooks (scope,name,steps,created_at) "
+            "VALUES ('global',?,?,datetime('now','localtime')) "
+            "ON CONFLICT(scope,name) DO UPDATE SET steps=excluded.steps",
+            (name, steps),
+        )
+        gid = conn.execute("SELECT id FROM playbooks WHERE scope='global' AND name=?",
+                           (name,)).fetchone()["id"]
+        conn.execute("DELETE FROM playbooks WHERE id=?", (pid,))   # drop the chat copy
+    conn.close()
+    return {"promoted": True, "name": name, "global_id": gid}
 
 
 def get_playbook(name: str, scope: str = "global", db_path=db.DB_PATH) -> dict | None:

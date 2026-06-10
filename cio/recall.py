@@ -4,9 +4,9 @@ This is the layer that beats keyword-only memory: a query phrased differently
 from how a fact was stored still surfaces it via the vector side, while exact
 terms still hit via FTS. Both are local and offline:
 
-- embeddings: fastembed `BAAI/bge-small-en-v1.5` (ONNX, 384-dim), model cached in
+- embeddings: fastembed `BAAI/bge-base-en-v1.5` (ONNX, 768-dim), model cached in
   `data/models/` so the agent is offline-stable after first download;
-- storage/ANN: sqlite-vec `vec0` tables (`mem_vec`, `turn_vec`) in the same DB.
+- storage/ANN: sqlite-vec `vec0` tables (`mem_vec`, `turn_vec`, `digest_vec`) in the same DB.
 
 Both are required (no FTS-only mode). Results from the keyword and vector rankers
 are fused with Reciprocal Rank Fusion (RRF), the same technique Hermes/Milvus use.
@@ -84,17 +84,29 @@ def index_turn(turn_id: int, text: str, db_path=DB_PATH) -> None:
     conn.close()
 
 
+def index_digest(digest_id: int, text: str, db_path=DB_PATH) -> None:
+    blob = _ser(embed_one(text))
+    conn = db.connect(db_path)
+    with conn:
+        conn.execute("DELETE FROM digest_vec WHERE digest_id=?", (digest_id,))
+        conn.execute("INSERT INTO digest_vec(digest_id, embedding) VALUES(?,?)", (digest_id, blob))
+    conn.close()
+
+
 def reindex_all(db_path=DB_PATH) -> tuple[int, int]:
     """Re-embed every note and turn into the vec tables. Run after an embedding
     dim/model change (db.connect flags `vec_reindex_needed`). Returns (notes, turns)."""
     conn = db.connect(db_path)
     notes = conn.execute("SELECT id, value FROM mem_notes").fetchall()
     turns = conn.execute("SELECT id, content FROM conv_turns").fetchall()
+    digests = conn.execute("SELECT id, summary FROM session_digests").fetchall()
     conn.close()
     for r in notes:
         index_note(r["id"], r["value"], db_path)
     for r in turns:
         index_turn(r["id"], r["content"], db_path)
+    for r in digests:
+        index_digest(r["id"], r["summary"], db_path)
     conn = db.connect(db_path)
     with conn:
         conn.execute("DELETE FROM meta WHERE key='vec_reindex_needed'")
@@ -165,11 +177,12 @@ def _scope_chat_id(scope: str | None):
 def search(query: str, k: int = 5, scope: str | None = None,
            kinds: tuple[str, ...] = ("note", "turn"), db_path=DB_PATH, *,
            include_global: bool = True) -> list[dict]:
-    """Hybrid search across notes and/or conversation turns; returns top-k hits
-    [{kind, id, text, score}], best first. Notes are limited to `scope` + global
-    (when include_global=True, the default); pass include_global=False to restrict
-    hits strictly to `scope` only (used by per-agent committee recall for isolation).
-    Turns are always limited to the chat of `scope` (if any)."""
+    """Hybrid search across notes, conversation turns and/or session digests; returns
+    top-k hits [{kind, id, text, score}], best first. Notes are limited to `scope` +
+    global (when include_global=True, the default); pass include_global=False to
+    restrict hits strictly to `scope` only (used by per-agent committee recall for
+    isolation). Turns and digests are limited to the chat of `scope` (if any). Pass
+    `kinds=("note","turn","digest")` to include long-term digest summaries."""
     match = _fts_query(query)
     qvec = _ser(embed_one(query))
     pool = max(k * 4, 20)
@@ -228,6 +241,32 @@ def search(query: str, k: int = 5, scope: str | None = None,
                     continue
                 results.append({"kind": "turn", "id": _id,
                                 "text": f"[{r['role']}] {r['content']}", "score": sc})
+
+    if "digest" in kinds:
+        cid = _scope_chat_id(scope)
+        fts_ids = []
+        if match:
+            fts_ids = [r["id"] for r in conn.execute(
+                "SELECT d.id FROM digests_fts f JOIN session_digests d ON d.id=f.rowid "
+                "WHERE digests_fts MATCH ? ORDER BY bm25(digests_fts) LIMIT ?",
+                (match, pool)).fetchall()]
+        vec_ids = [r["digest_id"] for r in conn.execute(
+            "SELECT digest_id FROM digest_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            (qvec, pool)).fetchall()]
+        scores = _rrf([fts_ids, vec_ids])
+        if scores:
+            rows = {r["id"]: r for r in conn.execute(
+                f"SELECT id, summary, chat_id, created_at FROM session_digests WHERE id IN "
+                f"({','.join('?'*len(scores))})", tuple(scores)).fetchall()}
+            for _id, sc in scores.items():
+                r = rows.get(_id)
+                if not r:
+                    continue
+                if cid is not None and r["chat_id"] is not None and r["chat_id"] != cid:
+                    continue
+                day = (r["created_at"] or "")[:10]
+                results.append({"kind": "digest", "id": _id,
+                                "text": f"[digest {day}] {r['summary']}", "score": sc})
 
     conn.close()
     results.sort(key=lambda h: h["score"], reverse=True)

@@ -9,6 +9,7 @@ Routes:
   /                     overview
   /usage                token usage per service per day
   /telegram             Telegram conversation history
+  /detailed             detailed conversation history (full prompts/responses; GET/POST delete)
   /subscribers          chats opted in to the digest + watchlist briefing
   /memory               per-agent / per-chat memory contents (debug)
   /playbooks            saved reusable procedures (GET renders, POST deletes one)
@@ -28,7 +29,7 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from cio import db, devcapture, econ_calendar, memory, portfolio, watchlist
+from cio import convlog, db, devcapture, econ_calendar, memory, portfolio, watchlist
 from cio.committee import agent_memory, models, sanitizer_log, transcript, usage
 from . import views
 
@@ -142,6 +143,14 @@ class _Handler(BaseHTTPRequestHandler):
                     turns, level, days=memory.conv_days(), selected_day=sel_day,
                     flash=query.get("msg", [""])[0],
                     flash_err=query.get("err", ["0"])[0] == "1")
+            elif path == "/detailed":
+                sel_day = query.get("day", [None])[0]
+                html = views.render_detailed(
+                    convlog.list_days(), sel_day,
+                    convlog.read_day(sel_day) if sel_day else None,
+                    convlog.enabled(), level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/subscribers":
                 html = views.render_subscribers(memory.list_subscribers(), level)
             elif path == "/memory":
@@ -189,7 +198,9 @@ class _Handler(BaseHTTPRequestHandler):
                     log_to_file=logsetup.file_logging_enabled(),
                     log_file=str(_logfile) if _logfile else "",
                     log_dir=str(logsetup.log_dir()),
-                    log_locked_by_env=os.getenv("CIO_LOG_TO_FILE") is not None)
+                    log_locked_by_env=os.getenv("CIO_LOG_TO_FILE") is not None,
+                    detailed_log=convlog.enabled(),
+                    detailed_locked_by_env=convlog.locked_by_env())
             elif path.startswith("/committee/"):
                 run_id = path.split("/committee/", 1)[1]
                 html = views.render_committee_run(run_id, transcript.get_run(run_id), level)
@@ -238,6 +249,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._committee_post(form, set_cookie)
         elif path == "/telegram":
             self._telegram_post(form, set_cookie)
+        elif path == "/detailed":
+            self._detailed_post(form, set_cookie)
         elif path == "/playbooks":
             self._playbooks_post(form, set_cookie)
         elif path == "/econ":
@@ -270,9 +283,35 @@ class _Handler(BaseHTTPRequestHandler):
             params["err"] = "1"
         self._redirect("/telegram?" + urlencode(params), set_cookie)
 
+    def _detailed_post(self, form: dict, set_cookie: str | None) -> None:
+        """Detailed-history page mutation. Only action: wipe_day day=YYYY-MM-DD —
+        delete one day's detailed-history log file. Irreversible; confirmed. PRG back."""
+        action = form.get("action", [""])[0].strip()
+        day = form.get("day", [""])[0].strip()
+        msg, err = "", False
+        try:
+            if action == "wipe_day":
+                if not day:
+                    raise ValueError("missing day")
+                ok = convlog.delete_day(day)
+                msg = (f"deleted detailed history for {day}" if ok
+                       else f"no detailed history file for {day}")
+                err = not ok
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("detailed POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/detailed?" + urlencode(params), set_cookie)
+
     def _playbooks_post(self, form: dict, set_cookie: str | None) -> None:
-        """Playbooks page mutation. Only action: delete pid=<id> — remove one saved
-        playbook. Irreversible; confirmed client-side. PRG back."""
+        """Playbooks page mutation. Actions: delete pid=<id> (remove one saved
+        playbook) and promote pid=<id> (move a chat-scoped playbook to global).
+        Confirmed client-side. PRG back."""
         action = form.get("action", [""])[0].strip()
         pid = form.get("pid", [""])[0].strip()
         msg, err = "", False
@@ -283,6 +322,12 @@ class _Handler(BaseHTTPRequestHandler):
                 n = memory.delete_playbook(int(pid))
                 msg = f"deleted playbook ({n} row(s))" if n else "playbook not found"
                 err = n == 0
+            elif action == "promote":
+                if not pid.isdigit():
+                    raise ValueError("missing/invalid pid")
+                res = memory.promote_playbook(int(pid))
+                msg = (f"promoted {res['name']!r} to global"
+                       if res["promoted"] else f"{res['name']!r} is already global")
             else:
                 msg, err = f"unknown action {action!r}", True
         except Exception as exc:  # never 500 the operator
@@ -395,6 +440,9 @@ class _Handler(BaseHTTPRequestHandler):
         if f("form_kind") == "logging":
             self._logging_post(f("log_to_file") == "1", set_cookie)
             return
+        if f("form_kind") == "detailed_log":
+            self._detailed_log_post(f("detailed_log") == "1", set_cookie)
+            return
 
         msg, err = "", False
         try:
@@ -469,6 +517,27 @@ class _Handler(BaseHTTPRequestHandler):
             log.warning("configure POST failed: %s", exc)
             msg, err = f"error: {exc}", True
 
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/configure?" + urlencode(params), set_cookie)
+
+    def _detailed_log_post(self, enabled: bool, set_cookie: str | None) -> None:
+        """Persist the detailed-conversation-history choice (shared via
+        dashboard_settings.json; the bot process reads it per call). Env override,
+        if set, wins and locks it. PRG back."""
+        from . import settings as _settings
+        msg, err = "", False
+        if os.getenv("CIO_DETAILED_LOG") is not None:
+            msg, err = "detailed logging is locked by the CIO_DETAILED_LOG env var", True
+        else:
+            try:
+                _settings.set_detailed_log(enabled)
+                msg = ("detailed conversation history ON" if enabled
+                       else "detailed conversation history OFF")
+            except Exception as exc:
+                log.warning("detailed-log toggle failed: %s", exc)
+                msg, err = f"error: {exc}", True
         params = {"msg": msg}
         if err:
             params["err"] = "1"
