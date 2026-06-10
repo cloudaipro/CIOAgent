@@ -626,6 +626,31 @@ async def t_run_strategy(args):
     }, indent=2))
 
 
+@tool("run_strategy_profile",
+      "Run a situation-specific technical-analysis profile on a symbol and report per-strategy "
+      "verdicts plus a composite. Profiles: committee (position decisions), monitor (daily "
+      "watchlist change detection), swing/wave (short-term trading). Prefer this over "
+      "run_stock_strategy when assessing a symbol for one of those situations.",
+      {"symbol": str, "profile": str})
+async def t_run_strategy_profile(args):
+    from . import stock
+    sym = args["symbol"].upper()
+    profile = (args.get("profile") or "committee").lower()
+    try:
+        res = stock.run_strategy_profile(sym, profile)
+    except KeyError as e:
+        return _text(str(e))
+    except ValueError as e:
+        return _text(str(e))
+    return _text(json.dumps({
+        "symbol": sym,
+        "profile": res["profile"],
+        "composite": res["composite"],
+        "signals": res["signals"],
+        "recent_events": {k: v["events"] for k, v in res["detail"].items() if v["events"]},
+    }, indent=2))
+
+
 @tool("refresh_prices",
       "Fetch live market prices (latest close) for all open positions and update valuations.",
       {})
@@ -891,6 +916,7 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_save_playbook, t_list_playbooks,
              t_add_econ_event, t_list_econ_events, t_econ_events_pdf, t_econ_events_image,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
+             t_run_strategy_profile,
              t_refresh_prices, t_stock_panel, t_watchlist_prices,
              t_market_clock, t_web_search, t_web_scrape, t_committee,
              t_sec_filings, t_analyst_ratings, t_earnings_info, t_company_profile,

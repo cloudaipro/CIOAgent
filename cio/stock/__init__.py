@@ -99,11 +99,25 @@ def run_strategy(symbol_or_df, strategy, start=None, end=None, **params):
     return get_engine().run(df, strategy, **params)
 
 
+def list_strategy_profiles():
+    """{profile: description} of situation-specific strategy sets."""
+    from .profiles import list_profiles
+    return list_profiles()
+
+
+def run_strategy_profile(symbol_or_df, profile: str = "committee"):
+    """Run a situation profile (committee/monitor/swing) and aggregate verdicts."""
+    from .profiles import profile_signals
+    return profile_signals(symbol_or_df, profile)
+
+
 __all__ = [
     "get_quote",
     "get_history",
     "list_strategies",
     "run_strategy",
+    "list_strategy_profiles",
+    "run_strategy_profile",
     "StrategyEngine",
     "get_engine",
     "load_or_download_stock_data",

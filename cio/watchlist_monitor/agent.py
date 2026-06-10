@@ -161,10 +161,14 @@ async def monitor_symbol(symbol: str, *, bundle_fn=None, news_fn=None) -> dict:
     *bundle_fn* / *news_fn* are injectable for tests; both default to the live
     committee bundle and Firecrawl web search. Never raises.
     """
+    import functools
+
     from ..committee import engine
     from ..committee.bundle import gather_bundle, format_bundle
 
-    bundle_fn = bundle_fn or gather_bundle
+    # Daily monitoring uses the cheap change-detection strategy profile
+    # (cio.stock.profiles "monitor"), not the committee's position-decision set.
+    bundle_fn = bundle_fn or functools.partial(gather_bundle, profile="monitor")
     try:
         bundle = await asyncio.to_thread(bundle_fn, symbol)
     except Exception as e:

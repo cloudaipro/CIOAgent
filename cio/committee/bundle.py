@@ -27,33 +27,12 @@ def _s():
     return _stock
 
 
-# TA strategies to sample — small, representative set
-_TA_STRATEGIES = ["rsi", "macd", "stoch", "trix", "kdj"]
-
-
-def _latest_signal(signals_df) -> str:
-    """Extract the most recent signal label from a strategy result DataFrame."""
-    try:
-        import pandas as pd
-        if signals_df is None or not isinstance(signals_df, pd.DataFrame):
-            return "neutral"
-        # Look for a 'signal' or 'Signal' column; fall back to last row buy/sell cols
-        for col in ("signal", "Signal"):
-            if col in signals_df.columns:
-                val = signals_df[col].dropna().iloc[-1]
-                return str(val).lower()
-        # Some strategies produce buy/sell boolean columns
-        row = signals_df.iloc[-1]
-        buy_cols = [c for c in row.index if "buy" in c.lower()]
-        sell_cols = [c for c in row.index if "sell" in c.lower()]
-        if buy_cols and sell_cols:
-            if any(row[c] for c in buy_cols):
-                return "bull"
-            if any(row[c] for c in sell_cols):
-                return "bear"
-        return "neutral"
-    except Exception:
-        return "neutral"
+# TA strategy selection now lives in cio.stock.profiles — situation-specific
+# sets (committee / monitor / swing) chosen one-per-category to avoid the
+# redundancy of the old hardcoded list (rsi+stoch+kdj were three oscillators
+# from the same momentum family). The old _latest_signal helper is gone: it
+# searched for "buy"/"sell" column names no strategy produces, so ta_signals
+# was permanently "neutral".
 
 
 def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any]:
@@ -93,13 +72,16 @@ def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any]:
     return filings, analyst, earnings
 
 
-def gather_bundle(symbol: str) -> dict[str, Any]:
+def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
     """
     Gather all available data for *symbol*.
 
+    *profile* selects the situation-specific TA strategy set
+    (see cio.stock.profiles: committee / monitor / swing).
+
     Returns a dict with keys:
-      symbol, resolved, quote, fundamentals, ta_signals, is_etf, as_of,
-      filings, analyst, earnings
+      symbol, resolved, quote, fundamentals, ta_signals, ta_profile,
+      ta_composite, is_etf, as_of, filings, analyst, earnings
 
     If the symbol cannot be resolved (no data), resolved=None and the engine
     should abort with a clean "no data" result.
@@ -141,6 +123,8 @@ def gather_bundle(symbol: str) -> dict[str, Any]:
             "quote": None,
             "fundamentals": None,
             "ta_signals": {},
+            "ta_profile": profile,
+            "ta_composite": "neutral",
             "is_etf": False,
             "as_of": datetime.utcnow().isoformat(),
             "filings": [],
@@ -148,21 +132,15 @@ def gather_bundle(symbol: str) -> dict[str, Any]:
             "earnings": None,
         }
 
-    # TA signals — best-effort, each guarded
-    available = []
+    # TA signals — situation profile, best-effort (profile_signals never raises
+    # for per-strategy data errors; a failing strategy is simply omitted).
+    ta_composite = "neutral"
     try:
-        available = s.list_strategies()
-    except Exception:
-        pass
-
-    for name in _TA_STRATEGIES:
-        if name not in available:
-            continue
-        try:
-            df = s.run_strategy(resolved, name)
-            ta_signals[name] = _latest_signal(df)
-        except Exception as e:
-            log.debug("strategy %s failed for %s: %s", name, resolved, e)
+        prof = s.run_strategy_profile(resolved, profile)
+        ta_signals = prof["signals"]
+        ta_composite = prof["composite"]
+    except Exception as e:
+        log.debug("strategy profile %s failed for %s: %s", profile, resolved, e)
 
     filings, analyst, earnings = _external(resolved, is_etf)
 
@@ -172,6 +150,8 @@ def gather_bundle(symbol: str) -> dict[str, Any]:
         "quote": quote,
         "fundamentals": fund,
         "ta_signals": ta_signals,
+        "ta_profile": profile,
+        "ta_composite": ta_composite,
         "is_etf": is_etf,
         "as_of": datetime.utcnow().isoformat(),
         "filings": filings,
@@ -238,7 +218,10 @@ def format_bundle(bundle: dict) -> str:
     ta = bundle.get("ta_signals") or {}
     if ta:
         ta_str = "  ".join(f"{k}:{v}" for k, v in ta.items())
-        lines.append(f"TA_SIGNALS: {ta_str}")
+        composite = bundle.get("ta_composite")
+        prof = bundle.get("ta_profile")
+        extra = f"  (composite:{composite}, profile:{prof})" if composite and prof else ""
+        lines.append(f"TA_SIGNALS: {ta_str}{extra}")
     else:
         lines.append("TA_SIGNALS: N/A (no source)")
 
