@@ -7,6 +7,13 @@ class signal_creator:
         self.close = close
         self.volume = volume
         self.creators = {
+            "aberration": lambda df, parameters: aberration_strategy.create_signals(
+                df,
+                high=self.high,
+                low=self.low,
+                close=self.close,
+                **parameters,
+            ),
             "adobv": lambda df, parameters: adobv_strategy.create_signals(
                 df,
                 high=self.high,
@@ -95,6 +102,12 @@ class signal_creator:
                 high=self.high,
                 low=self.low,
                 close=self.close,
+                **parameters,
+            ),
+            "fisher": lambda df, parameters: fisher_strategy.create_signals(
+                df,
+                high=self.high,
+                low=self.low,
                 **parameters,
             ),
             "inertia": lambda df, parameters: inertia_strategy.create_signals(
@@ -238,4 +251,10 @@ class signal_creator:
         }
 
     def create_signals(self, df, strategy, **parameters):
-        return self.creators[strategy](df, parameters)
+        try:
+            return self.creators[strategy](df, parameters)
+        except (ValueError, TypeError, KeyError) as e:
+            raise ValueError(
+                f"strategy '{strategy}' failed on input of {len(df)} rows "
+                f"(often insufficient or degenerate data for the indicator): {e}"
+            ) from e

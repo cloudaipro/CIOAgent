@@ -36,7 +36,7 @@ def create_signals(
     # Create a DataFrame to store calculated values
     data = pd.DataFrame(index=df.index)
     data[["stc", "macd", "stoch"]] = df.ta.stc(
-        close=close, tclength=tclength, fast=fast, slow=slow, factor=factor
+        close=close, tc_length=tclength, fast=fast, slow=slow, factor=factor
     )
     data[["Highs", "Lows", "Last", "Trend"]] = find_data_swings(data["stc"])
     data["25-75_Trend"] = data.loc[

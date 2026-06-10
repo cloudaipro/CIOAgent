@@ -111,7 +111,7 @@ def create_signals(df, close, prefix="", suffix="", **kwargs):
         & (data["rsima"] < 50)
         & (data["slow_line"] < 50)
         & (data["fast_line"] < 50)
-        & (data["ema"] > data["close"]),
+        & (data["ema"] < data["close"]),
         "RSIMACONFIRM_BULL",
     ] = 1
     data.loc[
@@ -120,7 +120,7 @@ def create_signals(df, close, prefix="", suffix="", **kwargs):
         & (data["rsima"] > 50)
         & (data["slow_line"] > 50)
         & (data["fast_line"] > 50)
-        & (data["ema"] < data["close"]),
+        & (data["ema"] > data["close"]),
         "RSIMACONFIRM_BEAR",
     ] = 1
 

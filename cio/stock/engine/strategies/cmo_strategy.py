@@ -24,7 +24,7 @@ def create_signals(
     drift = kwargs.get("drift", 1)
     length = kwargs.get("length", 14)
     sma_length = kwargs.get("sma_length", 10)
-    limit_delta = kwargs.get("limit_delta", 0)
+    limit_delta = kwargs.get("limit_delta", 50)
     up_limit = limit_delta
     down_limit = -limit_delta
 

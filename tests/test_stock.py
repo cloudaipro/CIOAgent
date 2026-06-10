@@ -23,12 +23,13 @@ from tests.conftest import make_ohlcv, make_wide_ohlcv
 # 1. strategy count
 # ---------------------------------------------------------------------------
 
-def test_lists_38_strategies():
-    """list_strategies() must return exactly 38 names."""
+def test_lists_40_strategies():
+    """list_strategies() must return exactly 40 names (aberration + fisher registered)."""
     strategies = s.list_strategies()
-    assert len(strategies) == 38, (
-        f"Expected 38 strategies, got {len(strategies)}: {strategies}"
+    assert len(strategies) == 40, (
+        f"Expected 40 strategies, got {len(strategies)}: {strategies}"
     )
+    assert "aberration" in strategies and "fisher" in strategies
 
 
 # ---------------------------------------------------------------------------

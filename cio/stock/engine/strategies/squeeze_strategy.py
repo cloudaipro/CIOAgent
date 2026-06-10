@@ -73,7 +73,7 @@ def create_signals(
     data["up_hist_mom_neg_CSLS"] = candles_between_signed(data["up_hist_mom_neg"])
     data["down_hist_mom_pos_CSLS"] = candles_between_signed(data["down_hist_mom_pos"])
     data["down_hist_mom_neg_CSLS"] = candles_between_signed(data["down_hist_mom_neg"])
-    data[["bandwidth", "percent"]] = df.ta.bbands(close=close, length=bb_length, std=bb_std).iloc[:, 3:5]
+    data[["bandwidth", "percent"]] = df.ta.bbands(close=close, length=bb_length, upper_std=bb_std, lower_std=bb_std).iloc[:, 3:5]
 
     p_squeeze_data = squeeze_data.shift(1)
     data["ZEROCROSS_BULL"] = 0

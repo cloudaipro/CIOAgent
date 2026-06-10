@@ -21,7 +21,7 @@ def create_signals(
         suffix = "_" + suffix
 
     length = kwargs.get("length", 13)
-    ema_length = kwargs.get("length", 9) # int(ema_length) if ema_length and ema_length > 0 else 9
+    ema_length = kwargs.get("ema_length", 9) # int(ema_length) if ema_length and ema_length > 0 else 9
     limit = kwargs.get("limit", 3)
 
     # Create a DataFrame to store calculated values

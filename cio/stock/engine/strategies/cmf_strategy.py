@@ -39,7 +39,7 @@ def create_signals(df, high, low, close, volume, prefix="", suffix="", **kwargs)
 
     return buy_sell_signals
 
-default_cmf_signal = "c_CMFZEROCROSS_BULL"
+default_cmf_signal = "c_CMF_ZEROCROSS_BULL"
 cmf_grid_of_parameter = parameter_grid({
     "length": [3, 5, 10, 15, 20, 30, 50],
 })

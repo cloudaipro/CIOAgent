@@ -56,7 +56,7 @@ def create_signals(
 
     return buy_sell_signals
 
-default_rvgi_signal = "c_RVGI_BULL"
+default_rvgi_signal = "c_RVGI_CROSSOVER_BULL"
 rvgi_grid_of_parameter = parameter_grid(
     {
         "length": [5, 7, 14, 20],

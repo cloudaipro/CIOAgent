@@ -56,7 +56,7 @@ def create_signals(df, high, low, close, prefix="", suffix="", **kwargs):
         & (data["bear"] > data["p_bear"])
         & (data["bull"] > data["p_bull"])
         & (data["close"] < data["p_close"]),
-        "DIVERGENCE_BEAR",
+        "DIVERGENCE_BULL",
     ] = 1
     """
     The market price (EMA) is going up.
@@ -70,7 +70,7 @@ def create_signals(df, high, low, close, prefix="", suffix="", **kwargs):
         & (data["bull"] < data["p_bull"])
         & (data["bear"] < data["p_bear"])
         & (data["close"] > data["p_close"]),
-        "DIVERGENCE_BULL",
+        "DIVERGENCE_BEAR",
     ] = 1
     data = data.dropna()
 

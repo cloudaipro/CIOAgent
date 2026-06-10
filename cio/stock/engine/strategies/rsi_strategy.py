@@ -20,7 +20,7 @@ def create_signals(
         suffix = "_" + suffix
 
     length = kwargs.get("length", 14) #int(length) if length and length > 0 else 14
-    ema_length = kwargs.get("length", 9)  # int(length) if length and length > 0 else 9
+    ema_length = kwargs.get("ema_length", 9)  # int(ema_length) if ema_length and ema_length > 0 else 9
     limit_delta = kwargs.get("limit_delta", 30)
     up_limit = 50 + limit_delta
     down_limit = 50 - limit_delta

@@ -137,7 +137,7 @@ AND [Daily PVO Line(12,26,9) crosses 0]
 
     return buy_sell_signals
 
-default_pvo_signal = "c_PVO_CORSSOVER_BULL"
+default_pvo_signal = "c_PVO_CROSSOVER_BULL"
 pvo_grid_of_parameter = parameter_grid(
     {
         "fast": [3, 8, 12],

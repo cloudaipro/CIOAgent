@@ -50,7 +50,7 @@ def create_signals(
         (data["k"] < data["d"])
         & (data["p_k"] > data["p_d"])
         & (data["j"] < data["d"])
-        & (data["p_k"] > data["p_d"]),
+        & (data["p_j"] > data["p_d"]),
         "CROSSOVER_BEAR",
     ] = 1
     data = data.dropna()

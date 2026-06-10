@@ -87,7 +87,7 @@ def create_signals(
     buy_sell_signals = pd.DataFrame(index=df.index)
     buy_sell_signals[f"{prefix}c_KST_CROSSOVER_BULL{suffix}"] = data["CROSSOVER_BULL"]
     buy_sell_signals[f"{prefix}c_KST_CROSSOVER_BEAR{suffix}"] = data["CROSSOVER_BEAR"]
-    buy_sell_signals[f"{prefix}c_KST_CROSSOVER_CSLS{suffix}"] = data["CROSSOVER_CSLS"]
+    buy_sell_signals[f"{prefix}f_KST_CROSSOVER_CSLS{suffix}"] = data["CROSSOVER_CSLS"]
     buy_sell_signals[f"{prefix}c_KST_DIVERGENCE_BULL{suffix}"] = data[
         "DIVERGENCE_BULL"
     ]
@@ -100,7 +100,7 @@ def create_signals(
 
     return buy_sell_signals
 
-default_kst_signal = "c_KST_BULL"
+default_kst_signal = "c_KST_CROSSOVER_BULL"
 kst_grid_of_parameter = parameter_grid(
     {
         "signal":[5, 9, 14]

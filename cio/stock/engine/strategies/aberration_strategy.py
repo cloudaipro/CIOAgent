@@ -42,8 +42,8 @@ def create_signals(df, high, low, close, prefix="", suffix="", **kwargs):
     data = data.dropna()
 
     buy_sell_signals = pd.DataFrame(index=df.index)
-    buy_sell_signals[f"{prefix}c_ABERRATION_TREND{suffix}"] = data["TREND"]
-    buy_sell_signals[f"{prefix}c_ABERRATION_TREND_CSLS{suffix}"] = data["TREND_CSLS"]
+    buy_sell_signals[f"{prefix}f_ABERRATION_TREND{suffix}"] = data["TREND"]
+    buy_sell_signals[f"{prefix}f_ABERRATION_TREND_CSLS{suffix}"] = data["TREND_CSLS"]
 
     del data
     gc.collect()
