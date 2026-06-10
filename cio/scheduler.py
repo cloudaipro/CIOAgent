@@ -231,6 +231,22 @@ async def econ_event_alert(bot) -> None:
         log.exception("econ_event_alert job failed")
 
 
+async def memory_maintenance() -> None:
+    """Daily memory upkeep for BOTH memory DBs: backup FIRST (maintenance deletes
+    by design — TTL purge, turn pruning — so every night gets a restore point
+    before anything is removed), then maintain() (purge/prune/demote/reindex +
+    invariant checks). Both layers self-guard once per local day and never
+    raise, so this job is idempotent and safe to re-fire at boot."""
+    try:
+        from . import backup
+        backup.backup_all()
+        memory.maintain()                                  # cio.db (conversational)
+        from .committee import agent_memory
+        memory.maintain(db_path=agent_memory.DB_PATH)      # committee.db (per-agent)
+    except Exception:
+        log.exception("memory_maintenance job failed")
+
+
 def start(bot) -> AsyncIOScheduler:
     """Start the scheduler on the running loop. Returns it so the caller can stop it.
 
@@ -309,6 +325,25 @@ def start(bot) -> AsyncIOScheduler:
                           args=[bot], id="wma_catchup", replace_existing=True)
     else:
         log.info("watchlist briefing disabled (CIO_WMA_HOUR=off)")
+
+    # ----- memory maintenance ---------------------------------------------------
+    # Daily upkeep of both memory DBs (default 03:30 local; CIO_MAINT_HOUR=off
+    # disables). maintain() carries its own once-per-day guard, so the boot
+    # one-shot below is a free catch-up when the bot was down at the slot.
+    mm_hour = os.getenv("CIO_MAINT_HOUR", "3")
+    if mm_hour.lower() != "off":
+        mm_hour = int(mm_hour)
+        mm_minute = int(os.getenv("CIO_MAINT_MINUTE", "30"))
+        sched.add_job(memory_maintenance, "cron", hour=mm_hour, minute=mm_minute,
+                      id="memory_maintenance", replace_existing=True,
+                      coalesce=True, misfire_grace_time=3600)
+        sched.add_job(memory_maintenance, "date",
+                      run_date=now.replace(microsecond=0) + timedelta(seconds=60),
+                      id="memory_maintenance_boot", replace_existing=True)
+        log.info("memory maintenance scheduled daily at %02d:%02d local (+boot catch-up)",
+                 mm_hour, mm_minute)
+    else:
+        log.info("memory maintenance disabled (CIO_MAINT_HOUR=off)")
 
     # ----- economic-event alert -----------------------------------------------
     # Daily heads-up before high-impact econ events (NFP/CPI/FOMC/…). Default 07:00

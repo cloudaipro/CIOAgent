@@ -231,6 +231,7 @@ scripts/hourly_log_report.env
 data/cfo.db
 data/*.db
 data/*.db.bak
+data/backups/
 data/charts/
 data/uploads/
 # operator's local logging toggle (runtime state, never committed)
@@ -257,3 +258,5 @@ data/reports/
 *.db-wal
 *.db-shm
 *.bak.*
+hermes-agent-main/
+openclaw-main/
