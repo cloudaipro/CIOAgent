@@ -1,6 +1,6 @@
 # Technical Report — Memory Misattribution: One `session_id` Spanning Many Days
 
-**Status:** 2026-06-09
+**Status:** 2026-06-09; follow-on incident + operational fixes appended 2026-06-10 (§9)
 **Area:** `cio/agent.py` (CIOAgent session lifecycle), `cio/bot.py` (resume), `cio/memory.py`
 (`session_id` + `last_turn_day` persistence), `cio/context.py` (digest injection)
 **Severity:** correctness / trust — the agent mislabeled days-old mistakes as happening
@@ -197,3 +197,49 @@ happened on a prior day or month? Two additions close that gap (see
    context month-level memory. A *durable strategy* should likewise be stored as a HOT note
    (qualitative, high importance), not left to ride the daily-digest chain (only the newest
    digest is injected).
+
+---
+
+## 9. Follow-on incident (2026-06-10): the fix was in, the process wasn't
+
+### Symptom
+
+The morning after the fix landed, a routine DB inspection showed the bug *still live*:
+turns at 00:00–05:05 on 06-10 went through real `ask()` calls, yet no day roll fired,
+`last_turn_day` stayed `06-09`, `session_digests` stayed empty, and the SDK subprocess was
+still resuming session `ed60507e…` from the previous day.
+
+### Root cause
+
+Not a code bug — an **operations gap**. The day-roll commit (`652e600`) landed at
+**06-09 21:56**; the bot process serving the overnight turns had started *before* that.
+Python does not hot-reload, so production ran pre-fix code for hours while every test of
+the fix was green. The fix existed in the repo and in the test report, but not in the
+running process.
+
+### Lesson
+
+A passing test suite verifies the code on disk, not the code in memory. "Deployed" is a
+runtime property, and no test category can assert it — it has to be **observed**.
+
+### Fixes (all landed 2026-06-10)
+
+| Piece | What it does |
+|---|---|
+| `cio/version.py` boot stamp | bot startup records the commit it booted from (`meta.boot_version`, time, pid) |
+| Dashboard Runtime strip | shows *running* vs *on-disk* version; red "restart needed" on mismatch |
+| Invariant **I6** (`cio/invariants.py`) | nightly check: booted commit ≠ repo HEAD → reported violation |
+| Invariant **I1** | detects the *consequence* independently: any recently-active session spanning >1 local day — this is the check that flagged `ed60507e` |
+| `tests/test_temporal_simulation.py` | regression class for §2: virtual clock + process restarts over the real session lifecycle; the 8-day scenario fails on pre-fix code |
+
+Verification: the first live invariant run against `cfo.db` flagged both the original 8-day
+session (`1a8bff39…`) and the overnight session (`ed60507e…`) — and `committee.db` came back
+clean. The I1 warnings self-clear once the sessions are >2 days inactive (`RECENT_DAYS`),
+so retired history does not nag forever.
+
+### Operational rule
+
+After pulling or committing code that touches the bot: **restart the bot**, then confirm
+the dashboard Runtime strip shows the new commit. If the strip shows a stale warning or
+I1/I6 violations persist past the next day boundary, the process is not running what you
+think it is.

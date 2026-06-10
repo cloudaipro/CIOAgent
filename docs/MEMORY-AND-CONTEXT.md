@@ -1,6 +1,8 @@
 # CIO Agent — Memory & Context Management
 
-**Status:** current as of 2026-06-09
+**Status:** current as of 2026-06-09 (incl. the long-term hardening pass: scoped
+recall pre-filtering, TTL enforcement, hot cap/demotion, COLD-store retention,
+vector self-healing, daily maintenance job)
 **Scope:** the durable memory / context subsystem (`cio/memory.py`, `cio/recall.py`,
 `cio/context.py`, `cio/committee/agent_memory.py`, `cio/committee/note_sanitizer.py`,
 `cio/committee/sanitizer_log.py`, `cio/dedup_notes.py`, and the dashboard memory/sanitizer
@@ -78,7 +80,7 @@ The central table. One row = one qualitative note.
 | `hits` | recall counter — drives promotion and retention |
 | `source` | provenance: `agent` \| `user` \| `auto` \| `committee` \| `legacy` |
 | `created_at` / `updated_at` | timestamps (recency for decay) |
-| `expires_at` | optional TTL (reserved) |
+| `expires_at` | optional TTL — set via `remember(ttl_days=…)`; expired notes are invisible to every read path (recall/list/search/injection) and purged by maintenance |
 
 Supporting tables: `user_profile` (per-scope role/stack/prefs/goals), `session_digests`
 (rolling checkpoints), `conv_turns` (COLD: every conversation turn), `playbooks` (named
@@ -135,11 +137,17 @@ scanning every turn.
 
 ## 7. Write path
 
-`memory.remember(value, key=None, scope='global', tier='warm', importance=1.0, source='agent')`:
+`memory.remember(value, key=None, scope='global', tier='warm', importance=1.0, source='agent', ttl_days=None)`:
 
 1. Strip the text and run the **figures firewall** (§8) — reject financial figures.
 2. Insert, or **upsert** when a `key` is supplied (`ON CONFLICT(scope,key) DO UPDATE`).
+   `ttl_days` sets `expires_at` for time-bound notes (an event/plan that stops
+   mattering); the agent's `remember` tool exposes it.
 3. Index the text into `mem_vec` (semantic) — FTS stays in sync via table triggers.
+   Indexing is **best-effort**: an embedding hiccup can no longer fail a save that
+   is already committed (the note would look "failed" yet exist, so a retry would
+   duplicate it). `recall.reindex_missing()` re-embeds any such gap during
+   maintenance (§16), so the index self-heals.
 4. If the scope now exceeds its cap, **evict** (§9).
 
 Keyless inserts do **not** dedup (plain INSERT); this is why the committee's original
@@ -190,16 +198,29 @@ LLM does the fuzzy transformation; the regex guarantees what actually lands in t
 
 ---
 
-## 9. Self-improving loop: promotion, eviction, decay
+## 9. Self-improving loop: promotion, demotion, eviction, decay
 
 - **Hit counter:** every successful recall bumps `hits` and refreshes `updated_at`.
 - **Promotion:** a WARM note recalled ≥ `CIO_PROMOTE_HITS` (default 3) times is auto-promoted
   to HOT, so it begins injecting at session start. Memory curates itself by usefulness.
+- **Hot cap & demotion:** hot is a privilege, not a ratchet. Without a cap the bump→promote
+  loop slowly turned every note hot, hot notes were never evicted, and a scope whose hot
+  count exceeded `CIO_MAX_NOTES` could never be trimmed again (eviction starvation — it
+  rescanned the scope on every write, forever). Now at most `CIO_MAX_HOT` (default 30)
+  **non-user** hot notes stay hot per scope; the rest are demoted back to WARM by retention
+  score (`enforce_hot_cap`, applied after every promotion and during maintenance). Demotion
+  does not refresh `updated_at`, so a demoted note keeps decaying; `source='user'` hot notes
+  are never demoted and don't count toward the cap. Old monthly rollups age out of the
+  injected block this way while staying hybrid-searchable. (Same idea as OpenClaw's gated
+  "dreaming" promotion: long-term memory stays high-signal.)
 - **Retention score:** `importance × (1 + ln(1 + hits)) × 0.5^(age_days / 30)` — a 30-day
   half-life on recency, amplified by importance and usage.
-- **Eviction:** when a scope exceeds `CIO_MAX_NOTES` (default 500), the lowest-scoring WARM
-  `agent`/`auto` notes are trimmed first. **HOT notes and `source='user'` notes are never
-  evicted.** Deleting a note also drops its `mem_vec` row.
+- **Eviction:** when a scope exceeds `CIO_MAX_NOTES` (default 500), **expired notes go
+  first**, then the lowest-scoring WARM `agent`/`auto` notes. **HOT notes, `source='user'`
+  notes, and `monthly_rollup:*` notes are never evicted** (rollups are month-level memory
+  even after demotion to warm). Deleting a note also drops its `mem_vec` row. If a scope
+  is still over cap after a pass (too many protected notes), a warning is logged instead of
+  silently rescanning forever.
 
 ---
 
@@ -219,6 +240,16 @@ tool passes all three):
 - **Fusion:** Reciprocal Rank Fusion (RRF, `k=60`) merges the ranked id-lists per kind; top-k
   returned, best first. Each hit carries its `kind` so the caller can tell a note from a turn
   from a digest.
+
+**Scope pre-filtering (long-term correctness).** Candidates are restricted to the allowed
+scopes *inside* the SQL of both rankers — the FTS join takes a `WHERE scope IN (…)` and the
+KNN uses sqlite-vec's `note_id IN (subquery)` pre-filter (supported since sqlite-vec 0.1.x;
+verified on 0.1.9). The previous design ranked across **all** scopes and filtered afterwards,
+which starved recall as the DB filled: a fixed pool (~20) got dominated by other scopes'
+rows, the target scope surfaced nothing, semantic dedup stopped collapsing twins, and the
+resulting duplicates crowded the pool further (a compounding failure). The same pre-filter
+applies to turns and digests (per chat) and to `nearest_in_scope` (dedup). Expired notes are
+excluded at the same point.
 
 Notes are scoped (`scope` + `global`, or strictly `scope` when `include_global=False`);
 turns **and digests** are limited to the chat of the active scope.
@@ -314,6 +345,11 @@ turns). So: 1 = prune + keep Telegram, 2 = keep everything, 3 = prune + no Teleg
 | Env var | Default | Effect |
 |---|---|---|
 | `CIO_MAX_NOTES` | 500 | per-scope note cap before eviction |
+| `CIO_MAX_HOT` | 30 | per-scope cap on non-user HOT notes (excess demotes to WARM) |
+| `CIO_TURN_RETAIN_DAYS` | 365 | COLD-store retention window for `conv_turns` (0 = keep forever) |
+| `CIO_MAX_TURNS` | 50000 | hard row cap on `conv_turns` (0 = no cap) |
+| `CIO_MAINT_HOUR` / `CIO_MAINT_MINUTE` | 3 / 30 | daily maintenance slot (local; `off` disables) |
+| `CIO_BACKUP` / `CIO_BACKUP_KEEP` / `CIO_BACKUP_DIR` | on / 7 / `data/backups` | nightly pre-maintenance DB snapshots |
 | `CIO_PROMOTE_HITS` | 3 | recalls needed to auto-promote WARM → HOT |
 | `CIO_AGENT_MEM_BUDGET` | 400 | token budget for a committee agent's injected memory |
 | `CIO_DEDUP_MAXDIST` | 0.45 | semantic-dedup L2 threshold (0 disables; key dedup stays) |
@@ -372,7 +408,51 @@ not stored).
 
 ---
 
-## 16. Guarantees & failure modes
+## 16. Maintenance — the daily upkeep loop
+
+`memory.maintain(db_path, force=False)` is the single upkeep entry point, run for **both**
+DBs by the scheduler job `memory_maintenance` (default 03:30 local, plus a boot one-shot
+catch-up; `CIO_MAINT_HOUR=off` disables). The job takes a **backup first** (`cio/backup.py`:
+SQLite online-backup snapshot of each DB into `data/backups/<stem>.<date>.db`, newest
+`CIO_BACKUP_KEEP`=7 kept, one per local day, WAL-safe against a live writer — maintenance
+deletes by design, so every night gets a restore point before anything is removed; restore =
+stop bot, copy snapshot over the live file, start bot). maintain() itself is guarded once per
+local day via the `last_maintenance_day` meta marker, is best-effort throughout (never
+raises), and does:
+
+1. **TTL purge** — delete notes past `expires_at` (with their `mem_vec` rows).
+2. **COLD-store retention** — `prune_turns`: drop `conv_turns` older than
+   `CIO_TURN_RETAIN_DAYS`, then the oldest rows beyond `CIO_MAX_TURNS` (embeddings go with
+   them; FTS via triggers). Without this the turn store — and its ~3 KB/row embeddings —
+   grew without bound, and the brute-force vec0 KNN scan slowed linearly with it. Long-term
+   context still survives in digests and monthly rollups; only raw turns are trimmed.
+3. **Hot-cap demotion** — `enforce_hot_cap` per scope (§9).
+4. **Vector self-healing** — `recall.reindex_missing`: embed any notes/turns/digests the
+   write path failed to index (capped per run).
+5. **Runtime invariant checks** (`cio/invariants.py`) — re-verify the design's promises
+   against the REAL database, after the steps above: **I1** no recently-active session
+   spans more than one local day (the misattribution class), **I2** vector↔row parity in
+   both directions, **I3** per-scope note/hot caps hold, **I4** no expired note lingers,
+   **I5** no figure-like content sits in `mem_notes`, **I6** the running process is not
+   older than the repo HEAD (stale-process class — see below). Violations are logged,
+   returned in the summary, persisted to `meta.last_invariant_violations`, and shown on
+   the dashboard overview. Tests prove presence of behavior, never absence of bugs;
+   the invariants make production a continuous test.
+
+This mirrors what OpenClaw schedules as its "dreaming" sweep and Hermes runs as background
+provider sync: curation happens off the conversational hot path, on a clock.
+
+### Boot version stamp (stale-process detection)
+
+`cio/version.py`: at startup the bot stamps the short git commit it booted from (plus boot
+time and pid) into `meta`. The dashboard overview shows *running* vs *on-disk* version, and
+invariant **I6** flags a mismatch as "restart needed". Motivation (2026-06-10 incident): a
+fix was committed at 21:56 with all tests green, but the process serving overnight turns
+predated the commit — Python doesn't hot-reload, so production ran pre-fix code for hours.
+No test category can catch that; it is an operations property, so it is *observed* instead.
+The `+dirty` suffix is ignored in the comparison (in-progress edits would flap the check).
+
+## 17. Guarantees & failure modes
 
 - **Never breaks a turn.** Every memory/recall/sanitize/log call is wrapped best-effort;
   failures log and return a safe default (`''`, `None`, or the original text).
@@ -381,12 +461,16 @@ not stored).
   deterministic Layer 3 when it is absent.
 - **Deterministic acceptance.** Whatever the LLM produces, the regex firewall is the final
   gate on what enters the DB — so the invariant "no figures in memory" is testable.
-- **No cross-scope leakage.** Enforced in every recall/dedup query.
-- **Bounded growth.** Per-scope eviction + the sanitizer-log row cap.
+- **No cross-scope leakage.** Enforced in every recall/dedup query — now *pre-filtered in
+  SQL*, so isolation also can't silently degrade into empty recall as the DB grows (§10).
+- **Bounded growth.** Per-scope eviction (with hot cap so it can always make progress),
+  COLD-store retention, TTL purge, and the sanitizer-log row cap.
+- **Recoverable.** Every maintenance night starts with a consistent snapshot of both DBs
+  (newest 7 kept), so any purge/prune/demotion — or a bug in one — is reversible for a week.
 
 ---
 
-## 17. Testing
+## 18. Testing
 
 - `tests/test_memcore.py` — firewall, scope isolation, injection budget, eviction,
   promotion, cold-boot continuity, rolling-session cadence, reflection loop, and
@@ -405,10 +489,26 @@ not stored).
   unparseable reject) and the audit callback (fires on cleaned/rejected, silent otherwise),
   all with a fake injected `asker` (no network).
 - `tests/test_dashboard.py` — route/view rendering including the new `/sanitizer` page.
+- `tests/test_memory_longterm.py` — the long-term hardening pass: scoped recall under
+  cross-scope crowding (notes + dedup), TTL set/hide/purge, hot cap & demotion (user notes
+  exempt; promotion respects the cap), eviction protections (rollups; expired-first),
+  COLD-store retention by age and row count, save-survives-embedding-outage +
+  `reindex_missing` self-heal, `maintain()` daily guard, the `connect()` init cache, and
+  the `\b`-anchored `p/e` firewall keyword regression.
+- `tests/test_temporal_simulation.py` — the **temporal simulation harness**: drives the
+  real `ask()`/`_checkpoint()`/`_monthly_rollup()` code paths on a temp DB under a virtual
+  clock, process restarts, and a fake LLM. Scenarios: 8 days of overnight restarts (the
+  misattribution incident shape), same-day restart resumes, midnight crossing without
+  restart, multi-day downtime rolls once, growth roll within a day, brand-new chat no-roll,
+  month-boundary rollup. Asserts the promised property directly: no session ever serves
+  two local days, and every boundary leaves a digest.
+- `tests/test_invariants.py` — each invariant (I1–I6) tested by crafting the violating DB
+  state directly (as a real bug would), plus the clean-DB-is-silent case and
+  `maintain()` persisting violations for the dashboard.
 
 ---
 
-## 18. Known limitations & future work
+## 19. Known limitations & future work
 
 - **Monthly rollup cost & cadence:** one extra LLM call per chat per month (the digest-of-
   digests), on the first turn after a month boundary. Multi-month downtime rolls up only the
@@ -422,6 +522,13 @@ not stored).
 - **Keyword-gated regex** can let a figure phrased with no nearby keyword through to storage
   if the LLM layer is also unavailable — an accepted trade for low false positives, mitigated
   by Layers 1–2 when online.
+- **Turn pruning trades "nothing is ever lost" for boundedness.** Raw turns older than
+  `CIO_TURN_RETAIN_DAYS` are gone from COLD recall; digests and monthly rollups carry the
+  long-term signal. Set the var to 0 to keep every turn (at unbounded DB growth).
+- **Hot-cap demotion is score-based, not semantic** — a rarely-bumped but genuinely durable
+  auto note can drop out of injection once the cap is under pressure; it remains warm and
+  searchable. Pin truly permanent facts as `source='user'` (the `remember` tool's
+  `important` flag) to exempt them.
 - **Backfilled `dedup:<hash>` keys** do not match the live `SYMBOL:<hash>` scheme, so a future
   identical-text save will not upsert onto a legacy row by key — but semantic dedup
   (distance ≈ 0) still collapses it. Cosmetic only.
