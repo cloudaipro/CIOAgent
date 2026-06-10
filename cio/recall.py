@@ -114,6 +114,51 @@ def reindex_all(db_path=DB_PATH) -> tuple[int, int]:
     return len(notes), len(turns)
 
 
+def reindex_missing(db_path=DB_PATH, limit: int = 500) -> tuple[int, int, int]:
+    """Embed rows that have no vector (a write-path embedding hiccup leaves a note
+    semantically invisible). Repairs up to *limit* rows per kind per run — called
+    from memory.maintain() so drift self-heals. Returns (notes, turns, digests)."""
+    conn = db.connect(db_path)
+    notes = conn.execute(
+        "SELECT id, value FROM mem_notes WHERE id NOT IN (SELECT note_id FROM mem_vec) "
+        "LIMIT ?", (limit,)).fetchall()
+    turns = conn.execute(
+        "SELECT id, content FROM conv_turns WHERE id NOT IN (SELECT turn_id FROM turn_vec) "
+        "LIMIT ?", (limit,)).fetchall()
+    digests = conn.execute(
+        "SELECT id, summary FROM session_digests "
+        "WHERE id NOT IN (SELECT digest_id FROM digest_vec) LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    for r in notes:
+        index_note(r["id"], r["value"], db_path)
+    for r in turns:
+        index_turn(r["id"], r["content"], db_path)
+    for r in digests:
+        index_digest(r["id"], r["summary"], db_path)
+    return len(notes), len(turns), len(digests)
+
+
+# ----- scope pre-filtering ---------------------------------------------------
+# Ranking across ALL scopes and filtering afterwards starves recall as the DB
+# fills: a small fixed KNN/FTS pool gets dominated by other scopes' rows and the
+# target scope surfaces nothing (and semantic dedup stops collapsing twins, which
+# compounds the crowding). Both rankers therefore restrict candidates to the
+# allowed scopes IN SQL — sqlite-vec 0.1.9 supports `note_id IN (subquery)`
+# KNN pre-filtering, and the FTS join takes a plain WHERE.
+
+_NOT_EXPIRED = "(expires_at IS NULL OR expires_at > datetime('now','localtime'))"
+
+
+def _note_scope_filter(scope: str | None, include_global: bool) -> tuple[str, list]:
+    """SQL predicate (against mem_notes columns) + params for the allowed scopes,
+    always excluding expired notes."""
+    if scope and include_global:
+        return f"scope IN (?, 'global') AND {_NOT_EXPIRED}", [scope]
+    if scope:
+        return f"scope = ? AND {_NOT_EXPIRED}", [scope]
+    return _NOT_EXPIRED, []
+
+
 # ----- dedup ----------------------------------------------------------------
 
 def nearest_in_scope(text: str, scope: str, db_path=DB_PATH,
@@ -127,13 +172,13 @@ def nearest_in_scope(text: str, scope: str, db_path=DB_PATH,
     """
     qvec = _ser(embed_one(text))
     conn = db.connect(db_path)
-    # KNN runs on the vec table alone (proven pattern, same as search()); we then
-    # filter to this scope and take the closest in-scope hit. An out-of-scope note
-    # must never collapse ours, so scope filtering happens after the ANN lookup.
+    # KNN is pre-filtered to THIS scope in SQL, so a crowded DB (many scopes) can
+    # never push the true in-scope neighbour out of the candidate pool.
     knn = conn.execute(
         "SELECT note_id, distance FROM mem_vec WHERE embedding MATCH ? "
+        f"AND note_id IN (SELECT id FROM mem_notes WHERE scope = ? AND {_NOT_EXPIRED}) "
         "ORDER BY distance LIMIT ?",
-        (qvec, pool),
+        (qvec, scope, pool),
     ).fetchall()
     best = None
     for r in knn:
@@ -190,15 +235,19 @@ def search(query: str, k: int = 5, scope: str | None = None,
     results: list[dict] = []
 
     if "note" in kinds:
+        scope_sql, scope_args = _note_scope_filter(scope, include_global)
         fts_ids = []
         if match:
             fts_ids = [r["id"] for r in conn.execute(
                 "SELECT m.id FROM notes_fts f JOIN mem_notes m ON m.id=f.rowid "
-                "WHERE notes_fts MATCH ? ORDER BY bm25(notes_fts) LIMIT ?",
-                (match, pool)).fetchall()]
+                f"WHERE notes_fts MATCH ? AND {scope_sql} "
+                "ORDER BY bm25(notes_fts) LIMIT ?",
+                (match, *scope_args, pool)).fetchall()]
         vec_ids = [r["note_id"] for r in conn.execute(
-            "SELECT note_id FROM mem_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-            (qvec, pool)).fetchall()]
+            "SELECT note_id FROM mem_vec WHERE embedding MATCH ? "
+            f"AND note_id IN (SELECT id FROM mem_notes WHERE {scope_sql}) "
+            "ORDER BY distance LIMIT ?",
+            (qvec, *scope_args, pool)).fetchall()]
         scores = _rrf([fts_ids, vec_ids])
         if scores:
             rows = {r["id"]: r for r in conn.execute(
@@ -219,15 +268,22 @@ def search(query: str, k: int = 5, scope: str | None = None,
 
     if "turn" in kinds:
         cid = _scope_chat_id(scope)
+        # Same pre-filter idea as notes: restrict candidates to this chat (or
+        # chat-less rows) in SQL so other chats can't crowd the pool.
+        chat_sql = "(chat_id IS NULL OR chat_id = ?)" if cid is not None else "1=1"
+        chat_args = [cid] if cid is not None else []
         fts_ids = []
         if match:
             fts_ids = [r["id"] for r in conn.execute(
                 "SELECT c.id FROM turns_fts f JOIN conv_turns c ON c.id=f.rowid "
-                "WHERE turns_fts MATCH ? ORDER BY bm25(turns_fts) LIMIT ?",
-                (match, pool)).fetchall()]
+                f"WHERE turns_fts MATCH ? AND {chat_sql.replace('chat_id', 'c.chat_id')} "
+                "ORDER BY bm25(turns_fts) LIMIT ?",
+                (match, *chat_args, pool)).fetchall()]
         vec_ids = [r["turn_id"] for r in conn.execute(
-            "SELECT turn_id FROM turn_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-            (qvec, pool)).fetchall()]
+            "SELECT turn_id FROM turn_vec WHERE embedding MATCH ? "
+            f"AND turn_id IN (SELECT id FROM conv_turns WHERE {chat_sql}) "
+            "ORDER BY distance LIMIT ?",
+            (qvec, *chat_args, pool)).fetchall()]
         scores = _rrf([fts_ids, vec_ids])
         if scores:
             rows = {r["id"]: r for r in conn.execute(
@@ -244,15 +300,20 @@ def search(query: str, k: int = 5, scope: str | None = None,
 
     if "digest" in kinds:
         cid = _scope_chat_id(scope)
+        chat_sql = "(chat_id IS NULL OR chat_id = ?)" if cid is not None else "1=1"
+        chat_args = [cid] if cid is not None else []
         fts_ids = []
         if match:
             fts_ids = [r["id"] for r in conn.execute(
                 "SELECT d.id FROM digests_fts f JOIN session_digests d ON d.id=f.rowid "
-                "WHERE digests_fts MATCH ? ORDER BY bm25(digests_fts) LIMIT ?",
-                (match, pool)).fetchall()]
+                f"WHERE digests_fts MATCH ? AND {chat_sql.replace('chat_id', 'd.chat_id')} "
+                "ORDER BY bm25(digests_fts) LIMIT ?",
+                (match, *chat_args, pool)).fetchall()]
         vec_ids = [r["digest_id"] for r in conn.execute(
-            "SELECT digest_id FROM digest_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
-            (qvec, pool)).fetchall()]
+            "SELECT digest_id FROM digest_vec WHERE embedding MATCH ? "
+            f"AND digest_id IN (SELECT id FROM session_digests WHERE {chat_sql}) "
+            "ORDER BY distance LIMIT ?",
+            (qvec, *chat_args, pool)).fetchall()]
         scores = _rrf([fts_ids, vec_ids])
         if scores:
             rows = {r["id"]: r for r in conn.execute(

@@ -389,13 +389,19 @@ def _auto_note(text: str) -> None:
 @tool("remember",
       "Persist a QUALITATIVE fact across sessions (preferences, watchlist, plans, context). "
       "NEVER store financial figures/prices — those are recomputed from portfolio data. "
-      "Optional `key` makes it an upsert; `important`=true pins it into startup context.",
-      {"value": str, "key": str, "important": bool})
+      "Optional `key` makes it an upsert; `important`=true pins it into startup context. "
+      "For time-bound notes (an upcoming event/plan that stops mattering), set `ttl_days` "
+      "so the note expires instead of lingering forever.",
+      {"value": str, "key": str, "important": bool, "ttl_days": int})
 async def t_remember(args):
     try:
+        # important=true is an operator pin: source='user' exempts it from both
+        # eviction and hot-cap demotion (it stays injected until forgotten).
         memory.remember(args["value"], key=args.get("key") or None, scope=_scope(),
                         tier="hot" if args.get("important") else "warm",
-                        importance=2.0 if args.get("important") else 1.0, source="agent")
+                        importance=2.0 if args.get("important") else 1.0,
+                        source="user" if args.get("important") else "agent",
+                        ttl_days=args.get("ttl_days") or None)
     except memory.FiguresFirewallError as e:
         return _text(str(e))
     return _text(f"Remembered: {args.get('key') or args['value'][:50]}")

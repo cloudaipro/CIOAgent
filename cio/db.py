@@ -289,9 +289,25 @@ def _drop_stale_vec(conn: sqlite3.Connection) -> bool:
     return False
 
 
+# Paths whose schema/migrations already ran in this process. Re-running the full
+# SCHEMA script plus a meta write on EVERY connect is a write transaction per call —
+# under the parallel committee that serializes writers for no benefit. Init once per
+# process per path; the file-exists check covers a DB deleted mid-process (tests).
+_INITIALIZED: set[str] = set()
+
+
 def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
-    """Open a connection: load sqlite-vec, ensure schema, run one-time migration."""
+    """Open a connection: load sqlite-vec; on first use of a path in this process,
+    ensure schema and run one-time migrations."""
     path = Path(db_path)
+    key = str(path.resolve())
+    if key in _INITIALIZED and not path.exists():
+        _INITIALIZED.discard(key)          # file was removed; re-initialize
+    if key in _INITIALIZED:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        _load_vec(conn)
+        return conn
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -305,6 +321,7 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
                      (str(EMBED_DIM),))
         if dropped:   # vectors were wiped on a dim change -> need re-embedding
             conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('vec_reindex_needed','1')")
+    _INITIALIZED.add(key)
     return conn
 
 

@@ -31,6 +31,20 @@ _HALFLIFE_DAYS = 30.0
 # A warm note recalled this many times is auto-promoted to hot (injected at
 # session start) — memory curates itself by usefulness (self-improving loop).
 PROMOTE_HITS = int(os.getenv("CIO_PROMOTE_HITS", os.getenv("CFO_PROMOTE_HITS", "3")))
+# Hot is a privilege, not a ratchet: without a cap + demotion the bump→promote
+# loop slowly turns every note hot, hot notes are never evicted, and once a scope's
+# hot count exceeds MAX_NOTES eviction can never reach its target again. Non-user
+# hot notes beyond this cap are demoted back to warm by retention score.
+MAX_HOT_PER_SCOPE = int(os.getenv("CIO_MAX_HOT", "30"))
+# COLD-store retention: conv_turns (and their 768-dim embeddings, ~3 KB/row) would
+# otherwise grow without bound on a 24/7 runtime — and the vec0 KNN scan is linear
+# in rows, so search slows as it grows. 0 disables the respective limit.
+TURN_RETAIN_DAYS = int(os.getenv("CIO_TURN_RETAIN_DAYS", "365"))
+MAX_TURNS = int(os.getenv("CIO_MAX_TURNS", "50000"))
+# Keys that must survive eviction even as warm notes (long-term month memory).
+_EVICT_PROTECT_PREFIXES = ("monthly_rollup:",)
+# Expired-note filter, shared by every read path (recall.py keeps its own copy).
+_NOT_EXPIRED = "(expires_at IS NULL OR expires_at > datetime('now','localtime'))"
 
 
 class FiguresFirewallError(ValueError):
@@ -47,7 +61,9 @@ _FIG_KEYWORDS = (
     r"balance|p&l|pnl|profit|loss|equity|return|gain|dividend|"
     # fundamentals/ratios — also numbers that go stale and must be recomputed
     r"\broe\b|\broa\b|\broic?\b|\broi\b|margins?|\beps\b|ebitda|revenue|"
-    r"\byield\b|multiple|p/?e|\bcagr\b|\bfcf\b|payout"
+    # \b-anchored: unanchored "p/?e" matched the "pe" inside words like
+    # "operator"/"open", blocking any note that also contained a digit.
+    r"\byield\b|multiple|\bp/?e\b|\bcagr\b|\bfcf\b|payout"
 )
 _HAS_NUMBER = re.compile(r"\d")
 _CURRENCY = re.compile(r"[$€£¥]\s*\d")
@@ -80,45 +96,59 @@ def _guard_figures(value: str) -> None:
 
 def remember(value: str, key: str | None = None, scope: str = "global",
              tier: str = "warm", importance: float = 1.0, source: str = "agent",
-             db_path=db.DB_PATH) -> int:
+             ttl_days: float | None = None, db_path=db.DB_PATH) -> int:
     """Store a qualitative note; returns its id. Upserts when `key` is given.
 
     Rejects financial figures (figures firewall). `tier` is 'hot' (injected at
-    session start) or 'warm' (recall on demand)."""
+    session start) or 'warm' (recall on demand). `ttl_days` sets `expires_at` for
+    time-bound notes ("watch FOMC next week") — expired notes stop surfacing in
+    every read path and are purged by maintain()."""
     value = value.strip()
     _guard_figures(value)
+    expires = f"+{float(ttl_days)} days" if ttl_days and ttl_days > 0 else None
     conn = db.connect(db_path)
     with conn:
         if key:
             conn.execute(
-                "INSERT INTO mem_notes (scope,tier,key,value,importance,source) "
-                "VALUES (?,?,?,?,?,?) "
+                "INSERT INTO mem_notes (scope,tier,key,value,importance,source,expires_at) "
+                "VALUES (?,?,?,?,?,?,datetime('now','localtime',?)) "
                 "ON CONFLICT(scope,key) DO UPDATE SET value=excluded.value, "
                 "tier=excluded.tier, importance=excluded.importance, "
-                "source=excluded.source, updated_at=datetime('now','localtime')",
-                (scope, tier, key, value, importance, source),
+                "source=excluded.source, expires_at=excluded.expires_at, "
+                "updated_at=datetime('now','localtime')",
+                (scope, tier, key, value, importance, source, expires),
             )
             nid = conn.execute("SELECT id FROM mem_notes WHERE scope=? AND key=?",
                                (scope, key)).fetchone()["id"]
         else:
             cur = conn.execute(
-                "INSERT INTO mem_notes (scope,tier,key,value,importance,source) "
-                "VALUES (?,?,?,?,?,?)",
-                (scope, tier, key, value, importance, source),
+                "INSERT INTO mem_notes (scope,tier,key,value,importance,source,expires_at) "
+                "VALUES (?,?,?,?,?,?,datetime('now','localtime',?))",
+                (scope, tier, key, value, importance, source, expires),
             )
             nid = cur.lastrowid
     conn.close()
-    _recall.index_note(nid, value, db_path)   # keep the semantic index in sync
+    # Best-effort semantic indexing: an embedding hiccup must not fail a save that
+    # is already committed (the note would look "failed" yet exist, and retries
+    # would duplicate). reindex_missing() in maintain() heals any gap.
+    try:
+        _recall.index_note(nid, value, db_path)
+    except Exception:
+        import logging
+        logging.getLogger("cio.memory").warning("note %s saved but not indexed", nid,
+                                                exc_info=True)
     if count_notes(scope, db_path=db_path) > MAX_NOTES_PER_SCOPE:
         evict(scope, max_notes=MAX_NOTES_PER_SCOPE, db_path=db_path)
     return nid
 
 
 def recall(key: str, scope: str = "global", db_path=db.DB_PATH) -> str | None:
-    """Exact-key lookup within a scope; bumps the hit counter."""
+    """Exact-key lookup within a scope; bumps the hit counter. Expired notes
+    (past their `expires_at`) are invisible here."""
     conn = db.connect(db_path)
-    row = conn.execute("SELECT id, value FROM mem_notes WHERE scope=? AND key=?",
-                       (scope, key)).fetchone()
+    row = conn.execute(
+        f"SELECT id, value FROM mem_notes WHERE scope=? AND key=? AND {_NOT_EXPIRED}",
+        (scope, key)).fetchone()
     if row:
         with conn:
             conn.execute("UPDATE mem_notes SET hits=hits+1 WHERE id=?", (row["id"],))
@@ -134,11 +164,14 @@ def get_note(note_id: int, db_path=db.DB_PATH) -> dict | None:
 
 
 def list_notes(scope: str = "global", tier: str | None = None, limit: int = 50,
-               db_path=db.DB_PATH) -> list[dict]:
-    """Notes for a scope, most important/recent first."""
+               include_expired: bool = False, db_path=db.DB_PATH) -> list[dict]:
+    """Notes for a scope, most important/recent first. Expired notes are hidden
+    unless `include_expired` (the dashboard may want to show them)."""
     conn = db.connect(db_path)
     sql = "SELECT * FROM mem_notes WHERE scope=?"
     args: list = [scope]
+    if not include_expired:
+        sql += f" AND {_NOT_EXPIRED}"
     if tier:
         sql += " AND tier=?"
         args.append(tier)
@@ -234,13 +267,23 @@ def _score(importance: float, hits: int, age_days: float) -> float:
     return importance * (1.0 + math.log1p(hits)) * (0.5 ** (age_days / _HALFLIFE_DAYS))
 
 
+def _evict_protected(row) -> bool:
+    """Never evict: HOT, user-authored, or long-term keyed notes (monthly rollups
+    stay searchable month memory even after the hot cap demotes them to warm)."""
+    if row["tier"] == "hot" or row["source"] == "user":
+        return True
+    key = row["key"]
+    return bool(key) and key.startswith(_EVICT_PROTECT_PREFIXES)
+
+
 def evict(scope: str, max_notes: int = MAX_NOTES_PER_SCOPE, db_path=db.DB_PATH) -> int:
-    """Trim a scope back to `max_notes`, dropping the lowest-scoring WARM
-    agent/auto notes first. HOT and user-authored notes are never evicted.
-    Returns the number removed."""
+    """Trim a scope back to `max_notes`: expired notes first, then the
+    lowest-scoring WARM agent/auto notes. HOT, user-authored, and monthly-rollup
+    notes are never evicted. Returns the number removed."""
     conn = db.connect(db_path)
     rows = conn.execute(
-        "SELECT id, importance, hits, tier, source, "
+        "SELECT id, importance, hits, tier, source, key, "
+        f"NOT {_NOT_EXPIRED} AS expired, "
         "julianday('now','localtime') - julianday(updated_at) AS age FROM mem_notes WHERE scope=?",
         (scope,),
     ).fetchall()
@@ -248,20 +291,28 @@ def evict(scope: str, max_notes: int = MAX_NOTES_PER_SCOPE, db_path=db.DB_PATH) 
     if overflow <= 0:
         conn.close()
         return 0
-    evictable = [r for r in rows if r["tier"] != "hot" and r["source"] != "user"]
+    expired = [r for r in rows if r["expired"]]
+    evictable = [r for r in rows if not r["expired"] and not _evict_protected(r)]
     evictable.sort(key=lambda r: _score(r["importance"], r["hits"], r["age"] or 0.0))
-    ids = [r["id"] for r in evictable[:overflow]]
+    ids = [r["id"] for r in (expired + evictable)[:overflow]]
     with conn:
         for i in ids:
             conn.execute("DELETE FROM mem_vec WHERE note_id=?", (i,))
             conn.execute("DELETE FROM mem_notes WHERE id=?", (i,))
     conn.close()
+    if len(ids) < overflow:
+        import logging
+        logging.getLogger("cio.memory").warning(
+            "evict: scope %s still %d over cap — too many protected (hot/user) notes; "
+            "check CIO_MAX_HOT / enforce_hot_cap", scope, overflow - len(ids))
     return len(ids)
 
 
 def promote_hot(scope: str, hits_threshold: int = PROMOTE_HITS, db_path=db.DB_PATH) -> int:
     """Promote frequently-recalled WARM notes to HOT so they get injected at
-    session start. Part of the self-improving loop. Returns the number promoted."""
+    session start. Part of the self-improving loop. Returns the number promoted.
+    The hot cap is enforced afterwards so promotion can never ratchet a scope
+    into an all-hot (uneveictable) state."""
     conn = db.connect(db_path)
     with conn:
         cur = conn.execute(
@@ -271,7 +322,57 @@ def promote_hot(scope: str, hits_threshold: int = PROMOTE_HITS, db_path=db.DB_PA
         )
     n = cur.rowcount
     conn.close()
+    if n:
+        enforce_hot_cap(scope, db_path=db_path)
     return n
+
+
+def enforce_hot_cap(scope: str, max_hot: int = MAX_HOT_PER_SCOPE,
+                    db_path=db.DB_PATH) -> int:
+    """Demote the lowest-scoring non-user HOT notes back to WARM so at most
+    `max_hot` of them stay hot. Keeps the injected block high-signal (old monthly
+    rollups and stale promotions decay out of injection but remain searchable —
+    the same idea as OpenClaw's gated 'dreaming' promotion). `source='user'` hot
+    notes are never demoted and don't count toward the cap. Returns demoted count.
+    Demotion does NOT refresh updated_at, so a demoted note keeps decaying."""
+    if max_hot <= 0:
+        return 0
+    conn = db.connect(db_path)
+    rows = conn.execute(
+        "SELECT id, importance, hits, "
+        "julianday('now','localtime') - julianday(updated_at) AS age "
+        "FROM mem_notes WHERE scope=? AND tier='hot' AND source!='user'",
+        (scope,),
+    ).fetchall()
+    if len(rows) <= max_hot:
+        conn.close()
+        return 0
+    ranked = sorted(rows, key=lambda r: _score(r["importance"], r["hits"], r["age"] or 0.0),
+                    reverse=True)
+    ids = [r["id"] for r in ranked[max_hot:]]
+    with conn:
+        conn.executemany("UPDATE mem_notes SET tier='warm' WHERE id=?",
+                         [(i,) for i in ids])
+    conn.close()
+    return len(ids)
+
+
+def purge_expired(scope: str | None = None, db_path=db.DB_PATH) -> int:
+    """Delete notes past their `expires_at` (all scopes when scope is None),
+    dropping their semantic-index rows too. Returns the number removed."""
+    conn = db.connect(db_path)
+    sql = f"SELECT id FROM mem_notes WHERE NOT {_NOT_EXPIRED}"
+    args: list = []
+    if scope:
+        sql += " AND scope=?"
+        args.append(scope)
+    ids = [r["id"] for r in conn.execute(sql, args).fetchall()]
+    with conn:
+        for i in ids:
+            conn.execute("DELETE FROM mem_vec WHERE note_id=?", (i,))
+            conn.execute("DELETE FROM mem_notes WHERE id=?", (i,))
+    conn.close()
+    return len(ids)
 
 
 # ----- conversation turns (COLD store + dev-dashboard history) --------------
@@ -328,6 +429,103 @@ def delete_turns_on_day(day: str, db_path=db.DB_PATH) -> int:
             conn.execute("DELETE FROM conv_turns WHERE id=?", (i,))
     conn.close()
     return len(ids)
+
+
+def prune_turns(retain_days: int = TURN_RETAIN_DAYS, max_rows: int = MAX_TURNS,
+                db_path=db.DB_PATH) -> int:
+    """Bound the COLD store: delete conversation turns older than `retain_days`,
+    then the oldest rows beyond `max_rows`. Embedding rows go with them (FTS stays
+    in sync via triggers). Either limit can be disabled with 0. Long-term context
+    survives in session digests and monthly rollups; this only trims raw turns —
+    without it conv_turns/turn_vec grow without bound on a 24/7 runtime.
+    Returns the number of turns removed."""
+    conn = db.connect(db_path)
+
+    def _drop(ids: list[int]) -> None:
+        with conn:
+            for i in ids:
+                conn.execute("DELETE FROM turn_vec WHERE turn_id=?", (i,))
+                conn.execute("DELETE FROM conv_turns WHERE id=?", (i,))
+
+    removed = 0
+    if retain_days and retain_days > 0:
+        old = [r["id"] for r in conn.execute(
+            "SELECT id FROM conv_turns WHERE ts < datetime('now','localtime',?)",
+            (f"-{int(retain_days)} days",)).fetchall()]
+        _drop(old)
+        removed += len(old)
+    if max_rows and max_rows > 0:
+        total = conn.execute("SELECT COUNT(*) c FROM conv_turns").fetchone()["c"]
+        overflow = total - max_rows
+        if overflow > 0:
+            oldest = [r["id"] for r in conn.execute(
+                "SELECT id FROM conv_turns ORDER BY id ASC LIMIT ?",
+                (overflow,)).fetchall()]
+            _drop(oldest)
+            removed += len(oldest)
+    conn.close()
+    return removed
+
+
+def maintain(db_path=db.DB_PATH, force: bool = False) -> dict:
+    """Daily memory upkeep for one DB — the single maintenance entry point
+    (scheduled like OpenClaw's dreaming sweep; see scheduler.memory_maintenance):
+
+    1. purge expired notes (TTL),
+    2. prune the COLD turn store to its retention window,
+    3. enforce the per-scope hot cap (demote stale hot notes),
+    4. re-embed any rows the write path failed to index,
+    5. re-verify the design's runtime invariants (cio/invariants.py) — violations
+       are logged, returned in the summary, and persisted to
+       `meta.last_invariant_violations` for the dashboard.
+
+    Guarded once per local day via the `last_maintenance_day` meta marker unless
+    `force`. Best-effort throughout — never raises. Returns a summary dict."""
+    import logging
+    log = logging.getLogger("cio.memory")
+    from . import timeutil
+    today = timeutil.today_local()
+    summary: dict = {"ran": False}
+    try:
+        if not force and get_meta("last_maintenance_day", db_path=db_path) == today:
+            return summary
+    except Exception:
+        return summary
+    summary["ran"] = True
+    try:
+        summary["purged"] = purge_expired(db_path=db_path)
+    except Exception:
+        log.warning("maintain: purge_expired failed", exc_info=True)
+    try:
+        summary["turns_pruned"] = prune_turns(db_path=db_path)
+    except Exception:
+        log.warning("maintain: prune_turns failed", exc_info=True)
+    try:
+        summary["demoted"] = sum(
+            enforce_hot_cap(s["scope"], db_path=db_path)
+            for s in list_scopes(db_path=db_path))
+    except Exception:
+        log.warning("maintain: enforce_hot_cap failed", exc_info=True)
+    try:
+        summary["reindexed"] = _recall.reindex_missing(db_path=db_path)
+    except Exception:
+        log.warning("maintain: reindex_missing failed", exc_info=True)
+    try:
+        # Invariants run LAST so they verify the post-maintenance state (e.g. no
+        # expired notes left, hot caps hold). check() never raises.
+        import json
+        from . import invariants
+        summary["violations"] = invariants.check(db_path=db_path)
+        set_meta("last_invariant_violations", json.dumps(summary["violations"]),
+                 db_path=db_path)
+    except Exception:
+        log.warning("maintain: invariant check failed", exc_info=True)
+    try:
+        set_meta("last_maintenance_day", today, db_path=db_path)
+    except Exception:
+        log.warning("maintain: could not persist day marker", exc_info=True)
+    log.info("memory maintenance for %s: %s", db_path, summary)
+    return summary
 
 
 def conv_history(chat_id: int | None = None, limit: int | None = 200,
