@@ -56,8 +56,9 @@ def _format_digest() -> str:
         return "📊 Daily digest: no open positions yet. Upload a transactions CSV to start."
     pos = portfolio.positions()
     priced = pos.dropna(subset=["unrealized_pl"])
+    # Plain text — sent without parse_mode, so no Markdown markup here.
     lines = [
-        "📊 *Daily portfolio digest*",
+        "📊 Daily portfolio digest",
         f"Market value: {s['market_value']:,.2f}",
         f"Cost basis:   {s['cost_basis']:,.2f}",
         f"Unrealized:   {s['unrealized_pl']:+,.2f} ({s['unrealized_pct']:+.2f}%)",
@@ -187,7 +188,8 @@ async def watchlist_briefing(bot) -> None:
 def _format_econ_alert(events: list[dict], lead_days: int) -> str:
     """Deterministic heads-up text for upcoming high-impact econ events. Zero tokens."""
     when = "tomorrow" if lead_days == 1 else f"the next {lead_days} days"
-    lines = [f"🗓️ *High-impact economic events {when}*", ""]
+    # Plain text — sent without parse_mode, so no Markdown markup here.
+    lines = [f"🗓️ High-impact economic events {when}", ""]
     for e in events:
         d = date.fromisoformat(e["event_date"])
         dow = d.strftime("%a")
@@ -251,35 +253,41 @@ def start(bot) -> AsyncIOScheduler:
     """Start the scheduler on the running loop. Returns it so the caller can stop it.
 
     CIO_DIGEST_HOUR / CIO_DIGEST_MINUTE (local TZ, default 08:00) control timing.
-    Set CIO_DIGEST_HOUR=off to disable. CFO_DIGEST_HOUR/MINUTE still honored.
+    Set CIO_DIGEST_HOUR=off to disable the digest job only — the other jobs
+    (price refresh, briefing, maintenance, econ alerts) are independent and keep
+    their own =off switches. CFO_DIGEST_HOUR/MINUTE still honored.
 
     CIO_PRICE_REFRESH_HOUR / CIO_PRICE_REFRESH_MINUTE (local TZ, default 17:00)
     control the daily price refresh. Set CIO_PRICE_REFRESH_HOUR=off to disable.
     CFO_PRICE_REFRESH_HOUR/MINUTE still honored.
     """
+    sched = AsyncIOScheduler()
+    sched.start()
+    now = datetime.now()
+
+    # ----- daily digest job -----------------------------------------------------
+    # CIO_DIGEST_HOUR=off disables ONLY the digest; every other job (price refresh,
+    # watchlist briefing, memory maintenance + backups, econ alerts) still runs.
     hour = os.getenv("CIO_DIGEST_HOUR", os.getenv("CFO_DIGEST_HOUR", "8"))
     if hour.lower() == "off":
         log.info("daily digest disabled (CIO_DIGEST_HOUR=off)")
-        return None
-    hour, minute = int(hour), int(os.getenv("CIO_DIGEST_MINUTE", os.getenv("CFO_DIGEST_MINUTE", "0")))
-    sched = AsyncIOScheduler()
-    # coalesce + grace: if the loop was briefly blocked past fire time, still run
-    # once rather than skip. (Catch-up for full downtime is handled below.)
-    sched.add_job(daily_digest, "cron", hour=hour, minute=minute, args=[bot],
-                  id="daily_digest", replace_existing=True,
-                  coalesce=True, misfire_grace_time=3600)
-    sched.start()
-    log.info("scheduler started: daily digest at %02d:%02d local", hour, minute)
+    else:
+        hour, minute = int(hour), int(os.getenv("CIO_DIGEST_MINUTE", os.getenv("CFO_DIGEST_MINUTE", "0")))
+        # coalesce + grace: if the loop was briefly blocked past fire time, still run
+        # once rather than skip. (Catch-up for full downtime is handled below.)
+        sched.add_job(daily_digest, "cron", hour=hour, minute=minute, args=[bot],
+                      id="daily_digest", replace_existing=True,
+                      coalesce=True, misfire_grace_time=3600)
+        log.info("scheduler started: daily digest at %02d:%02d local", hour, minute)
 
-    # Boot-time catch-up: if today's slot already passed (e.g. the machine was
-    # rebooting at digest time) and we haven't sent today, fire one shortly.
-    now = datetime.now()
-    slot_passed = (now.hour, now.minute) >= (hour, minute)
-    if slot_passed and memory.get_meta(_LAST_DIGEST_KEY) != date.today().isoformat():
-        log.info("missed today's digest during downtime; scheduling catch-up")
-        sched.add_job(daily_digest, "date",
-                      run_date=now.replace(microsecond=0) + timedelta(seconds=15),
-                      args=[bot], id="digest_catchup", replace_existing=True)
+        # Boot-time catch-up: if today's slot already passed (e.g. the machine was
+        # rebooting at digest time) and we haven't sent today, fire one shortly.
+        slot_passed = (now.hour, now.minute) >= (hour, minute)
+        if slot_passed and memory.get_meta(_LAST_DIGEST_KEY) != date.today().isoformat():
+            log.info("missed today's digest during downtime; scheduling catch-up")
+            sched.add_job(daily_digest, "date",
+                          run_date=now.replace(microsecond=0) + timedelta(seconds=15),
+                          args=[bot], id="digest_catchup", replace_existing=True)
 
     # ----- price refresh job --------------------------------------------------
     pr_hour = os.getenv("CIO_PRICE_REFRESH_HOUR", os.getenv("CFO_PRICE_REFRESH_HOUR", "17"))

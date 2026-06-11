@@ -996,7 +996,9 @@ def build_options(model: str | None = None, resume: str | None = None,
         disallowed_tools=["Bash", "Write", "Edit", "WebFetch", "WebSearch"],
         permission_mode="bypassPermissions",
         cwd=str(PROJECT_ROOT),
-        model=_env("MODEL") or None,
+        # Explicit argument wins over the env default — without it a programmatic
+        # CIOAgent(model=...) override was silently ignored.
+        model=model or _env("MODEL") or None,
         resume=resume,
         hooks=hooks,
     )
@@ -1045,12 +1047,18 @@ async def _run_verifier(answer: str, sources: list[dict]) -> str | None:
     )
     try:
         import anthropic
-        client = anthropic.Anthropic()
-        msg = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
-        )
+
+        def _call():
+            client = anthropic.Anthropic()
+            return client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=256,
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+        # The sync SDK call would otherwise block the event loop (and with it the
+        # Telegram dispatcher) for the whole request; run it in a worker thread.
+        msg = await asyncio.to_thread(_call)
         result = (msg.content[0].text if msg.content else "").strip()
         if result and result.upper() != "PASS":
             return f"\n\n⚠️ Verifier (Haiku):\n{result}"

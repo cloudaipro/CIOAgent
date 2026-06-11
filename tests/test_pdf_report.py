@@ -220,8 +220,15 @@ class TestResolveTranslator:
     def test_resolve_translator_returns_claude(self):
         """resolve('translator') must return Claude — reliable on long markdown and
         strong Traditional Chinese (output is also OpenCC-forced to Traditional)."""
-        from cio.committee.models import resolve
+        from cio.committee.models import load_config, resolve
 
-        service, model = resolve("translator")
-        assert service == "claude"
-        assert model == "claude-sonnet-4-6"
+        # Hermetic: load_config is lru_cached and other tests point it at temp
+        # configs (monkeypatch restores the env var but not the cache), so under
+        # parallel/non-alphabetical ordering a stale doc could leak in here.
+        load_config.cache_clear()
+        try:
+            service, model = resolve("translator")
+            assert service == "claude"
+            assert model == "claude-sonnet-4-6"
+        finally:
+            load_config.cache_clear()

@@ -10,6 +10,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,7 +54,7 @@ ALLOWED_CHATS = {
 }
 
 # Keep generated filenames inside their directory (no path traversal from a symbol).
-_SAFE_NAME = __import__("re").compile(r"[^A-Za-z0-9.\-^=]")
+_SAFE_NAME = re.compile(r"[^A-Za-z0-9.\-^=]")
 
 
 def _safe_name(text: str, fallback: str = "report") -> str:
@@ -439,7 +440,11 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     doc = update.message.document
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOAD_DIR / f"{update.effective_chat.id}_{doc.file_name}"
+    # The sender controls file_name — strip any path components / odd characters so
+    # the write can never land outside UPLOAD_DIR (or fail on an embedded slash).
+    raw_name = Path(str(doc.file_name or "upload")).name
+    safe = re.sub(r"[^\w.\-]", "_", raw_name).lstrip(".")[:64] or "upload"
+    dest = UPLOAD_DIR / f"{update.effective_chat.id}_{safe}"
     tg_file = await doc.get_file()
     await tg_file.download_to_drive(dest)
     if str(doc.file_name).lower().endswith(".csv"):

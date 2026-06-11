@@ -810,8 +810,12 @@ def promote_playbook(pid: int, db_path=db.DB_PATH) -> dict:
 
 def get_playbook(name: str, scope: str = "global", db_path=db.DB_PATH) -> dict | None:
     conn = db.connect(db_path)
-    row = conn.execute("SELECT * FROM playbooks WHERE name=? AND scope IN (?, 'global')",
-                       (name.strip(), scope)).fetchone()
+    # When the same name exists in both the chat scope and global, the chat-scoped
+    # playbook wins (without the ORDER BY, SQLite returns an arbitrary row).
+    row = conn.execute(
+        "SELECT * FROM playbooks WHERE name=? AND scope IN (?, 'global') "
+        "ORDER BY CASE WHEN scope=? THEN 0 ELSE 1 END LIMIT 1",
+        (name.strip(), scope, scope)).fetchone()
     if row:
         with conn:
             conn.execute("UPDATE playbooks SET hits=hits+1 WHERE id=?", (row["id"],))

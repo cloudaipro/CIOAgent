@@ -21,8 +21,35 @@ log = logging.getLogger(__name__)
 # monkeypatch cio.committee.debate.ask_role without a circular-import issue.
 # engine.py imports debate lazily (inside run_committee body), so this top-level
 # import is safe once the package is initialised.
+#
+# IMPORTANT: call sites go through _ask(), which resolves engine.ask_role at
+# CALL time. The old import-time binding meant a test that patched only
+# cio.committee.engine.ask_role still hit the REAL backend whenever the canned
+# votes disagreed (debate fired) — burning live model calls inside unit tests
+# and overwriting canned opinions with nondeterministic round-3 revisions.
 # ---------------------------------------------------------------------------
-from cio.committee.engine import ask_role, parse_yaml_block, _gather_bounded  # noqa: E402
+import cio.committee.engine as _engine  # noqa: E402
+
+from cio.committee.engine import (  # noqa: E402
+    ask_role,
+    parse_yaml_block,
+    _gather_bounded,
+    _safe_confidence,
+)
+
+_ORIG_ASK_ROLE = ask_role
+
+
+async def _ask(*args, **kwargs) -> str:
+    """Dispatch one LLM call, honouring both monkeypatch seams.
+
+    A test that replaced THIS module's ``ask_role`` wins; otherwise the engine's
+    ``ask_role`` is looked up live, so patching the engine alone also covers the
+    debate rounds."""
+    local = globals().get("ask_role")
+    if local is not None and local is not _ORIG_ASK_ROLE:
+        return await local(*args, **kwargs)
+    return await _engine.ask_role(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -39,8 +66,10 @@ _SCORE: dict[str, float] = {
 def _vote_score(opinion: dict) -> float:
     vote = str(opinion.get("vote", "HOLD")).upper()
     score = _SCORE.get(vote, 0.0)
-    # Tiebreak: higher confidence is "more extreme" (abs direction amplified by conf)
-    conf = float(opinion.get("confidence", 50)) / 100.0
+    # Tiebreak: higher confidence is "more extreme" (abs direction amplified by conf).
+    # Coerced defensively — YAML confidence may be None or a word ('high'), and
+    # select_debate_pairs sits on run_committee's never-raises path.
+    conf = _safe_confidence(opinion.get("confidence", 50)) / 100.0
     return score * (1.0 + conf * 0.01)  # tiny nudge so conf breaks ties only
 
 
@@ -148,7 +177,7 @@ async def run_cross_exam(
             f"Deliver a pointed rebuttal (≤120 words) citing DATA where possible. "
             f"Free text — no yaml needed."
         )
-        challenge = await ask_role(_sys(challenger), challenge_prompt, role_key=challenger.get("key"))
+        challenge = await _ask(_sys(challenger), challenge_prompt, role_key=challenger.get("key"))
     except Exception as e:
         log.warning("Challenge call failed (%s→%s): %s", challenger.get("key"), target.get("key"), e)
         challenge = ""
@@ -160,7 +189,7 @@ async def run_cross_exam(
             f"{challenge}\n\n"
             f"Defend or concede (≤120 words). Free text — no yaml needed."
         )
-        response = await ask_role(_sys(target), response_prompt, role_key=target.get("key"))
+        response = await _ask(_sys(target), response_prompt, role_key=target.get("key"))
     except Exception as e:
         log.warning("Response call failed (%s defends): %s", target.get("key"), e)
         response = ""
@@ -207,7 +236,7 @@ async def revise_opinion(
     )
 
     try:
-        raw = await ask_role(role["system_prompt"], revision_prompt, role_key=role.get("key"))
+        raw = await _ask(role["system_prompt"], revision_prompt, role_key=role.get("key"))
     except Exception as e:
         log.warning("revise_opinion failed for %s: %s", role.get("key"), e)
         return round1_opinion

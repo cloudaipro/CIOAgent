@@ -126,7 +126,9 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
             "ta_profile": profile,
             "ta_composite": "neutral",
             "is_etf": False,
-            "as_of": datetime.utcnow().isoformat(),
+            # Local time (CIO convention everywhere else; utcnow is deprecated and
+            # would also skew TIRF recency scoring against local-dated evidence).
+            "as_of": datetime.now().isoformat(),
             "filings": [],
             "analyst": None,
             "earnings": None,
@@ -153,7 +155,7 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
         "ta_profile": profile,
         "ta_composite": ta_composite,
         "is_etf": is_etf,
-        "as_of": datetime.utcnow().isoformat(),
+        "as_of": datetime.now().isoformat(),
         "filings": filings,
         "analyst": analyst,
         "earnings": earnings,

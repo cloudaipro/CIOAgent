@@ -56,6 +56,21 @@ def ingest_transactions_csv(path: str | Path, db_path=db.DB_PATH) -> int:
     df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
     df["action"] = df["action"].astype(str).str.strip().str.upper()
 
+    bad_actions = sorted(set(df["action"]) - {"BUY", "SELL", "DIV"})
+    if bad_actions:
+        raise ValueError(f"CSV has invalid action values: {bad_actions} "
+                         "(must be BUY, SELL or DIV)")
+
+    # Blank cells parse as NaN, and sqlite3 binds NaN as NULL — which the NOT NULL
+    # columns reject (a DIV row routinely leaves quantity empty). Coerce numerics
+    # to their defaults, blank currency to USD, and blank notes to real NULL.
+    for col in ("quantity", "price", "fees"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    df["currency"] = (df["currency"].fillna("USD").astype(str).str.strip()
+                      .str.upper().replace("", "USD"))
+    df["notes"] = df["notes"].astype(object).where(df["notes"].notna(), None)
+    df["txn_date"] = df["txn_date"].astype(str).str.strip()
+
     rows = list(df[TXN_COLS].itertuples(index=False, name=None))
     conn = db.connect(db_path)
     prior = conn.execute(

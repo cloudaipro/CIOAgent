@@ -323,7 +323,12 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
                             resp.status_code, max_retries, nim_model, resp.text[:200],
                         )
                         return ("", 0)
-                    wait = float(resp.headers.get("retry-after", 2 ** attempt))
+                    # Retry-After may be an HTTP-date instead of seconds; fall back
+                    # to exponential backoff rather than aborting the whole call.
+                    try:
+                        wait = float(resp.headers.get("retry-after", 2 ** attempt))
+                    except (TypeError, ValueError):
+                        wait = float(2 ** attempt)
                     log.warning(
                         "_ask_nim: HTTP %d (attempt %d/%d, model=%s); retrying in %.1fs",
                         resp.status_code, attempt + 1, max_retries, nim_model, wait,
@@ -579,6 +584,19 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
 # Vote tally helper (deterministic, Python-side cross-check)
 # ---------------------------------------------------------------------------
 
+def _safe_confidence(val, default: float = 50.0) -> float:
+    """Coerce an LLM-supplied confidence to a float. YAML may yield None, a bare
+    string ('high'), or junk — any of those must degrade to *default*, never
+    raise into the pipeline (run_committee promises 'never raises')."""
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return default
+    if f != f:  # NaN
+        return default
+    return max(0.0, min(100.0, f))
+
+
 def _compute_vote_tally(opinions: list[dict]) -> dict:
     """Count BUY/HOLD/SELL votes and compute confidence-weighted mean."""
     counts: dict[str, int] = {"BUY": 0, "HOLD": 0, "SELL": 0}
@@ -590,7 +608,7 @@ def _compute_vote_tally(opinions: list[dict]) -> dict:
 
     for op in opinions:
         vote = str(op.get("vote", "HOLD")).upper()
-        conf = float(op.get("confidence", 50))
+        conf = _safe_confidence(op.get("confidence", 50))
         # Normalise vote key
         base_vote = vote.replace("STRONG ", "")
         if base_vote not in counts:
