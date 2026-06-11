@@ -11,8 +11,9 @@ self-improving memory layer (MemCore).
 The conversational agent is built on `claude-agent-sdk` using **Claude Code Pro
 authentication — no `ANTHROPIC_API_KEY`**. Embeddings and search are fully local. The
 committee's agents are pluggable per-role across three backends — the **Claude
-subscription**, **NVIDIA NIM** (OpenAI-compatible, e.g. `minimax-m2.7`), and the
-**OpenAI API** — and the CIO runs a daily-token-budget fallback chain across them. The
+subscription**, **NVIDIA NIM** (OpenAI-compatible), and the **OpenAI API** — and every
+agent runs a **named daily-token-budget fallback chain**, so a backend outage or budget
+exhaustion degrades gracefully instead of silencing a role. The
 final report is delivered as a **PDF**, with an on-request **Traditional Chinese** version.
 
 - **Stack**: Python 3.12, `claude-agent-sdk`, `openai`, `python-telegram-bot`,
@@ -51,7 +52,7 @@ flowchart TD
     CTX --> MEM
     COMM --> STK
     COMM --> AMEM["committee/agent_memory.py<br/>per-agent MemCore"]
-    COMM --> MODELS["committee/models.py + engine.ask_role<br/>claude | NIM | OpenAI router + CIO chain"]
+    COMM --> MODELS["committee/models.py + engine.ask_role<br/>named-chain router: every agent → 3-link fallback chain"]
     COMM --> PDF["committee/render_pdf.py + translate.py<br/>PDF + 繁體中文"]
     AMEM --> CDB[("data/committee.db<br/>WAL: per-agent memory + token_usage")]
     PORT --> DB[("cio/db.py<br/>data/cio.db")]
@@ -353,7 +354,7 @@ text so it cannot leak into the report or debate transcript.
 
 ### 6.3 Model services (`models.py`, `config/committee_models.yaml`)
 Every call goes through `engine.ask_role(system, user, role_key)`, which resolves a
-per-agent **service + model** from the config file (optional; missing → built-in
+per-agent **named fallback chain** from the config file (optional; missing → built-in
 defaults) and dispatches via `_dispatch` to one of three backends:
 - **`_ask_claude`** — `claude-agent-sdk` one-shot (subscription, no key).
 - **`_ask_nim`** — NVIDIA NIM, OpenAI-compatible `chat/completions` via `httpx`, Bearer
@@ -362,9 +363,11 @@ defaults) and dispatches via `_dispatch` to one of three backends:
   `gpt-5.5-2026-04-23`).
 Each backend returns `(text, tokens)` — real usage from the API (`usage.total_tokens`,
 `AssistantMessage.usage`), estimated via `tiktoken` only when omitted. A missing key →
-`("", 0)` so the run degrades gracefully. Shipped default: 9 specialists + moderator +
-translator → **NIM `minimaxai/minimax-m2.7`**; CIO → a **fallback chain** (§6.4). The
-chosen service/model is logged per call (`agent <role> → <service>:<model>`).
+`("", 0)` so the run degrades gracefully. Shipped default chains: 9 specialists +
+moderator → **`standard`** (OpenAI head → Claude Opus → NIM); CIO + WMA →
+**`premium`** (Claude Opus head → OpenAI → NIM); translator → **`translation`**
+(Claude Sonnet head → OpenAI mini → NIM). The resolved chain name and service/model are
+logged per call (`agent <role> uses chain setting <name>; → <service>:<model>`).
 
 **Output-token caps are configurable per backend** (priority **env > yaml > default**,
 resolved by `models._int_setting`):
@@ -383,16 +386,25 @@ spent on reasoning the response is `finish_reason="length"` with empty content. 
 `reasoning_content`, else returns `("", 0)` with a warning that names `finish_reason` (a cue
 to raise `CIO_NIM_MAX_TOKENS`) — a malformed shape never raises.
 
-### 6.4 CIO fallback chain (daily token budget)
-The CIO is configured with a `chain` (not a single service). `ask_role` walks it in order,
-skipping any link whose **daily token use** (`usage.py`, per-service, UTC-day bucketed in
-`committee.db`) is at or above its `daily_limit`, and falling through to the next link on an
-empty result (error / missing key). Shipped chain:
-1. **OpenAI** `gpt-5.5-2026-04-23` — `daily_limit: 200000`
-2. **Claude Opus** `claude-opus-4-8` — `daily_limit: 200000`
-3. **NVIDIA NIM** `minimaxai/minimax-m2.7` — last resort, no limit
-Limits, models, and order are all editable in `config/committee_models.yaml`. The counter
-resets naturally at UTC midnight. Only the CIO uses a chain; other roles are single-service.
+### 6.4 Named fallback chains (all agents)
+Every agent references a **named chain setting** defined in the top-level `chains:` section
+of `config/committee_models.yaml`. `ask_role` walks the chain's ordered links, skipping any
+whose **daily token use** (`usage.py`, per-service, `CIO_TZ`-local-day bucketed in
+`committee.db`) is at or above its `daily_limit`, and falling through on an empty result
+(error / missing key / rate-limit notice). Shipped named settings:
+
+| Name | Links | Used by |
+|---|---|---|
+| `premium` | Claude Opus 200k → OpenAI gpt-5.5 200k → NIM kimi | cio, wma |
+| `standard` | OpenAI gpt-5.5 200k → Claude Opus 200k → NIM kimi | all specialists, moderator, defaults |
+| `translation` | Claude Sonnet → OpenAI gpt-5.4-mini → NIM kimi | translator |
+
+Limits, models, order, and per-agent assignments are all editable in the yaml or from the
+dashboard **Configure** page. Budget counters reset at `CIO_TZ` midnight. Budget accounting
+is per-service, so an over-budget `openai` is skipped in every chain that references it.
+`resolve_chain` has a 6-step fallback: named → legacy inline list → legacy
+`{service,model}` agent → defaults chain → defaults legacy → hard-coded `[claude-opus-4-8]`;
+it never raises and never returns an empty list.
 
 ### 6.5 Parallel execution
 `CIO_PARALLEL` (default **on**) runs the independent groups — Round-1 specialists,
@@ -435,7 +447,7 @@ flowchart TD
     subgraph MS["monitor_watchlist — per security (bounded parallel)"]
         BD["bundle.gather_bundle<br/>price + fundamentals + 38 TA"]
         NW["web.search<br/>overnight headlines (Firecrawl)"]
-        BD --> ASK["engine.ask_role(role_key='wma')<br/>openai → claude → NIM chain"]
+        BD --> ASK["engine.ask_role(role_key='wma')<br/>premium chain: Claude Opus → OpenAI → NIM"]
         NW --> ASK
         ASK --> ASS["normalized assessment<br/>(PRD §7: status, conviction, rec,<br/>events, risks, catalysts, thesis Δ,<br/>external-risk score + sensitivities)"]
     end
@@ -482,10 +494,11 @@ auto-running the committee — keeping the daily briefing cheap and respecting t
 per-run cost ceiling.
 
 ### 7.3 Model chain
-The `wma` role uses the same shape as the CIO chain (premium → premium → cheap), editable in
-`config/committee_models.yaml`: **OpenAI** `gpt-5.5-2026-04-23` (daily 200k) → **Claude Opus**
-`claude-opus-4-8` (daily 200k) → **NVIDIA NIM** `moonshotai/kimi-k2.6` (last resort). It runs
-through the identical `ask_role` budget/fallback machinery as the committee (§6.4).
+The `wma` role uses the `premium` named chain, the same setting as the CIO: **Claude Opus**
+`claude-opus-4-8` (daily 200k) → **OpenAI** `gpt-5.5-2026-04-23` (daily 200k) → **NVIDIA
+NIM** `moonshotai/kimi-k2.6` (last resort), editable in `config/committee_models.yaml` or
+from the dashboard Configure page. It runs through the identical `ask_role` budget/fallback
+machinery as the committee (§6.4).
 
 ### 7.4 Scheduling — trading days only
 `scheduler.watchlist_briefing` runs at **06:00 local** on stock days. APScheduler's
@@ -606,12 +619,12 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `TELEGRAM_BOT_TOKEN` | — | Bot token (required) |
 | `CIO_ALLOWED_CHATS` | unset (open) | Comma-separated chat ids allowed to use the bot — **set this** |
 | `NVIDIA_API_KEY` | — | NVIDIA NIM key (required for `service: nim` agents) |
-| `OPENAI_API_KEY` | — | OpenAI key (CIO chain's first link; absent → CIO falls to Opus) |
+| `OPENAI_API_KEY` | — | OpenAI key (`standard` chain head, `premium` chain 2nd link; absent → those links skipped) |
 | `CIO_OPENAI_TOKEN_PARAM` | `max_completion_tokens` | OpenAI output-cap param name (`max_tokens` for older models); also `openai.token_param` in yaml |
 | `CIO_OPENAI_MAX_TOKENS` | `2048` | OpenAI output-cap value; also `openai.max_tokens` in yaml |
 | `CIO_NIM_MAX_TOKENS` | `2048` | NIM output-cap value; also `nim.max_tokens` in yaml |
 | `CIO_CLAUDE_MAX_THINKING_TOKENS` | SDK default | Claude thinking-token budget (no plain output cap in the agentic SDK); also `claude.max_thinking_tokens` in yaml |
-| `CIO_MODELS_CONFIG` | `config/committee_models.yaml` | Per-agent service/model map + CIO chain + daily limits |
+| `CIO_MODELS_CONFIG` | `config/committee_models.yaml` | Named chain settings + per-agent chain assignment + provider caps + daily limits |
 | `CIO_PARALLEL` | `on` | Committee parallel vs sequential execution |
 | `CIO_MAX_CONCURRENCY` | `8` | Parallel agent semaphore |
 | `CIO_DEBATE` / `CIO_DEBATE_MAX_PAIRS` | `on` / `2` | Debate toggle + pair cap |
@@ -642,23 +655,27 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 
 ## 11. Verification
 
-`pytest` — **273 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
+`pytest` — **791 offline tests** (no network, no LLM): MemCore (schema/`vec0`, figures
 firewall, scope isolation, injection budget, hybrid recall, eviction, promotion, rolling
 cadence, playbooks, cold-boot); stock subsystem + panel (incl. forward-P/E field & cell);
 committee (bundle, 9 roles incl. **geopolitical & macro**, consensus/tally, 14-section
 report incl. macro/geopolitical environment + external-risk matrix, confidence band, debate
-pair-selection + rounds, model routing claude/NIM/OpenAI, **CIO fallback-chain selection at
-each budget state**, parallel-vs-sequential peak, missing-key degrade); per-agent memory
-(isolation, firewall, injection, promotion); **PDF/translation** (real WeasyPrint renders
-incl. a 繁體中文 doc, lang parsing, translate no-op/fallback); **`/stop` + per-chat
-single-flight** (`tests/test_bot_stop.py`: stopped turn not logged / no answer leaked /
-agent reset / registries don't leak; normal turn unaffected; error + genuine-cancel cleanup;
-per-chat isolation; 2nd-message reject while busy; accept after completion/stop); **WMA**
+pair-selection + rounds, **named-chain selection at each budget state for every role**,
+parallel-vs-sequential peak, missing-key degrade); per-agent memory (isolation, firewall,
+injection, promotion); **PDF/translation** (real WeasyPrint renders incl. a 繁體中文 doc,
+lang parsing, translate no-op/fallback); **`/stop` + per-chat single-flight**
+(`tests/test_bot_stop.py`: stopped turn not logged / no answer leaked / agent reset /
+registries don't leak; normal turn unaffected; error + genuine-cancel cleanup; per-chat
+isolation; 2nd-message reject while busy; accept after completion/stop); **WMA**
 (`tests/test_watchlist_monitor.py`: yaml parse/normalize incl. external-risk
 sensitivities, invalid-value fallbacks, no-data skip without a model call, escalation flag,
 order-preserving fan-out, briefing sections + summary, **global macro snapshot**
-parse/offline-safe + macro-aware briefing sections, `wma` chain resolution); **trading-day
-calendar** (`tests/test_timeutil.py`:
+parse/offline-safe + macro-aware briefing sections, `wma` chain resolution);
+**named fallback-chain mechanism** (`tests/test_fallback_chain.py`: named lookup,
+unknown-chain fallback to defaults, legacy inline chain, legacy `{service,model}` agent,
+empty config, link normalization, budget walk, specialist degradation, partial-POST safety);
+**dashboard Configure** chain editor round-trip, add/delete settings, agent reassignment,
+legacy conversion, partial-POST regression; **trading-day calendar** (`tests/test_timeutil.py`:
 NYSE-calendar membership, holiday exclusion, weekday fallback, type coercion); **dashboard**
 (routes incl. `/subscribers`, escaping, 404, token gate); **security** (symbol sanitization,
 cache-path containment, report-filename sanitizer, access gate).

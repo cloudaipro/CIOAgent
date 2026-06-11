@@ -11,9 +11,9 @@ watchlist.
 
 The conversational agent runs on your **Claude Pro subscription** via `claude-agent-sdk`
 — **no ANTHROPIC_API_KEY needed** (the `claude` CLI must be installed and logged in). The
-committee's agents are pluggable across three model backends — **Claude**, **NVIDIA NIM**
-(`minimax`), and **OpenAI** — and the final CIO decision runs a daily-token-budget
-fallback chain across them.
+committee's agents are pluggable across three model backends — **Claude**, **NVIDIA NIM**,
+and **OpenAI** — and every agent runs a **named daily-token-budget fallback chain** so any
+backend outage or budget exhaustion degrades gracefully instead of silencing a role.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   │
                   ├─► cio/committee/*   investment committee pipeline:
                   │     bundle → 9 specialists → debate → consensus → CIO → report
-                  │     models.py  per-agent model router (claude | NIM | OpenAI) + CIO chain
+                  │     models.py  named-chain router: every agent references a reusable fallback chain
                   │     agent_memory.py  isolated per-agent memory (committee.db, WAL) + dedup
                   │     note_sanitizer.py  LLM figures-sanitizer (salvage) + sanitizer_log.py audit
                   │     render_pdf.py / translate.py  PDF + 繁體中文
@@ -126,11 +126,14 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   **deduplicated** on write: a deterministic key collapses identical takeaways and a
   semantic check (embedding distance) collapses paraphrases, so an agent re-deriving the
   same lesson reinforces one note instead of spawning twins.
-- **Model services** (`config/committee_models.yaml`): each agent maps to `claude`, `nim`,
-  or `openai`. The CIO runs a **fallback chain** — OpenAI `gpt-5.5-2026-04-23` (daily
-  200k tokens) → Claude Opus (daily 200k) → NVIDIA NIM — switching automatically as each
-  day's token budget is spent. Limits and models are editable in the config, or from the
-  dashboard **Configure** page (no text editor needed).
+- **Model services** (`config/committee_models.yaml`): every agent references a
+  **named fallback chain** — an ordered 3-link list of `{service, model, daily_limit?}`.
+  Three built-in settings ship: `premium` (Claude Opus head → OpenAI → NIM, used by CIO
+  and WMA), `standard` (OpenAI head → Claude Opus → NIM, used by all 9 specialists and
+  moderator), and `translation` (Claude Sonnet head → OpenAI mini → NIM, used by the
+  translator). `ask_role` walks the chain, skips any link whose daily token budget is
+  spent, and falls through on error/empty. New settings can be added from the dashboard
+  **Configure** page; per-agent assignment is a dropdown — no text editor needed.
 - **Output-token caps** are configurable per backend (env overrides yaml):
   `CIO_OPENAI_MAX_TOKENS` / `nim.max_tokens` `CIO_NIM_MAX_TOKENS` (default 2048), and the
   OpenAI param name `CIO_OPENAI_TOKEN_PARAM` (gpt-5.x = `max_completion_tokens`, older
@@ -182,8 +185,10 @@ what deserves a deeper look.
   summary are pushed to every **subscribed** chat (same opt-in as the daily digest).
 - **On demand**: `/briefing` (active watchlist) or `/briefing NVDA MU` (specific symbols);
   add `zh` for a **Traditional Chinese** briefing. CLI: `python -m cio.watchlist_monitor [SYMBOL…] [zh]`.
-- **Model chain** (`config/committee_models.yaml`, role `wma`): OpenAI `gpt-5.5-2026-04-23`
-  → Claude Opus → NVIDIA NIM `kimi-k2.6`, same daily-budget fallback as the CIO.
+- **Model chain** (`config/committee_models.yaml`, role `wma`): uses the `premium` named
+  chain — Claude Opus `claude-opus-4-8` (daily 200k) → OpenAI `gpt-5.5-2026-04-23`
+  (daily 200k) → NVIDIA NIM `kimi-k2.6` (last resort) — the same fallback machinery as
+  the CIO.
 
 ## Economic-event alerts
 
@@ -225,7 +230,8 @@ In `.env`:
   **Set this**: unset means the bot answers anyone who finds it. Send `/start` to read
   your chat id (the bot echoes it), then add it here.
 - `NVIDIA_API_KEY` — required for committee agents on NIM (`build.nvidia.com`).
-- `OPENAI_API_KEY` — the CIO chain's first link; if absent the CIO falls back to Opus.
+- `OPENAI_API_KEY` — used by `standard` chain (specialists) as head link and by `premium`
+  chain (CIO/WMA) as the second link; absent → those links are skipped, next link used.
 - `CIO_FIRECRAWL_URL` — web search/scrape endpoint (defaults to a self-hosted
   `http://localhost:3002`, no key); set `FIRECRAWL_API_KEY` for Firecrawl cloud.
   Tune with `CIO_WEB_MAX_CHARS` (per-result cap, 6000) and `CIO_WEB_TIMEOUT` (45s).
@@ -351,13 +357,15 @@ Pages:
 - **Sanitizer** — audit trail of the figures-sanitizer: every note it rewrote (figures
   stripped) or rejected, with the agent, symbol, what was removed, and the stored result.
 - **Configure** — edit `config/committee_models.yaml` from the UI instead of a text editor.
-  Per-agent **service** combo box (`claude` / `nim` / `openai`) and a **model** dropdown that
-  swaps to the chosen service's models; chain agents (`cio` / `wma`) edit each fallback link
-  (service + model + daily token limit). Collapsible sections expose provider connection
-  knobs (base_url / api_key_env / token caps) and a **model-catalog** editor (add/remove the
-  model names that populate the dropdowns). Saves round-trip the YAML (comments preserved via
-  `ruamel.yaml`; falls back to `pyyaml` if absent) and clear the config cache so edits apply
-  to the next run.
+  **Fallback chain settings** section: one editable table per named setting (per link: service
+  dropdown, model dropdown, daily token limit); add new settings by name; delete settings
+  (refused while any agent still references them). **Agents** section: every agent (defaults,
+  all specialists, moderator, cio, wma, translator) has a **chain dropdown** to reassign it
+  to any named setting; legacy inline agents show a placeholder that converts them on pick.
+  Collapsible sections expose provider connection knobs (base_url / api_key_env / token caps)
+  and a **model-catalog** editor (add/remove the model names that populate the dropdowns).
+  Saves round-trip the YAML (comments preserved via `ruamel.yaml`) and clears the config
+  cache so edits apply to the next run.
 
 Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:
 

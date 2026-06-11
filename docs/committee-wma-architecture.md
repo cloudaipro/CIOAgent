@@ -18,11 +18,14 @@ architecture is shaped by three principles:
    reproducibility pins, scorecards) using only the yaml the specialists already
    produced — **zero additional LLM calls**.
 
-The model strategy reflects #1: the bulk of calls go to **NVIDIA NIM (nemotron-550B)**,
-a high-capacity model accessed over an OpenAI-compatible REST API. Only the two
-decision-critical roles (`cio`, `wma`) carry a **fallback chain** to Claude
-(`claude-opus-4-8`) and then OpenAI (`gpt-5.5`) so a NIM outage or budget exhaustion
-never silences the final call.
+The model strategy reflects #1: every committee role is assigned a **named fallback chain**
+— an ordered 3-link list of `{service, model, daily_limit?}` defined once in
+`config/committee_models.yaml` and referenced by name per agent. Three settings ship:
+`standard` (OpenAI head → Claude Opus → NIM, used by all specialists and moderator),
+`premium` (Claude Opus head → OpenAI → NIM, used by CIO and WMA), and `translation`
+(Claude Sonnet head → OpenAI mini → NIM, used by the translator). `ask_role` walks a
+chain's links, skipping any link whose daily token budget is spent and falling through on
+error/empty, so a backend outage or budget exhaustion never silences any role.
 
 ---
 
@@ -271,23 +274,27 @@ classDiagram
 
 ```mermaid
 flowchart LR
-    subgraph Roles["Role → Backend Mapping"]
-        SPEC_ROLES[Specialists\nmarket / macro / equity\nindustry / valuation / quant\netf / risk / catalyst] --> NIM_ONLY[NIM\nnemotron-550B\nno fallback chain]
-        MOD_ROLE[Moderator] --> NIM_ONLY
-        WMA_ROLE[WMA / macro\nper-security + snapshot] --> WMA_CHAIN
+    subgraph Roles["Role → Named Chain Mapping"]
+        SPEC_ROLES["Specialists\nmarket / macro / equity\nindustry / valuation / quant\netf / risk / catalyst"] --> STD_CHAIN
+        MOD_ROLE["Moderator"] --> STD_CHAIN
 
-        WMA_CHAIN[Chain:\n1. NIM nemotron 200k\n2. Claude opus-4-8 200k\n3. OpenAI gpt-5.5 last resort]
+        STD_CHAIN["standard chain\n1. OpenAI gpt-5.5 200k\n2. Claude opus-4-8 200k\n3. NIM kimi last resort"]
 
-        CIO_ROLE[CIO] --> CIO_CHAIN[Chain:\n1. NIM nemotron 200k\n2. Claude opus-4-8 200k\n3. OpenAI gpt-5.5 last resort]
+        WMA_ROLE["WMA / macro\nper-security + snapshot"] --> PREM_CHAIN
+        CIO_ROLE["CIO"] --> PREM_CHAIN
+
+        PREM_CHAIN["premium chain\n1. Claude opus-4-8 200k\n2. OpenAI gpt-5.5 200k\n3. NIM kimi last resort"]
+
+        TRANS_ROLE["Translator"] --> TRANS_CHAIN["translation chain\n1. Claude sonnet-4-6\n2. OpenAI gpt-5.4-mini\n3. NIM kimi last resort"]
     end
 
     subgraph Retry["NIM Retry Logic"]
-        NIM_POST[POST /chat/completions] --> HTTP_CODE{HTTP status}
-        HTTP_CODE -- 200 --> SUCCESS[Return text + tokens]
-        HTTP_CODE -- 429/503 --> WAIT[sleep Retry-After\nor exponential backoff]
+        NIM_POST["POST /chat/completions"] --> HTTP_CODE{HTTP status}
+        HTTP_CODE -- 200 --> SUCCESS["Return text + tokens"]
+        HTTP_CODE -- "429/503" --> WAIT["sleep Retry-After\nor exponential backoff"]
         WAIT --> NIM_POST
-        HTTP_CODE -- timeout --> FALL[Fall through chain\nno retry on timeout]
-        HTTP_CODE -- other 4xx/5xx --> FALL
+        HTTP_CODE -- timeout --> FALL["Fall through chain\nno retry on timeout"]
+        HTTP_CODE -- "other 4xx/5xx" --> FALL
     end
 ```
 
