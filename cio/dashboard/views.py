@@ -1046,6 +1046,22 @@ def _model_select(name: str, current, service, catalog) -> str:
 # JS: dependent dropdown. When a service select changes, rebuild the model select in
 # the same row from that service's catalog (kept in window.__cat), preserving the
 # current pick if it still exists, else selecting the first model.
+def _chain_select(name: str, current, chain_names) -> str:
+    """A chain-setting combo box. *current* may be None/'' for an agent still on
+    a legacy inline config — that renders a '(legacy inline)' placeholder which,
+    if left selected, keeps the agent's config untouched on save."""
+    cells = ""
+    if not current:
+        cells += "<option value='' selected>(legacy inline — pick a chain to convert)</option>"
+    elif current not in chain_names:
+        cells += f"<option value='{esc(current)}' selected>{esc(current)} (missing!)</option>"
+    cells += "".join(
+        f"<option value='{esc(n)}'{' selected' if n == current else ''}>{esc(n)}</option>"
+        for n in chain_names
+    )
+    return f"<select name='{esc(name)}'>{cells}</select>"
+
+
 def _configure_js(catalog: dict) -> str:
     import json
     return (
@@ -1072,9 +1088,11 @@ def render_configure(cfg, level: int, services, model_suggestions,
                      detailed_locked_by_env: bool = False) -> str:
     """Edit committee model routing. One big POST form → /configure.
 
-    Simple agents render as service combo + model box; chain agents (cio/wma)
-    render each fallback link with service + model + daily_limit. A collapsible
-    section exposes provider connection knobs (base_url / api_key_env / token caps).
+    Fallback-chain settings render first: each named setting is a table of
+    fallback links (service + model + daily_limit) and can be deleted; new
+    settings are added by name. Every agent (and defaults) then picks one
+    setting by name from a dropdown. A collapsible section exposes provider
+    connection knobs (base_url / api_key_env / token caps).
     """
     flash_html = (
         f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
@@ -1082,44 +1100,62 @@ def render_configure(cfg, level: int, services, model_suggestions,
     )
     agents = cfg.get("agents") or {}
     defaults = cfg.get("defaults") or {}
+    chains_cfg = cfg.get("chains") or {}
+    chain_names = [str(n) for n in chains_cfg.keys()]
 
-    # --- defaults ---
-    def_rows = (
-        "<table><tr><th>Scope</th><th>Service</th><th>Model</th></tr>"
-        f"<tr><td>defaults</td>"
-        f"<td>{_svc_select('defaults:service', defaults.get('service'), services)}</td>"
-        f"<td>{_model_select('defaults:model', defaults.get('model'), defaults.get('service'), model_suggestions)}</td></tr></table>"
+    # --- named fallback-chain settings (editable) ---
+    chain_blocks = []
+    for cname, links in chains_cfg.items():
+        link_rows = "".join(
+            "<tr>"
+            f"<td class='num'>{i + 1}</td>"
+            f"<td>{_svc_select(f'chainlink:{esc(cname)}:{i}:service', (link or {}).get('service'), services)}</td>"
+            f"<td>{_model_select(f'chainlink:{esc(cname)}:{i}:model', (link or {}).get('model'), (link or {}).get('service'), model_suggestions)}</td>"
+            f"<td><input name='chainlink:{esc(cname)}:{i}:daily_limit' class='num' "
+            f"value='{esc((link or {}).get('daily_limit') or '')}' "
+            "placeholder='none' inputmode='numeric'></td>"
+            "</tr>"
+            for i, link in enumerate(links if isinstance(links, list) else [])
+        )
+        chain_blocks.append(
+            f"<h3><code>{esc(cname)}</code> "
+            f"<label style='font-weight:normal;font-size:.85em;margin-left:10px'>"
+            f"<input type='checkbox' name='chain_del:{esc(cname)}' value='1'> "
+            "delete this setting</label></h3>"
+            "<table><tr><th>#</th><th>Service</th><th>Model</th>"
+            "<th>Daily token limit</th></tr>" + link_rows + "</table>"
+        )
+    chains_section = (
+        "<h2>Fallback chain settings</h2>"
+        "<p class='hint'>Each setting is an ordered list of fallback links: a call "
+        "tries link 1 first, falling through when a service is over its daily token "
+        "limit or returns empty (missing key / API error / limit notice). Assign a "
+        "setting to each agent below. A setting in use by an agent cannot be deleted.</p>"
+        + "".join(chain_blocks)
+        + "<p><input name='chain_add' placeholder='new setting name (e.g. cheap)' "
+        "pattern='[A-Za-z0-9_-]+'> <span class='hint'>added on save with a 3-link "
+        "template (claude → openai → nim); edit it after.</span></p>"
     )
 
-    # --- simple (single-service) agents ---
-    simple_rows, chain_blocks = [], []
+    # --- agents: each picks a chain setting by name ---
+    agent_rows = [
+        f"<tr><td>defaults</td>"
+        f"<td>{_chain_select('defaults:chain', defaults.get('chain') if isinstance(defaults.get('chain'), str) else '', chain_names)}</td>"
+        "<td class='hint'>any agent not listed below</td></tr>"
+    ]
     for key, acfg in agents.items():
-        if isinstance(acfg, dict) and "chain" in acfg:
-            link_rows = "".join(
-                "<tr>"
-                f"<td class='num'>{i}</td>"
-                f"<td>{_svc_select(f'chain:{esc(key)}:{i}:service', (link or {}).get('service'), services)}</td>"
-                f"<td>{_model_select(f'chain:{esc(key)}:{i}:model', (link or {}).get('model'), (link or {}).get('service'), model_suggestions)}</td>"
-                f"<td><input name='chain:{esc(key)}:{i}:daily_limit' class='num' "
-                f"value='{esc((link or {}).get('daily_limit') or '')}' "
-                "placeholder='none' inputmode='numeric'></td>"
-                "</tr>"
-                for i, link in enumerate(acfg.get("chain") or [])
-            )
-            chain_blocks.append(
-                f"<h2>{esc(key)} · fallback chain</h2>"
-                "<table><tr><th>#</th><th>Service</th><th>Model</th>"
-                "<th>Daily token limit</th></tr>" + link_rows + "</table>"
-            )
-        elif isinstance(acfg, dict):
-            simple_rows.append(
-                f"<tr><td>{esc(key)}</td>"
-                f"<td>{_svc_select(f'agent:{esc(key)}:service', acfg.get('service'), services)}</td>"
-                f"<td>{_model_select(f'agent:{esc(key)}:model', acfg.get('model'), acfg.get('service'), model_suggestions)}</td></tr>"
-            )
-    simple_tbl = (
-        "<table><tr><th>Agent</th><th>Service</th><th>Model</th></tr>"
-        + "".join(simple_rows) + "</table>"
+        if not isinstance(acfg, dict):
+            continue
+        cur = acfg.get("chain")
+        cur_name = cur if isinstance(cur, str) else ""
+        agent_rows.append(
+            f"<tr><td>{esc(key)}</td>"
+            f"<td>{_chain_select(f'agent:{esc(key)}:chain', cur_name, chain_names)}</td>"
+            "<td></td></tr>"
+        )
+    agents_tbl = (
+        "<table><tr><th>Agent</th><th>Fallback chain</th><th></th></tr>"
+        + "".join(agent_rows) + "</table>"
     )
 
     # --- provider connection settings (collapsed) ---
@@ -1237,9 +1273,8 @@ def render_configure(cfg, level: int, services, model_suggestions,
            "“Manage model catalog” below. Saving applies to the next committee run.</p>")
         + "<form method='post' action='/configure'>"
         + "<input type='hidden' name='form_kind' value='models'>"
-        + "<h2>Defaults</h2>" + def_rows
-        + "<h2>Agents</h2>" + simple_tbl
-        + "".join(chain_blocks)
+        + chains_section
+        + "<h2>Agents</h2>" + agents_tbl
         + providers
         + catalog_ui
         + "<p style='margin-top:16px'><button type='submit' class='primary'>Save changes</button></p>"

@@ -1,44 +1,51 @@
-# Per-agent model service for the investment committee.
+# Per-agent model routing for the investment committee.
 # service: "claude" = claude-agent-sdk (subscription, no key) | "nim" = NVIDIA NIM (needs NVIDIA_API_KEY)
 #          "openai" = OpenAI API (needs OPENAI_API_KEY)
-defaults: {service: claude, model: claude-opus-4-8}
+#
+# chains: named fallback-chain settings. Each setting is an ordered list of
+# 3 links {service, model, daily_limit?}; ask_role walks them in order and
+# falls through when a link is over its daily token budget or returns empty
+# (key missing / API error / limit notice). Add/edit/remove settings here or
+# from the dashboard Configure tab.
+chains:
+  # premium: paid head -> subscription -> cheap last resort (cio, wma).
+  premium:
+  - {service: claude, model: claude-opus-4-8, daily_limit: 200000}
+  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 200000}
+  - {service: nim, model: moonshotai/kimi-k2.6}
+  # standard: subscription head (same primary the specialists always used),
+  # degrading to paid then cheap.
+  standard:
+  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 200000}
+  - {service: claude, model: claude-opus-4-8, daily_limit: 200000}
+  - {service: nim, model: moonshotai/kimi-k2.6}
+  # translation: Claude sonnet head — reliable on long markdown + strong
+  # Traditional Chinese. Output is ALSO post-converted with OpenCC s2twp
+  # (translate.py) to GUARANTEE Traditional (Taiwan) glyphs/phrasing
+  # regardless of which backend answers.
+  translation:
+  - {service: claude, model: claude-sonnet-4-6}
+  - {service: openai, model: gpt-5.4-mini-2026-03-17}
+  - {service: nim, model: moonshotai/kimi-k2.6}
+# defaults.chain: the setting used by any agent not listed below.
+defaults: {chain: standard}
+# agents.<key>.chain: name of the chain setting that agent uses.
 agents:
-  market: {service: claude, model: claude-opus-4-8}
-  macro: {service: claude, model: claude-opus-4-8}
-  equity: {service: claude, model: claude-opus-4-8}
-  industry: {service: claude, model: claude-opus-4-8}
-  valuation: {service: claude, model: claude-opus-4-8}
-  quant: {service: claude, model: claude-opus-4-8}
-  etf: {service: claude, model: claude-opus-4-8}
-  risk: {service: claude, model: claude-opus-4-8}
-  catalyst: {service: claude, model: claude-opus-4-8}
-  moderator: {service: claude, model: claude-opus-4-8}
-  cio:
-    chain:
-    - service: openai
-      model: gpt-5.5-2026-04-23
-      daily_limit: 200000
-    - service: claude
-      model: claude-opus-4-8
-      daily_limit: 200000
-    - service: nim
-      model: moonshotai/kimi-k2.6
-  # Watchlist Monitoring Agent: same chain shape as cio (premium → premium → cheap),
-  # so the pre-market briefing degrades gracefully when a backend is down/over-budget.
-  wma:
-    chain:
-    - service: openai
-      model: gpt-5.5-2026-04-23
-      daily_limit: 200000
-    - service: claude
-      model: claude-opus-4-8
-      daily_limit: 200000
-    - service: nim
-      model: moonshotai/kimi-k2.6
-  # TC translation: Claude is reliable on long markdown + strong Traditional Chinese.
-  # Output is ALSO post-converted with OpenCC s2twp (translate.py) to GUARANTEE
-  # Traditional (Taiwan) glyphs/phrasing regardless of which backend answers.
-  translator: {service: claude, model: claude-sonnet-4-6}
+  market: {chain: standard}
+  macro: {chain: standard}
+  equity: {chain: standard}
+  industry: {chain: standard}
+  valuation: {chain: standard}
+  quant: {chain: standard}
+  etf: {chain: standard}
+  risk: {chain: standard}
+  catalyst: {chain: standard}
+  moderator: {chain: standard}
+  cio: {chain: premium}
+  # Watchlist Monitoring Agent: same premium chain as cio, so the pre-market
+  # briefing degrades gracefully when a backend is down/over-budget.
+  wma: {chain: premium}
+  translator: {chain: translation}
 # nim.max_tokens = output cap value (env CIO_NIM_MAX_TOKENS overrides).
 nim: {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY, max_tokens: 20480}
 # claude (claude-agent-sdk) has no plain output max_tokens; only a thinking-token
@@ -64,3 +71,4 @@ model_catalog:
   - moonshotai/kimi-k2.6
   openai:
   - gpt-5.5-2026-04-23
+  - gpt-5.4-mini-2026-03-17

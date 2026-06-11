@@ -442,12 +442,13 @@ class _Handler(BaseHTTPRequestHandler):
         self._redirect("/memory?" + urlencode(params), set_cookie)
 
     @staticmethod
-    def _set_service_model(node: dict, service: str, model: str) -> None:
-        """Apply a service combo + model box onto a config node. Empty model → null
-        (some agents legitimately run with model: null)."""
-        if service:
-            node["service"] = service
-        node["model"] = model if model else None
+    def _assign_chain(node: dict, name: str) -> None:
+        """Point a config node (agent or defaults) at a named chain setting,
+        dropping any legacy inline keys so the doc converges on the new schema."""
+        node["chain"] = name
+        for legacy in ("service", "model"):
+            if legacy in node:
+                del node[legacy]
 
     def _configure_post(self, form: dict, set_cookie: str | None) -> None:
         """Save the committee_models.yaml edits from the Configure tab.
@@ -468,33 +469,82 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         msg, err = "", False
+        notes: list[str] = []
         try:
             doc = models.read_doc()
-            if isinstance(doc.get("defaults"), dict):
-                self._set_service_model(
-                    doc["defaults"], f("defaults:service"), f("defaults:model"))
 
-            for key, acfg in (doc.get("agents") or {}).items():
-                if not isinstance(acfg, dict):
+            # --- named fallback-chain settings: edit links in place ---
+            chains_node = doc.get("chains")
+            for cname, links in (chains_node or {}).items():
+                if not isinstance(links, list):
                     continue
-                if "chain" in acfg:
-                    for i, link in enumerate(acfg.get("chain") or []):
-                        if not isinstance(link, dict):
-                            continue
-                        svc = f(f"chain:{key}:{i}:service")
-                        mdl = f(f"chain:{key}:{i}:model")
-                        if svc:
-                            link["service"] = svc
-                        if mdl:
-                            link["model"] = mdl
-                        dl = f(f"chain:{key}:{i}:daily_limit")
+                for i, link in enumerate(links):
+                    if not isinstance(link, dict):
+                        continue
+                    svc = f(f"chainlink:{cname}:{i}:service")
+                    mdl = f(f"chainlink:{cname}:{i}:model")
+                    if svc:
+                        link["service"] = svc
+                    if mdl:
+                        link["model"] = mdl
+                    # Only touch daily_limit when the field was actually posted:
+                    # present+blank = clear; absent (partial POST) = leave as is.
+                    dl_key = f"chainlink:{cname}:{i}:daily_limit"
+                    if dl_key in form:
+                        dl = f(dl_key)
                         if dl:
                             link["daily_limit"] = int(dl)
                         elif "daily_limit" in link:
                             del link["daily_limit"]
+
+            # --- add a new chain setting (3-link template, edit after) ---
+            new_name = f("chain_add")
+            if new_name:
+                if not all(c.isalnum() or c in "-_" for c in new_name):
+                    raise ValueError(f"bad chain name {new_name!r} (use letters/digits/-/_)")
+                if chains_node is None:
+                    doc["chains"] = chains_node = {}
+                if new_name in chains_node:
+                    notes.append(f"chain {new_name!r} already exists — unchanged")
                 else:
-                    self._set_service_model(
-                        acfg, f(f"agent:{key}:service"), f(f"agent:{key}:model"))
+                    chains_node[new_name] = models.new_chain_links()
+                    notes.append(f"added chain {new_name!r}")
+
+            # --- assign chain settings to defaults + every agent ---
+            known = set(chains_node or {})
+            d_name = f("defaults:chain")
+            if d_name and d_name in known and isinstance(doc.get("defaults"), dict):
+                self._assign_chain(doc["defaults"], d_name)
+
+            for key, acfg in (doc.get("agents") or {}).items():
+                if not isinstance(acfg, dict):
+                    continue
+                a_name = f(f"agent:{key}:chain")
+                if a_name:
+                    if a_name not in known:
+                        raise ValueError(f"agent {key!r}: unknown chain {a_name!r}")
+                    self._assign_chain(acfg, a_name)
+                # empty → '(legacy inline)' placeholder kept — leave node untouched
+
+            # --- delete chain settings (refused while still referenced) ---
+            referenced = set()
+            dft = doc.get("defaults")
+            if isinstance(dft, dict) and isinstance(dft.get("chain"), str):
+                referenced.add(dft["chain"])
+            for acfg in (doc.get("agents") or {}).values():
+                if isinstance(acfg, dict) and isinstance(acfg.get("chain"), str):
+                    referenced.add(acfg["chain"])
+            for k in list(form.keys()):
+                if not k.startswith("chain_del:"):
+                    continue
+                dname = k.split(":", 1)[1]
+                if chains_node is None or dname not in chains_node:
+                    continue
+                if dname in referenced:
+                    notes.append(f"chain {dname!r} is in use — not deleted")
+                else:
+                    del chains_node[dname]
+                    notes.append(f"deleted chain {dname!r}")
 
             for prov, fields in (
                 ("nim", ("base_url", "api_key_env", "max_tokens")),
@@ -505,7 +555,10 @@ class _Handler(BaseHTTPRequestHandler):
                 if not isinstance(node, dict):
                     continue
                 for field in fields:
-                    val = f(f"provider:{prov}:{field}")
+                    fkey = f"provider:{prov}:{field}"
+                    if fkey not in form:
+                        continue  # partial POST — leave the value untouched
+                    val = f(fkey)
                     if val == "":
                         if field in ("max_tokens", "max_thinking_tokens") and field in node:
                             del node[field]  # blank cap → drop, fall back to default
@@ -536,6 +589,8 @@ class _Handler(BaseHTTPRequestHandler):
 
             models.write_doc(doc)
             msg = "saved committee_models.yaml — applies to the next run"
+            if notes:
+                msg += " (" + "; ".join(notes) + ")"
         except Exception as exc:  # never 500 the operator on a bad form
             log.warning("configure POST failed: %s", exc)
             msg, err = f"error: {exc}", True

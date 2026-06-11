@@ -80,6 +80,40 @@ def test_render_configure_detailed_log_toggle():
     assert "Locked by" in locked and "CIO_DETAILED_LOG" in locked
 
 
+def test_render_configure_named_chains():
+    """The Configure tab renders named chain settings (editable links, delete
+    checkbox, add box) and a chain dropdown per agent + defaults."""
+    cfg = {
+        "chains": {
+            "premium": [
+                {"service": "openai", "model": "g1", "daily_limit": 100},
+                {"service": "claude", "model": "c1"},
+                {"service": "nim", "model": "n1"},
+            ],
+            "standard": [{"service": "claude", "model": "c1"}],
+        },
+        "defaults": {"chain": "standard"},
+        "agents": {"market": {"chain": "standard"}, "cio": {"chain": "premium"},
+                   "legacyboi": {"service": "claude", "model": "x"}},
+    }
+    sugg = {"claude": ["c1"], "openai": ["g1"], "nim": ["n1"]}
+    html = views.render_configure(cfg, 1, ["claude", "nim", "openai"], sugg)
+    # chain editor
+    assert "chainlink:premium:0:service" in html
+    assert "chainlink:premium:2:daily_limit" in html
+    assert "chain_del:premium" in html
+    assert "chain_add" in html
+    # per-agent chain dropdowns incl. defaults
+    assert "defaults:chain" in html
+    assert "agent:market:chain" in html
+    assert "agent:cio:chain" in html
+    # legacy inline agent gets the convert placeholder, config untouched until picked
+    assert "agent:legacyboi:chain" in html
+    assert "legacy inline" in html
+    # old per-service agent widgets are gone
+    assert "agent:market:service" not in html
+
+
 def test_render_committee_run_shows_sent_and_returned():
     calls = [{
         "run_id": "r1", "symbol": "AAPL", "role_key": "risk", "service": "openai",
@@ -222,6 +256,120 @@ def test_portfolio_set_price_redirects(live, monkeypatch):
     assert status == 303  # PRG redirect
     assert calls == {"symbol": "AAPL", "close": 150.0}
     assert "/portfolio?" in resp.getheader("Location", "")
+
+
+def test_configure_post_named_chain_roundtrip(live, monkeypatch, tmp_path):
+    """POST /configure edits chain links, adds/deletes settings, reassigns agents,
+    and refuses to delete a setting still in use."""
+    import yaml as _yaml
+    from cio.committee import models as _models
+
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        "chains:\n"
+        "  premium:\n"
+        "  - {service: openai, model: g1, daily_limit: 100}\n"
+        "  - {service: claude, model: c1}\n"
+        "  - {service: nim, model: n1}\n"
+        "  spare:\n"
+        "  - {service: nim, model: nx}\n"
+        "defaults: {chain: premium}\n"
+        "agents:\n"
+        "  market: {chain: premium}\n"
+        "  cio: {chain: premium}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIO_MODELS_CONFIG", str(p))
+    _models.load_config.cache_clear()
+
+    status, resp = _post(live, "/configure", {
+        "form_kind": "models",
+        "chainlink:premium:0:model": "g2",            # edit a link model
+        "chainlink:premium:1:daily_limit": "555",     # add a limit
+        "chain_add": "newone",                        # create a setting
+        "agent:market:chain": "newone",               # reassign an agent
+        "chain_del:spare": "1",                       # unreferenced → deleted
+        "chain_del:premium": "1",                     # referenced → refused
+        "defaults:chain": "premium",
+    })
+    assert status == 303
+    loc = resp.getheader("Location", "")
+    assert "err=1" not in loc
+
+    saved = _yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert saved["chains"]["premium"][0]["model"] == "g2"
+    assert saved["chains"]["premium"][1]["daily_limit"] == 555
+    assert "spare" not in saved["chains"]            # deleted
+    assert "premium" in saved["chains"]              # delete refused (in use)
+    assert len(saved["chains"]["newone"]) == 3       # template links
+    assert saved["agents"]["market"]["chain"] == "newone"
+    assert saved["defaults"]["chain"] == "premium"
+
+    # the running process resolves the new assignment immediately (cache cleared)
+    assert _models.resolve_chain_name("market") == "newone"
+    _models.load_config.cache_clear()
+
+
+def test_configure_partial_post_preserves_limits(live, monkeypatch, tmp_path):
+    """A partial POST (e.g. scripted curl with one field) must not clear
+    daily_limit values or provider token caps that were not posted."""
+    import yaml as _yaml
+    from cio.committee import models as _models
+
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        "chains:\n"
+        "  premium:\n"
+        "  - {service: openai, model: g1, daily_limit: 100}\n"
+        "defaults: {chain: premium}\n"
+        "agents: {}\n"
+        "nim: {base_url: u, api_key_env: K, max_tokens: 999}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIO_MODELS_CONFIG", str(p))
+    _models.load_config.cache_clear()
+
+    status, _ = _post(live, "/configure", {"form_kind": "models", "chain_add": "x"})
+    assert status == 303
+
+    saved = _yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert saved["chains"]["premium"][0]["daily_limit"] == 100   # untouched
+    assert saved["nim"]["max_tokens"] == 999                     # untouched
+    assert "x" in saved["chains"]
+    _models.load_config.cache_clear()
+
+
+def test_configure_post_converts_legacy_agent(live, monkeypatch, tmp_path):
+    """An agent on a legacy inline {service, model} config converts to a named
+    chain when one is picked; left on the placeholder it stays untouched."""
+    import yaml as _yaml
+    from cio.committee import models as _models
+
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        "chains:\n"
+        "  std:\n"
+        "  - {service: claude, model: c1}\n"
+        "defaults: {chain: std}\n"
+        "agents:\n"
+        "  market: {service: claude, model: old-m}\n"
+        "  macro: {service: nim, model: keep-me}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIO_MODELS_CONFIG", str(p))
+    _models.load_config.cache_clear()
+
+    status, _ = _post(live, "/configure", {
+        "form_kind": "models",
+        "agent:market:chain": "std",   # convert
+        "agent:macro:chain": "",       # placeholder → untouched
+    })
+    assert status == 303
+
+    saved = _yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert saved["agents"]["market"] == {"chain": "std"}          # converted, legacy keys dropped
+    assert saved["agents"]["macro"] == {"service": "nim", "model": "keep-me"}
+    _models.load_config.cache_clear()
 
 
 def test_unknown_route_404(live):

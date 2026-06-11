@@ -268,11 +268,16 @@ def test_briefing_summary(patch_ask):
 # ---------------------------------------------------------------------------
 
 def test_wma_chain_resolves_three_links():
-    from cio.committee.models import load_config, resolve_chain
+    """wma resolves to a NAMED 3-link chain (same setting machinery as cio).
+    Link order/models are operator-tunable from the dashboard — assert the
+    mechanism, not the operator's current picks."""
+    from cio.committee.models import load_config, resolve_chain, resolve_chain_name, chains
     load_config.cache_clear()
+    name = resolve_chain_name("wma")
     chain = resolve_chain("wma")
-    services = [c["service"] for c in chain]
-    assert services == ["openai", "claude", "nim"]
-    assert chain[0]["model"].startswith("gpt-5.5")
-    assert chain[1]["model"] == "claude-opus-4-8"
-    assert "kimi" in chain[2]["model"]
+    assert name is not None
+    assert chain == chains()[name]
+    assert len(chain) == 3
+    assert all(link["service"] in ("openai", "claude", "nim") and link["model"]
+               for link in chain)
+    load_config.cache_clear()

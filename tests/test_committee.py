@@ -1310,31 +1310,30 @@ class TestModelsConfig:
         load_config.cache_clear()
 
     def test_resolve_chain_cio_returns_three_links(self):
-        """Default YAML maps cio → a 3-link chain: openai → claude → nim
-        (premium → premium → cheap), with daily limits on the two premium links."""
-        from cio.committee.models import resolve_chain
+        """cio resolves to a NAMED 3-link chain setting. Link order / models /
+        daily_limits are operator-tunable from the dashboard, so only the
+        mechanism + structure is asserted (content pinned in test_fallback_chain
+        on a temp yaml)."""
+        from cio.committee.models import resolve_chain, resolve_chain_name, chains, SERVICES
+        name = resolve_chain_name("cio")
         chain = resolve_chain("cio")
+        assert name is not None
+        assert chain == chains()[name]
         assert len(chain) == 3
-        assert chain[0]["service"] == "openai"
-        assert chain[1]["service"] == "claude"
-        assert chain[2]["service"] == "nim"
-        assert chain[0].get("daily_limit") == 200000
-        assert chain[1].get("daily_limit") == 200000
-        assert "daily_limit" not in chain[2]
+        assert all(link["service"] in SERVICES for link in chain)
 
-    def test_resolve_market_returns_claude(self):
-        """Default YAML maps the market specialist → ('claude', 'claude-opus-4-8')."""
-        from cio.committee.models import resolve
-        service, model = resolve("market")
-        assert service == "claude"
-        assert model == "claude-opus-4-8"
+    def test_resolve_market_returns_chain_head(self):
+        """resolve('market') == head link of the specialist's named chain."""
+        from cio.committee.models import resolve, resolve_chain
+        head = resolve_chain("market")[0]
+        assert resolve("market") == (head["service"], head["model"])
 
     def test_resolve_unknown_key_falls_back_to_defaults(self):
-        """An unrecognised role_key falls through to defaults (claude/opus)."""
-        from cio.committee.models import resolve
-        service, model = resolve("nonexistent_role_xyz")
-        assert service == "claude"
-        assert model == "claude-opus-4-8"
+        """An unrecognised role_key falls through to the defaults chain head."""
+        from cio.committee.models import resolve, resolve_chain
+        head = resolve_chain("nonexistent_role_xyz")[0]
+        assert resolve("nonexistent_role_xyz") == (head["service"], head["model"])
+        assert head["service"] in ("claude", "openai", "nim")
 
     def test_missing_file_uses_builtin_defaults(self, tmp_path):
         """Missing config file → built-in defaults, no crash."""
@@ -1395,9 +1394,10 @@ class TestModelsConfig:
 class TestAskRoleRouting:
     """ask_role routes to the correct backend based on role_key config.
 
-    All _ask_* backends return (text, tokens) tuples; the CIO chain head is
-    openai (premium → premium → cheap = openai → claude → nim); specialists are
-    single-link claude. usage.record is mocked to avoid DB writes.
+    All _ask_* backends return (text, tokens) tuples. Routing runs against a
+    PINNED temp yaml (cio → openai-head premium, specialists → claude-head
+    standard) so dashboard edits to the repo config can't drift these tests.
+    usage.record is mocked to avoid DB writes.
     """
 
     def _run(self, coro):
@@ -1408,6 +1408,28 @@ class TestAskRoleRouting:
         load_config.cache_clear()
 
     def teardown_method(self):
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    @pytest.fixture(autouse=True)
+    def pinned_chain_yaml(self, monkeypatch, tmp_path):
+        cfg = tmp_path / "models.yaml"
+        cfg.write_text("""
+chains:
+  premium:
+  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 200000}
+  - {service: claude, model: claude-opus-4-8, daily_limit: 200000}
+  - {service: nim, model: moonshotai/kimi-k2.6}
+  standard:
+  - {service: claude, model: claude-opus-4-8}
+  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 200000}
+  - {service: nim, model: moonshotai/kimi-k2.6}
+defaults: {chain: standard}
+agents:
+  market: {chain: standard}
+  cio: {chain: premium}
+""", encoding="utf-8")
+        monkeypatch.setenv("CIO_MODELS_CONFIG", str(cfg))
         from cio.committee.models import load_config
         load_config.cache_clear()
 

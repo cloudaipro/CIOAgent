@@ -31,6 +31,7 @@ from .models import (
     openai_settings,
     claude_settings,
     resolve_chain as _resolve_chain,
+    resolve_chain_name as _resolve_chain_name,
 )
 
 log = logging.getLogger(__name__)
@@ -442,6 +443,10 @@ async def ask_role(
 
     # --- Chain-aware dispatch ---
     chain = _resolve_chain(role_key)
+    chain_name = _resolve_chain_name(role_key)
+    if chain_name:
+        log.debug("agent %s uses chain setting %r (%d link(s))",
+                  role_key, chain_name, len(chain))
     for link in chain:
         svc = link["service"]
         mdl = link.get("model")

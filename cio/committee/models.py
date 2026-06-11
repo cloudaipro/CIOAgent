@@ -2,7 +2,10 @@
 models.py — Per-agent model service config loader for the investment committee.
 
 Usage:
-    from cio.committee.models import load_config, resolve, nim_settings, openai_settings, resolve_chain
+    from cio.committee.models import (
+        load_config, resolve, resolve_chain, chains, chain_names, resolve_chain_name,
+        nim_settings, openai_settings,
+    )
 
 ``load_config`` is lru_cached.  Call ``load_config.cache_clear()`` in tests to swap configs.
 """
@@ -21,36 +24,47 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _BUILTIN: dict[str, Any] = {
-    "defaults": {"service": "claude", "model": "claude-opus-4-8"},
+    # Named fallback-chain settings. Every agent references one of these by
+    # name (agents.<key>.chain: <name>); ask_role walks the links in order,
+    # skipping any link whose service is over its daily token budget or that
+    # returns an empty result (key missing / API error / limit notice).
+    "chains": {
+        # premium: paid head → subscription → cheap last resort. For the
+        # critical decision/briefing roles (cio, wma).
+        "premium": [
+            {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+            {"service": "claude", "model": "claude-opus-4-8",    "daily_limit": 200000},
+            {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
+        ],
+        # standard: subscription head (same primary the specialists always
+        # used), degrading to paid then cheap.
+        "standard": [
+            {"service": "claude", "model": "claude-opus-4-8"},
+            {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+            {"service": "nim",    "model": "moonshotai/kimi-k2.6"},
+        ],
+        # translation: sonnet head (reliable long-markdown TC), opus backup.
+        "translation": [
+            {"service": "claude", "model": "claude-sonnet-4-6"},
+            {"service": "claude", "model": "claude-opus-4-8"},
+            {"service": "nim",    "model": "moonshotai/kimi-k2.6"},
+        ],
+    },
+    "defaults": {"chain": "standard"},
     "agents": {
-        "market":    {"service": "claude", "model": "claude-opus-4-8"},
-        "macro":     {"service": "claude", "model": "claude-opus-4-8"},
-        "equity":    {"service": "claude", "model": "claude-opus-4-8"},
-        "industry":  {"service": "claude", "model": "claude-opus-4-8"},
-        "valuation": {"service": "claude", "model": "claude-opus-4-8"},
-        "quant":     {"service": "claude", "model": "claude-opus-4-8"},
-        "etf":       {"service": "claude", "model": "claude-opus-4-8"},
-        "risk":      {"service": "claude", "model": "claude-opus-4-8"},
-        "catalyst":  {"service": "claude", "model": "claude-opus-4-8"},
-        "moderator": {"service": "claude", "model": "claude-opus-4-8"},
-        # cio / wma fallback chain shape: premium → premium → cheap, so the
-        # critical decision/briefing roles degrade gracefully when a backend is
-        # down or over its daily budget.
-        "cio": {
-            "chain": [
-                {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
-                {"service": "claude", "model": "claude-opus-4-8",    "daily_limit": 200000},
-                {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
-            ]
-        },
-        "wma": {
-            "chain": [
-                {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
-                {"service": "claude", "model": "claude-opus-4-8",    "daily_limit": 200000},
-                {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
-            ]
-        },
-        "translator": {"service": "claude", "model": "claude-sonnet-4-6"},
+        "market":     {"chain": "standard"},
+        "macro":      {"chain": "standard"},
+        "equity":     {"chain": "standard"},
+        "industry":   {"chain": "standard"},
+        "valuation":  {"chain": "standard"},
+        "quant":      {"chain": "standard"},
+        "etf":        {"chain": "standard"},
+        "risk":       {"chain": "standard"},
+        "catalyst":   {"chain": "standard"},
+        "moderator":  {"chain": "standard"},
+        "cio":        {"chain": "premium"},
+        "wma":        {"chain": "premium"},
+        "translator": {"chain": "translation"},
     },
     "nim": {
         "base_url": "https://integrate.api.nvidia.com/v1",
@@ -118,33 +132,15 @@ def resolve(role_key: str) -> tuple[str, str | None]:
     """
     Return (service, model) for the given agent role_key.
 
-    Falls back to config defaults, then hard-coded ('claude', 'claude-opus-4-8').
-    Never raises.
+    With the named-chain mechanism this is the HEAD link of the agent's
+    fallback chain. Legacy inline {service, model} agent configs are still
+    honoured. Falls back to ('claude', 'claude-opus-4-8'). Never raises.
     """
-    cfg = load_config()
-    agents: dict = cfg.get("agents", {})
-    defaults: dict = cfg.get("defaults", {})
-
-    agent_cfg = agents.get(role_key, {})
-    service = agent_cfg.get("service") or defaults.get("service") or "claude"
-
-    # Use a sentinel to distinguish explicit null from missing key.
-    # If the agent explicitly sets model: null → honour it (None).
-    # If the agent key is absent → fall through to defaults.
-    _MISSING = object()
-    raw_model = agent_cfg.get("model", _MISSING)
-    if raw_model is _MISSING:
-        # Key not present in agent config — use defaults
-        model = defaults.get("model") or "claude-opus-4-8"
-    else:
-        # Key present (may be null/None)
-        model = raw_model
-
-    # Normalise yaml null / "null" / "none" / "~" strings → Python None
-    if model is None or (isinstance(model, str) and model.lower() in ("null", "none", "~")):
-        model = None
-
-    return str(service), model
+    chain = resolve_chain(role_key)
+    if chain:
+        head = chain[0]
+        return str(head.get("service") or "claude"), head.get("model")
+    return ("claude", "claude-opus-4-8")
 
 
 def _int_setting(env_name: str, yaml_val, default: int) -> int:
@@ -229,37 +225,121 @@ def openai_settings() -> dict:
     }
 
 
+def _normalize_links(raw) -> list[dict]:
+    """Normalise a raw chain link list: each link gets service + model, and
+    daily_limit only when set. Non-dict links are skipped. Never raises."""
+    result: list[dict] = []
+    if not isinstance(raw, list):
+        return result
+    for link in raw:
+        if not isinstance(link, dict):
+            continue
+        svc = link.get("service") or "claude"
+        mdl = link.get("model") or "claude-opus-4-8"
+        entry: dict = {"service": str(svc), "model": mdl}
+        if "daily_limit" in link and link["daily_limit"] is not None:
+            try:
+                entry["daily_limit"] = int(link["daily_limit"])
+            except (TypeError, ValueError):
+                pass
+        result.append(entry)
+    return result
+
+
+def chains() -> dict[str, list[dict]]:
+    """Return all named fallback-chain settings {name: [link, ...]}, normalized.
+
+    Read from ``chains:`` in the config; falls back to the built-in chains when
+    the section is missing/empty so resolution never dead-ends. Never raises.
+    """
+    cfg = load_config()
+    raw = cfg.get("chains")
+    out: dict[str, list[dict]] = {}
+    if isinstance(raw, dict):
+        for name, links in raw.items():
+            norm = _normalize_links(links)
+            if norm:
+                out[str(name)] = norm
+    if not out:
+        for name, links in _BUILTIN["chains"].items():
+            out[name] = _normalize_links(links)
+    return out
+
+
+def chain_names() -> list[str]:
+    """Names of every configured fallback-chain setting (config order)."""
+    return list(chains().keys())
+
+
+def resolve_chain_name(role_key: str) -> str | None:
+    """Return the chain-setting NAME the agent resolves to, or None when the
+    agent uses a legacy inline config (list chain / service+model)."""
+    cfg = load_config()
+    agent_cfg = (cfg.get("agents") or {}).get(role_key) or {}
+    val = agent_cfg.get("chain")
+    if isinstance(val, str):
+        return val
+    if val is None and "service" not in agent_cfg and "model" not in agent_cfg:
+        dval = (cfg.get("defaults") or {}).get("chain")
+        if isinstance(dval, str):
+            return dval
+    return None
+
+
 def resolve_chain(role_key: str) -> list[dict]:
     """
     Return the fallback chain for *role_key* as a list of link dicts.
 
-    Each link has at minimum ``service`` and ``model``; CIO links also carry
-    ``daily_limit``.  If the agent config has a ``chain`` key, return it
-    directly.  Otherwise wrap ``resolve(role_key)`` into a single-link list
-    (no ``daily_limit`` — specialists have no budget cap).  Never raises.
+    Each link has at minimum ``service`` and ``model``; links may carry
+    ``daily_limit``. Resolution order:
+      1. ``agents.<role_key>.chain: <name>`` → the named setting in ``chains:``
+         (unknown name → warn, fall through to defaults).
+      2. ``agents.<role_key>.chain: [links]`` → legacy inline chain.
+      3. ``agents.<role_key>.{service, model}`` → legacy 1-link chain.
+      4. ``defaults.chain`` (name or inline list).
+      5. ``defaults.{service, model}`` → 1-link chain.
+      6. hard-coded [{claude, claude-opus-4-8}].
+    Never raises; never returns an empty list.
     """
     cfg = load_config()
-    agents: dict = cfg.get("agents", {})
-    agent_cfg = agents.get(role_key, {})
+    agents: dict = cfg.get("agents") or {}
+    defaults: dict = cfg.get("defaults") or {}
+    agent_cfg = agents.get(role_key) or {}
+    named = chains()
 
-    if "chain" in agent_cfg:
-        raw: list = agent_cfg["chain"]
-        # Normalise: each link must have service + model at minimum.
-        result = []
-        for link in raw:
-            if not isinstance(link, dict):
-                continue
-            svc = link.get("service") or "claude"
-            mdl = link.get("model") or "claude-opus-4-8"
-            entry: dict = {"service": str(svc), "model": mdl}
-            if "daily_limit" in link and link["daily_limit"] is not None:
-                entry["daily_limit"] = int(link["daily_limit"])
-            result.append(entry)
-        return result
+    def _from_node(node: dict, label: str) -> list[dict] | None:
+        """Resolve one config node (agent or defaults) to a chain, or None."""
+        val = node.get("chain")
+        if isinstance(val, str):
+            links = named.get(val)
+            if links:
+                return links
+            log.warning("resolve_chain(%s): unknown chain setting %r in %s; falling through",
+                        role_key, val, label)
+            return None
+        if isinstance(val, list):  # legacy inline chain
+            norm = _normalize_links(val)
+            return norm or None
+        if "service" in node or "model" in node:  # legacy single service
+            svc = node.get("service") or defaults.get("service") or "claude"
+            mdl = node.get("model", defaults.get("model", "claude-opus-4-8"))
+            if mdl is None or (isinstance(mdl, str) and mdl.lower() in ("null", "none", "~")):
+                mdl = None
+            return [{"service": str(svc), "model": mdl}]
+        return None
 
-    # Single-service role → 1-link chain, no limit.
-    service, model = resolve(role_key)
-    return [{"service": service, "model": model}]
+    result = _from_node(agent_cfg, f"agents.{role_key}") or _from_node(defaults, "defaults")
+    return result or [{"service": "claude", "model": "claude-opus-4-8"}]
+
+
+def new_chain_links() -> list[dict]:
+    """Template links for a chain setting created from the Configure tab:
+    3 services (claude → openai → nim), editable after creation."""
+    return [
+        {"service": "claude", "model": "claude-opus-4-8"},
+        {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+        {"service": "nim", "model": "moonshotai/kimi-k2.6"},
+    ]
 
 
 # ---------------------------------------------------------------------------
