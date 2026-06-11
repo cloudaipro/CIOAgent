@@ -89,7 +89,7 @@ flowchart TB
     end
 
     subgraph BACKENDS["LLM Backends"]
-        NIM_B[NVIDIA NIM\nnemotron-550B\nOpenAI-compatible REST]
+        NIM_B[NVIDIA NIM\nkimi-k2.6\nOpenAI-compatible REST]
         CLAUDE_B[Claude Agent SDK\nclaude-opus-4-8]
         OPENAI_B[OpenAI API\ngpt-5.5]
     end
@@ -100,7 +100,7 @@ flowchart TB
     end
 
     subgraph CONFIG["Configuration"]
-        MODELS_YAML[config/committee_models.yaml\nservice / model / chain / daily_limit]
+        MODELS_YAML[config/committee_models.yaml\nnamed chains / per-agent assignment\ndaily_limit per link]
         ENV[Environment Variables\nCIO_PARALLEL / CIO_DEBATE\nCIO_NIM_MAX_TOKENS etc.]
     end
 
@@ -243,8 +243,12 @@ classDiagram
     }
 
     class Models {
-        +resolve(role_key) tuple
+        +chains() dict
+        +chain_names() list
+        +resolve_chain_name(role_key) str
         +resolve_chain(role_key) list
+        +resolve(role_key) tuple
+        +new_chain_links() list
         +nim_settings() dict
         +claude_settings() dict
         +openai_settings() dict

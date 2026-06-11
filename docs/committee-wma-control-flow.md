@@ -171,18 +171,18 @@ flowchart TD
     MOD_PARSE --> CIO_CALL[CIO LLM call\nchain-aware fallback\nserial]
 
     CIO_CALL --> CHAIN{Budget\nexhausted?}
-    CHAIN -- try NIM --> NIM_CALL[NIM API call\nretry 429/503]
-    NIM_CALL --> NIM_OK{Non-empty?}
-    NIM_OK -- yes --> CIO_DONE
-    NIM_OK -- no/timeout --> CHAIN
-    CHAIN -- try Claude --> CLAUDE_CALL[claude-agent-sdk call]
+    CHAIN -- "try Claude (link 1)" --> CLAUDE_CALL[claude-agent-sdk call\npremium chain link 1]
     CLAUDE_CALL --> CLAUDE_OK{Non-empty?}
     CLAUDE_OK -- yes --> CIO_DONE
     CLAUDE_OK -- no --> CHAIN
-    CHAIN -- try OpenAI --> OPENAI_CALL[OpenAI API call]
+    CHAIN -- "try OpenAI (link 2)" --> OPENAI_CALL[OpenAI API call\npremium chain link 2]
     OPENAI_CALL --> OPENAI_OK{Non-empty?}
     OPENAI_OK -- yes --> CIO_DONE
     OPENAI_OK -- no --> CHAIN
+    CHAIN -- "try NIM (link 3)" --> NIM_CALL[NIM API call\npremium chain link 3]
+    NIM_CALL --> NIM_OK{Non-empty?}
+    NIM_OK -- yes --> CIO_DONE
+    NIM_OK -- no/timeout --> CHAIN
     CHAIN -- exhausted --> EMPTY_CIO["" empty result]
     EMPTY_CIO --> CIO_DONE
 
@@ -215,16 +215,20 @@ flowchart TD
 committee route through it; tests monkeypatch this one function). Resolution order:
 
 1. **Explicit `service` argument** → single dispatch, no chain (legacy/override path).
-2. **`role_key` set** → resolve the role's *chain* from `committee_models.yaml`. Most
-   roles are a single NIM link; `cio` and `wma` are 3-link chains.
+2. **`role_key` set** → `resolve_chain(role_key)` returns the role's **named 3-link chain**
+   from `committee_models.yaml`. Three shipped settings: `standard` (OpenAI → Claude →
+   NIM, used by all 9 specialists and moderator), `premium` (Claude → OpenAI → NIM,
+   used by CIO and WMA), `translation` (Claude Sonnet → OpenAI mini → NIM, used by
+   translator). Every role has a chain; none are single-service.
 3. **No `role_key`** → default to the Claude backend.
 
 For each chain link the loop applies two checks before accepting it:
 
 - **Budget gate** — `usage.over_budget(service, daily_limit)`. If the service has
   burned through its `daily_limit` tokens today, the link is skipped (logged) and the
-  next one is tried. Specialists have no cap; `cio`/`wma` links cap NIM and Claude at
-  200 000 tokens/day each, with OpenAI as an uncapped last resort.
+  next one is tried. The shipped `standard`/`premium` settings give 200k/day to their
+  first two links (OpenAI + Claude), with NIM as the uncapped last resort. Limits are
+  per-service across *all* chains that reference that service.
 - **Non-empty result** — an empty string means "key missing / API error / limit
   notice"; the loop falls through to the next link. A non-empty string is returned
   immediately.
@@ -247,24 +251,24 @@ flowchart LR
     ROLE_KEY -- no --> CLAUDE_DEFAULT[claude backend\ndefault]
     ROLE_KEY -- yes --> CHAIN_RESOLVE[resolve_chain\nfrom config]
 
-    CHAIN_RESOLVE --> LINK1[Link 1: NIM\nnemotron-550B]
+    CHAIN_RESOLVE --> LINK1["Link 1: OpenAI gpt-5.5<br/>(standard chain — specialists)<br/>Claude Opus (premium — CIO/WMA)"]
     LINK1 --> BUDGET1{Over daily\nbudget?}
     BUDGET1 -- yes --> LINK2
-    BUDGET1 -- no --> DISPATCH1[dispatch NIM]
+    BUDGET1 -- no --> DISPATCH1[dispatch link 1 backend]
     DISPATCH1 --> RESULT1{Non-empty\ntext?}
     RESULT1 -- yes --> RETURN[Return text]
     RESULT1 -- no --> LINK2
 
-    LINK2[Link 2: Claude\nclaude-opus-4-8]
+    LINK2["Link 2: Claude Opus<br/>(standard chain)<br/>OpenAI gpt-5.5 (premium)"]
     LINK2 --> BUDGET2{Over daily\nbudget?}
     BUDGET2 -- yes --> LINK3
-    BUDGET2 -- no --> DISPATCH2[dispatch Claude SDK]
+    BUDGET2 -- no --> DISPATCH2[dispatch link 2 backend]
     DISPATCH2 --> RESULT2{Non-empty?}
     RESULT2 -- yes --> RETURN
     RESULT2 -- no --> LINK3
 
-    LINK3[Link 3: OpenAI\ngpt-5.5]
-    LINK3 --> DISPATCH3[dispatch OpenAI]
+    LINK3["Link 3: NIM kimi-k2.6<br/>(all chains — last resort, no cap)"]
+    LINK3 --> DISPATCH3[dispatch NIM]
     DISPATCH3 --> RESULT3{Non-empty?}
     RESULT3 -- yes --> RETURN
     RESULT3 -- no --> EMPTY["" return empty]

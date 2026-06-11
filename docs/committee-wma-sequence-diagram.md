@@ -173,14 +173,14 @@ sequenceDiagram
     ENGINE->>LLM: ask_role MODERATOR_SYSTEM
     LLM-->>ENGINE: consensus yaml
 
-    note over ENGINE: Step 5 — CIO (serial, chain fallback)
+    note over ENGINE: Step 5 — CIO (serial, premium chain: Claude→OpenAI→NIM)
     ENGINE->>MEM: recall_block("cio", symbol)
     MEM-->>ENGINE: cio memory block
-    ENGINE->>LLM: ask_role CIO_SYSTEM (NIM first)
-    alt NIM returns text
+    ENGINE->>LLM: ask_role CIO_SYSTEM (Claude first, premium chain)
+    alt Claude returns text
         LLM-->>ENGINE: cio yaml
-    else NIM empty or over budget
-        ENGINE->>LLM: ask_role Claude fallback
+    else Claude empty or over budget
+        ENGINE->>LLM: ask_role OpenAI fallback (premium link 2)
         LLM-->>ENGINE: cio yaml
     end
 
@@ -222,6 +222,10 @@ full transcript so each may revise or hold. Memory writes (`sanitize → save_no
 
 ## Single ask_role Chain Fallback Sequence
 
+Example uses `role_key="cio"` → **premium chain** (Claude → OpenAI → NIM). The walk
+mechanism is identical for all roles; `standard` (specialists) starts with OpenAI and
+`translation` (translator) starts with Claude Sonnet.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -229,14 +233,34 @@ sequenceDiagram
     participant AR as ask_role<br/>(engine.py)
     participant USAGE as usage.py<br/>(token budget)
     participant TRANS as transcript.py<br/>(capture)
-    participant NIM as NIM API<br/>(nemotron-550B)
     participant CLAUDE as Claude SDK<br/>(claude-opus-4-8)
     participant OPENAI as OpenAI API<br/>(gpt-5.5)
+    participant NIM as NIM API<br/>(kimi-k2.6)
 
     CALLER->>AR: ask_role(system, user, role_key="cio")
-    AR->>AR: resolve_chain("cio") → 3 links
-    AR->>USAGE: over_budget("nim", 200000)?
+    AR->>AR: resolve_chain("cio") → premium chain [Claude, OpenAI, NIM]
+    AR->>USAGE: over_budget("claude", 200000)?
     USAGE-->>AR: False
+
+    AR->>CLAUDE: ClaudeSDKClient.connect + query
+    CLAUDE-->>AR: AssistantMessage stream
+    AR->>AR: _is_limit_notice? → False
+
+    AR->>USAGE: record("claude", tokens)
+    AR->>TRANS: record(role_key, service, model, prompts, response, tokens)
+    AR-->>CALLER: text (non-empty)
+
+    note over AR: If Claude returned empty or over budget:
+
+    AR->>USAGE: over_budget("openai", 200000)?
+    USAGE-->>AR: False
+    AR->>OPENAI: POST /chat/completions
+    OPENAI-->>AR: 200 response
+    AR->>USAGE: record("openai", tokens)
+    AR->>TRANS: record(...)
+    AR-->>CALLER: text
+
+    note over AR: If OpenAI also empty (last resort — NIM, no cap):
 
     AR->>NIM: POST /chat/completions (timeout 300s)
     alt HTTP 429 or 503
@@ -245,27 +269,7 @@ sequenceDiagram
         AR->>NIM: retry (up to 3x)
     end
     NIM-->>AR: 200 {choices[0].message.content}
-    AR->>AR: _is_limit_notice? → False
-
     AR->>USAGE: record("nim", tokens)
-    AR->>TRANS: record(role_key, service, model, prompts, response, tokens)
-    AR-->>CALLER: text (non-empty)
-
-    note over AR: If NIM returned empty or timed out:
-
-    AR->>USAGE: over_budget("claude", 200000)?
-    USAGE-->>AR: False
-    AR->>CLAUDE: ClaudeSDKClient.connect + query
-    CLAUDE-->>AR: AssistantMessage stream
-    AR->>USAGE: record("claude", tokens)
-    AR->>TRANS: record(...)
-    AR-->>CALLER: text
-
-    note over AR: If Claude also empty (last resort):
-
-    AR->>OPENAI: POST /chat/completions
-    OPENAI-->>AR: 200 response
-    AR->>USAGE: record("openai", tokens)
     AR->>TRANS: record(...)
     AR-->>CALLER: text  (or "" if all exhausted)
 ```
