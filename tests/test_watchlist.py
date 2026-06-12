@@ -260,6 +260,52 @@ def test_reorder_drives_prices_order(db):
     assert [q["symbol"] for q in snap["quotes"]] == ["MSFT", "AAPL", wl.NASDAQ_INDEX]
 
 
+# ---- IBKR saved-watchlist sync (Client Portal Web API) --------------------
+def _ibkr_fav(name):
+    # Mirrors cp.watchlist_named: resolve by name -> {name, symbols}.
+    if name.lower() == "favorites":
+        return {"name": "Favorites", "symbols": ["AAPL", "MU", "NVDA"]}
+    return None
+
+
+def test_sync_from_ibkr_imports_named_list(db):
+    a = wl.create("Favorites", db_path=db)
+    wl.add_symbol(a, "AAPL", db_path=db)            # already present
+    res = wl.sync_from_ibkr(a, fetch_fn=_ibkr_fav, db_path=db)
+    assert res["ibkr_list"] == "Favorites"
+    assert res["added"] == ["MU", "NVDA"]            # AAPL skipped, order kept
+    assert res["skipped"] == ["AAPL"]
+    syms = wl.get(a, db_path=db)["symbols"]
+    assert {"AAPL", "MU", "NVDA"} <= set(syms)
+    assert wl.NASDAQ_INDEX in syms                   # index untouched
+
+
+def test_sync_from_ibkr_explicit_ibkr_name(db):
+    a = wl.create("My Tech", db_path=db)             # local name != IBKR name
+    res = wl.sync_from_ibkr(a, ibkr_name="Favorites", fetch_fn=_ibkr_fav, db_path=db)
+    assert res["ibkr_list"] == "Favorites"
+    assert "MU" in wl.get(a, db_path=db)["symbols"]
+
+
+def test_sync_from_ibkr_is_idempotent(db):
+    a = wl.create("Favorites", db_path=db)
+    wl.sync_from_ibkr(a, fetch_fn=_ibkr_fav, db_path=db)
+    res2 = wl.sync_from_ibkr(a, fetch_fn=_ibkr_fav, db_path=db)
+    assert res2["added"] == []
+    assert set(res2["skipped"]) == {"AAPL", "MU", "NVDA"}
+
+
+def test_sync_from_ibkr_unknown_list_raises(db):
+    with pytest.raises(wl.WatchlistError):
+        wl.sync_from_ibkr(999, fetch_fn=_ibkr_fav, db_path=db)
+
+
+def test_sync_from_ibkr_error_when_no_match(db):
+    a = wl.create("Nope", db_path=db)               # no IBKR list named "Nope"
+    res = wl.sync_from_ibkr(a, fetch_fn=_ibkr_fav, db_path=db)
+    assert "error" in res
+
+
 # ---- quote-board image (charts.watchlist_table) ---------------------------
 from cio import charts
 

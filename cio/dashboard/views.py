@@ -860,6 +860,17 @@ def render_watchlist(watchlists, selected, level: int,
             "(e.g. \"AAPL\",\"MSFT\",\"NVDA\") or one symbol per line'></textarea>"
             "<div class='row'><button class='primary' type='submit'>Import CSV</button>"
             "<span class='empty'>existing symbols are skipped</span></div></form>")
+        # Imports an IBKR *saved watchlist* (Client Portal Web API) by name,
+        # default = this list's name. Additive, never removes. Server no-op +
+        # flash error when CIO_IBKR_CPAPI is unset, so always shown.
+        ibkr_form = (
+            "<form method='post' action='/watchlist' class='row'>"
+            f"{_hidden(selected['id'], 'sync_ibkr')}"
+            f"<input name='ibkr_name' placeholder='IBKR watchlist name "
+            f"(default: {esc(selected['name'])})'>"
+            "<button type='submit'>Sync from IBKR</button>"
+            "<span class='empty'>imports an IBKR saved watchlist (e.g. Favorites)"
+            "</span></form>")
         active_note = (" <span class='badge'>active</span>" if selected["is_active"]
                        else "")
         detail = (
@@ -867,6 +878,7 @@ def render_watchlist(watchlists, selected, level: int,
             f"<h2>Symbols</h2>{sym_table}"
             f"<h2>Add symbol</h2>{add_form}"
             f"<h2>Import from CSV</h2>{import_form}"
+            f"<h2>Sync from IBKR</h2>{ibkr_form}"
             f"<h2>Rename</h2>{rename_form}</div>")
 
     body = (

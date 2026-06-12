@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from cio import db, portfolio
-from cio.data import ibkr
+from cio.data import ibkr, ibkr_cpapi
 
 
 @pytest.fixture
@@ -203,6 +203,56 @@ def test_sync_ibkr_error_when_disabled(tmp_db, monkeypatch):
     monkeypatch.delenv("CIO_IBKR_TWS", raising=False)
     res = portfolio.sync_ibkr(db_path=tmp_db)
     assert "error" in res
+
+
+# ---------------------------------------------------------------------------
+# Client Portal Web API — saved-watchlist read (cio.data.ibkr_cpapi)
+# ---------------------------------------------------------------------------
+
+def test_cpapi_disabled_without_env(monkeypatch):
+    monkeypatch.delenv("CIO_IBKR_CPAPI", raising=False)
+    assert not ibkr_cpapi.enabled()
+    assert ibkr_cpapi.watchlists() is None
+    assert ibkr_cpapi.watchlist_named("Favorites") is None
+
+
+CP_GATEWAY = {
+    ("GET", "/iserver/accounts"): {"accounts": ["U1234567"]},
+    ("GET", "/iserver/watchlists"): {
+        "data": {"user_lists": [{"id": "100", "name": "Favorites"},
+                                {"id": "200", "name": "Energy"}]}},
+    ("GET", "/iserver/watchlist?id=100"): {
+        "instruments": [
+            {"ticker": "AAPL"},
+            {"ticker": "MU"},
+            {"C": "Section;header"},        # divider — no ticker, skipped
+            {"ticker": "NVDA"},
+        ]},
+}
+
+
+@pytest.fixture
+def fake_cp(monkeypatch):
+    monkeypatch.setenv("CIO_IBKR_CPAPI", "https://localhost:5000/")
+    monkeypatch.setattr(ibkr_cpapi, "_request",
+                        lambda method, path: CP_GATEWAY.get((method, path)))
+
+
+def test_cpapi_gateway_url_strips_slash(monkeypatch):
+    monkeypatch.setenv("CIO_IBKR_CPAPI", "https://localhost:5000/")
+    assert ibkr_cpapi.gateway_url() == "https://localhost:5000"
+
+
+def test_cpapi_lists_and_named(fake_cp):
+    lists = ibkr_cpapi.watchlists()
+    assert [w["name"] for w in lists] == ["Favorites", "Energy"]
+    fav = ibkr_cpapi.watchlist_named("favorites")          # case-insensitive
+    assert fav["name"] == "Favorites"
+    assert fav["symbols"] == ["AAPL", "MU", "NVDA"]         # divider row dropped
+
+
+def test_cpapi_named_miss_returns_none(fake_cp):
+    assert ibkr_cpapi.watchlist_named("Nonexistent") is None
 
 
 def test_sync_ibkr_error_when_snapshot_fails(tmp_db):

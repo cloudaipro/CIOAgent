@@ -382,6 +382,78 @@ def import_csv(watchlist_id: int, source: str | Path | None = None, *,
         conn.close()
 
 
+def sync_from_ibkr(watchlist_id: int, *, ibkr_name: str | None = None,
+                   fetch_fn=None, db_path=db.DB_PATH) -> dict:
+    """Import an IBKR *saved watchlist* (Favorites etc.) into *watchlist_id*.
+
+    Reads the IBKR watchlist via the Client Portal Web API (cio.data.ibkr_cpapi)
+    — the TWS API can't see saved watchlists, only holdings. The IBKR list is
+    matched by name (case-insensitive), defaulting to the local list's own name;
+    pass *ibkr_name* to import a differently-named IBKR list.
+
+    Additive and idempotent: existing symbols (incl. the NASDAQ index) are left
+    alone, only IBKR tickers not already on the list are appended. Nothing is
+    ever removed.
+
+    *fetch_fn(name)* -> ``{"name", "symbols": [..]}`` | None overrides the source
+    (tests). Returns ``{"ibkr_list", "added": [..], "skipped": [..]}`` or
+    ``{"error": ..}`` when the Client Portal API is not configured/unreachable
+    or no IBKR watchlist matches. Raises WatchlistError on an unknown local
+    list (consistent with the other mutations)."""
+    local = get(watchlist_id, db_path=db_path)
+    if local is None:
+        raise WatchlistError(f"no watchlist with id {watchlist_id}")
+    name = (ibkr_name or local["name"]).strip()
+
+    if fetch_fn is None:
+        from .data import ibkr_cpapi as cp
+        if not cp.enabled():
+            return {"error": "IBKR Client Portal Web API not configured "
+                             "(set CIO_IBKR_CPAPI=https://localhost:5000)"}
+        lists = cp.watchlists()
+        if lists is None:
+            return {"error": "Client Portal Gateway unreachable or not "
+                             "authenticated — log in at the gateway URL and retry"}
+        match = next((w for w in lists
+                      if w["name"].strip().lower() == name.lower()), None)
+        if match is None:
+            avail = ", ".join(w["name"] for w in lists) or "(none)"
+            return {"error": f"no IBKR watchlist named {name!r}; "
+                             f"available: {avail}"}
+        syms = cp.watchlist_symbols(match["id"])
+        if syms is None:
+            return {"error": f"could not read IBKR watchlist {name!r}"}
+        result = {"name": match["name"], "symbols": syms}
+    else:
+        result = fetch_fn(name)
+        if not result:
+            return {"error": f"no IBKR watchlist named {name!r}"}
+
+    conn = db.connect(db_path)
+    try:
+        with conn:
+            added, skipped = [], []
+            pos = _next_position(conn, watchlist_id)
+            for raw in result["symbols"]:
+                try:
+                    sym = _safe_symbol(raw)
+                except ValueError:
+                    continue
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO watchlist_items "
+                    "(watchlist_id, symbol, position) VALUES (?,?,?)",
+                    (watchlist_id, sym, pos),
+                )
+                if cur.rowcount:
+                    added.append(sym)
+                    pos += 1
+                else:
+                    skipped.append(sym)
+    finally:
+        conn.close()
+    return {"ibkr_list": result["name"], "added": added, "skipped": skipped}
+
+
 # ---- prices ----------------------------------------------------------------
 def prices(watchlist_id: int | None = None, *, quote_fn=None, db_path=db.DB_PATH) -> dict:
     """Latest prices for a watchlist (the active one if *watchlist_id* is None).

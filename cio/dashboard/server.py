@@ -714,6 +714,16 @@ class _Handler(BaseHTTPRequestHandler):
             elif action == "import_csv":
                 n = watchlist.import_csv(wl_id, text=f("csv_text"))
                 msg = f"imported {n} new symbol(s)"
+            elif action == "sync_ibkr":
+                res = watchlist.sync_from_ibkr(wl_id, ibkr_name=f("ibkr_name") or None)
+                if "error" in res:
+                    msg, err = res["error"], True
+                else:
+                    added = res["added"]
+                    msg = (f"IBKR list {res['ibkr_list']!r}: added {len(added)} "
+                           f"symbol(s)"
+                           + (f" ({', '.join(added)})" if added else "")
+                           + f", {len(res['skipped'])} already present")
             elif action == "reorder":
                 order = [s for s in f("order").split(",") if s]
                 watchlist.reorder(wl_id, order)
