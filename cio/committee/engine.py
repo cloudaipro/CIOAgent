@@ -12,6 +12,7 @@ import asyncio
 import contextvars
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -117,6 +118,27 @@ def _is_limit_notice(text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Limit latch — circuit breaker per service
+# ---------------------------------------------------------------------------
+# Once a backend returns a limit notice, latch that service for a cooldown so
+# subsequent chain dispatches skip it instantly instead of re-spawning a
+# subprocess / making a network call just to rediscover the same limit.
+# Expiry is lazy: _latched() compares against the stored deadline; after the
+# TTL the next call probes the service again and re-latches if still limited.
+
+_LIMIT_LATCH: dict[str, float] = {}  # service -> time.monotonic() deadline
+_LATCH_TTL = float(os.getenv("CIO_LIMIT_LATCH_TTL", "1800"))  # seconds
+
+
+def _latch(service: str) -> None:
+    _LIMIT_LATCH[service] = time.monotonic() + _LATCH_TTL
+
+
+def _latched(service: str) -> bool:
+    return time.monotonic() < _LIMIT_LATCH.get(service, 0.0)
+
+
+# ---------------------------------------------------------------------------
 # OpenAI backend
 # ---------------------------------------------------------------------------
 
@@ -157,6 +179,7 @@ async def _ask_openai(system_prompt: str, user_prompt: str, model: str | None = 
         tok = resp.usage.total_tokens if resp.usage else 0
         if _is_limit_notice(text):
             log.warning("_ask_openai hit a limit notice; treating as empty")
+            _latch("openai")
             return ("", 0)
         return (text, tok or 0)
     except Exception as e:
@@ -222,6 +245,7 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
         collected = "\n".join(parts).strip()
         if _is_limit_notice(collected):
             log.warning("_ask_claude hit a limit notice; treating as empty")
+            _latch("claude")
             return ("", 0)
         # Estimate tokens if the SDK did not report any
         if total_tokens <= 0:
@@ -363,6 +387,7 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
             return ("", 0)
         if _is_limit_notice(text):
             log.warning("_ask_nim hit a limit notice; treating as empty")
+            _latch("nim")
             return ("", 0)
         # Real usage from response; fall back to estimate if absent.
         tok = 0
@@ -456,6 +481,10 @@ async def ask_role(
         svc = link["service"]
         mdl = link.get("model")
         limit = link.get("daily_limit")  # None means no cap
+
+        if _latched(svc):
+            log.info("latch: %s limit-latched; falling through", svc)
+            continue
 
         if _usage.over_budget(svc, limit):
             log.info("budget: %s at daily limit; falling through", svc)

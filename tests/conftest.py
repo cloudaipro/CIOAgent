@@ -23,6 +23,17 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_limit_latch():
+    """engine._LIMIT_LATCH is module-global; any test that drives a real
+    backend through a limit notice would otherwise latch the service for
+    every later test in the run."""
+    from cio.committee import engine
+    engine._LIMIT_LATCH.clear()
+    yield
+    engine._LIMIT_LATCH.clear()
+
+
 def make_ohlcv(n_rows=350, seed=42):
     """
     Build a synthetic OHLCV DataFrame suitable for strategy testing.

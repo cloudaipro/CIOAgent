@@ -546,3 +546,140 @@ agents:
         assert len(calls["claude"]) == 1
         assert len(calls["openai"]) == 0
         assert len(calls["nim"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# E. Limit latch — per-service circuit breaker
+# ---------------------------------------------------------------------------
+
+class TestLimitLatch:
+    """Once a backend reports a limit notice the service is latched: later
+    chain dispatches skip it without spawning a backend call. Expiry is lazy —
+    when the stored deadline passes, the next call probes the service again."""
+
+    def setup_method(self):
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    def teardown_method(self):
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    @pytest.fixture(autouse=True)
+    def clean_latch(self):
+        """Latch state is module-global; isolate every test."""
+        from cio.committee import engine
+        engine._LIMIT_LATCH.clear()
+        yield
+        engine._LIMIT_LATCH.clear()
+
+    @pytest.fixture(autouse=True)
+    def patch_usage_db(self, monkeypatch, tmp_path):
+        """Isolated usage DB + pinned chain config (claude-headed 'standard')."""
+        self.db = tmp_path / "latch_test.db"
+        monkeypatch.setattr("cio.committee.usage.DB_PATH", self.db)
+        cfg = tmp_path / "models.yaml"
+        cfg.write_text("""
+chains:
+  standard:
+  - {service: claude, model: claude-opus-4-8}
+  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 200000}
+  - {service: nim, model: moonshotai/kimi-k2.6}
+defaults: {chain: standard}
+agents:
+  market: {chain: standard}
+""", encoding="utf-8")
+        monkeypatch.setenv("CIO_MODELS_CONFIG", str(cfg))
+        from cio.committee.models import load_config
+        load_config.cache_clear()
+
+    def _patch_backends(self, monkeypatch, openai_result, claude_result, nim_result):
+        calls = {"openai": [], "claude": [], "nim": []}
+
+        async def fake_openai(sp, up, model=None):
+            calls["openai"].append(model)
+            return openai_result
+
+        async def fake_claude(sp, up, model=None):
+            calls["claude"].append(model)
+            return claude_result
+
+        async def fake_nim(sp, up, model=None):
+            calls["nim"].append(model)
+            return nim_result
+
+        monkeypatch.setattr("cio.committee.engine._ask_openai", fake_openai)
+        monkeypatch.setattr("cio.committee.engine._ask_claude", fake_claude)
+        monkeypatch.setattr("cio.committee.engine._ask_nim", fake_nim)
+        return calls
+
+    def test_latch_set_and_query(self):
+        from cio.committee.engine import _latch, _latched
+        assert _latched("claude") is False
+        _latch("claude")
+        assert _latched("claude") is True
+        assert _latched("openai") is False
+
+    def test_latch_lazy_expiry(self):
+        import time
+        from cio.committee import engine
+        engine._LIMIT_LATCH["claude"] = time.monotonic() - 1  # already expired
+        assert engine._latched("claude") is False
+
+    def test_limit_notice_sets_latch(self, monkeypatch):
+        """Real _ask_openai: a limit-notice reply latches the service."""
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-test")
+
+        fake_choice = MagicMock()
+        fake_choice.message.content = "You've hit your usage limit. resets 3pm. Try again later."
+        fake_resp = MagicMock()
+        fake_resp.choices = [fake_choice]
+        fake_resp.usage = None
+
+        class FakeAsyncOpenAI:
+            def __init__(self, *a, **kw):
+                pass
+
+            @property
+            def chat(self):
+                return self
+
+            @property
+            def completions(self):
+                return self
+
+            async def create(self, **kwargs):
+                return fake_resp
+
+        monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+
+        from cio.committee.engine import _ask_openai, _latched
+        text, tok = _run(_ask_openai("sys", "user"))
+        assert text == ""
+        assert _latched("openai") is True
+
+    def test_chain_skips_latched_service(self, monkeypatch):
+        """Latched claude head → chain dispatches straight to openai; claude
+        backend is never invoked (no wasted subprocess)."""
+        from cio.committee.engine import _latch, ask_role
+        _latch("claude")
+        calls = self._patch_backends(
+            monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("nim-answer", 50))
+
+        result = _run(ask_role("sys", "user", role_key="market"))
+        assert result == "openai-answer"
+        assert len(calls["claude"]) == 0
+        assert len(calls["openai"]) == 1
+
+    def test_expired_latch_probes_again(self, monkeypatch):
+        """After the TTL deadline passes, the chain tries the service again."""
+        import time
+        from cio.committee import engine
+        engine._LIMIT_LATCH["claude"] = time.monotonic() - 1  # expired
+        calls = self._patch_backends(
+            monkeypatch, ("openai-answer", 100), ("claude-answer", 100), ("nim-answer", 50))
+
+        result = _run(engine.ask_role("sys", "user", role_key="market"))
+        assert result == "claude-answer"
+        assert len(calls["claude"]) == 1
+        assert len(calls["openai"]) == 0
