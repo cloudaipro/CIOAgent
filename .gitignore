@@ -260,3 +260,4 @@ data/reports/
 *.bak.*
 hermes-agent-main/
 openclaw-main/
+.claude/scheduled_tasks.lock
