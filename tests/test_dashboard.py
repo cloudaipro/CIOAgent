@@ -258,6 +258,27 @@ def test_portfolio_set_price_redirects(live, monkeypatch):
     assert "/portfolio?" in resp.getheader("Location", "")
 
 
+def test_overview_run_maintenance(live, monkeypatch):
+    """POST / run_maintenance backs up first, force-maintains BOTH DBs, PRG back."""
+    from cio import backup as _backup
+    calls = {"backup": 0, "maintain": []}
+    monkeypatch.setattr(_backup, "backup_all",
+                        lambda *a, **k: calls.__setitem__("backup", calls["backup"] + 1))
+
+    def fake_maintain(db_path=None, force=False):
+        calls["maintain"].append((db_path, force))
+        return {"ran": True, "purged": 2, "violations": []}
+    monkeypatch.setattr(dash_server.memory, "maintain", fake_maintain)
+
+    status, resp = _post(live, "/", {"action": "run_maintenance"})
+    assert status == 303
+    loc = resp.getheader("Location", "")
+    assert loc.startswith("/?") and "err=1" not in loc
+    assert calls["backup"] == 1
+    assert len(calls["maintain"]) == 2          # cio.db + committee.db
+    assert all(force for _, force in calls["maintain"])
+
+
 def test_configure_post_named_chain_roundtrip(live, monkeypatch, tmp_path):
     """POST /configure edits chain links, adds/deletes settings, reassigns agents,
     and refuses to delete a setting still in use."""

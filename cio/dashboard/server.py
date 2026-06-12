@@ -155,7 +155,9 @@ class _Handler(BaseHTTPRequestHandler):
                 html = views.render_overview(
                     usage.recent(days=1), transcript.list_runs(10),
                     memory.conv_history(limit=10), level,
-                    runtime=_runtime_info())
+                    runtime=_runtime_info(),
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/usage":
                 html = views.render_usage(usage.recent(days=30), level)
             elif path == "/telegram":
@@ -265,7 +267,9 @@ class _Handler(BaseHTTPRequestHandler):
         form = (parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
                 if length else {})
 
-        if path == "/watchlist":
+        if path == "/":
+            self._overview_post(form, set_cookie)
+        elif path == "/watchlist":
             self._watchlist_post(form, set_cookie)
         elif path == "/portfolio":
             self._portfolio_post(form, set_cookie)
@@ -285,6 +289,38 @@ class _Handler(BaseHTTPRequestHandler):
             self._configure_post(form, set_cookie)
         else:
             self._send("<h1>404</h1>", status=404)
+
+    def _overview_post(self, form: dict, set_cookie: str | None) -> None:
+        """Overview page mutation. Only action: run_maintenance — same sequence as
+        the nightly job (backup both DBs first, then forced maintain() on each) so
+        the operator can refresh the invariant snapshot without waiting for the
+        next scheduled run (e.g. a persisted I6 that a restart already resolved).
+        maintain() is idempotent and never raises; force bypasses only its
+        once-per-day guard. PRG back to / with a summary flash."""
+        action = form.get("action", [""])[0].strip()
+        msg, err = "", False
+        try:
+            if action == "run_maintenance":
+                from cio import backup
+                backup.backup_all()
+                conv = memory.maintain(force=True)
+                comm = memory.maintain(db_path=agent_memory.DB_PATH, force=True)
+                violations = ((conv.get("violations") or [])
+                              + (comm.get("violations") or []))
+                msg = (f"maintenance done — purged {conv.get('purged', 0)} + "
+                       f"{comm.get('purged', 0)} expired note(s), "
+                       f"{len(violations)} invariant violation(s)")
+                err = bool(violations)
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("overview POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/?" + urlencode(params), set_cookie)
 
     def _telegram_post(self, form: dict, set_cookie: str | None) -> None:
         """Telegram page mutation. Only action: wipe_day day=YYYY-MM-DD — delete one

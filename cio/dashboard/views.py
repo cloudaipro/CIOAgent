@@ -261,10 +261,15 @@ def _page(title: str, body: str, level: int) -> str:
 
 
 def render_overview(usage_today, runs, turns, level: int, token_q: str = "",
-                    runtime: dict | None = None) -> str:
+                    runtime: dict | None = None, flash: str = "",
+                    flash_err: bool = False) -> str:
     # Runtime health strip: which code the live process runs vs what's on disk,
     # plus last night's invariant violations. A stale process (the 2026-06-10
     # incident: bot ran pre-fix code for hours after the commit) shows red here.
+    flash_html = (
+        f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+        if flash else ""
+    )
     rt = ""
     if runtime:
         stale = runtime.get("stale")
@@ -280,7 +285,17 @@ def render_overview(usage_today, runs, turns, level: int, token_q: str = "",
             v_block = f"<p style='color:#c0392b'><b>Invariant violations:</b><br>{v_line}</p>"
         else:
             v_block = "<p style='color:#27ae60'>invariants: OK</p>"
-        rt = f"<h2>Runtime</h2><p>{ver_line}</p>{v_block}"
+        # The persisted violation list is last maintenance's snapshot — after a
+        # restart it can show an already-resolved I6 until the next nightly run.
+        # The button forces backup + maintenance now so the snapshot refreshes.
+        maint_btn = (
+            "<form class='inline' method='post' action='/' "
+            "onsubmit=\"return confirm('Run maintenance now? Backs up both DBs, "
+            "then purges expired notes, prunes old turns and re-checks invariants.');\">"
+            "<input type='hidden' name='action' value='run_maintenance'>"
+            "<button type='submit'>Run maintenance now</button></form>"
+        )
+        rt = f"<h2>Runtime {maint_btn}</h2><p>{ver_line}</p>{v_block}"
 
     rows = "".join(
         f"<tr><td>{esc(u['service'])}</td><td class='num'>{esc(u['tokens'])}</td></tr>"
@@ -304,6 +319,7 @@ def render_overview(usage_today, runs, turns, level: int, token_q: str = "",
 
     body = (
         "<h1>Overview</h1>"
+        f"{flash_html}"
         f"{rt}"
         "<h2>Tokens used today (local)</h2>"
         f"<table><tr><th>Service</th><th>Tokens</th></tr>{rows}</table>"
