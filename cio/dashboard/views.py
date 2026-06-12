@@ -1270,7 +1270,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + flash_html
         + (f"<p class='hint'>Editing <code>{esc(path)}</code>. "
            "Pick service and model from the dropdowns; add model names under "
-           "“Manage model catalog” below. Saving applies to the next committee run.</p>")
+           "“Manage model catalog” below. Saving takes effect immediately — no bot restart needed.</p>")
         + "<form method='post' action='/configure'>"
         + "<input type='hidden' name='form_kind' value='models'>"
         + chains_section

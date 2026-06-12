@@ -310,6 +310,57 @@ def test_configure_post_named_chain_roundtrip(live, monkeypatch, tmp_path):
     _models.load_config.cache_clear()
 
 
+def test_configure_blank_daily_limit_clears(live, monkeypatch, tmp_path):
+    """Posting an EMPTY daily_limit field clears the limit from the yaml
+    (regression: parse_qs dropped blank values, so present-but-blank looked
+    like absent and the old limit survived the save)."""
+    import yaml as _yaml
+    from cio.committee import models as _models
+
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        "chains:\n"
+        "  premium:\n"
+        "  - {service: claude, model: c1, daily_limit: 200000}\n"
+        "defaults: {chain: premium}\n"
+        "agents: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIO_MODELS_CONFIG", str(p))
+    _models.load_config.cache_clear()
+
+    status, resp = _post(live, "/configure", {
+        "form_kind": "models",
+        "chainlink:premium:0:service": "claude",
+        "chainlink:premium:0:model": "c1",
+        "chainlink:premium:0:daily_limit": "",   # blank = clear
+    })
+    assert status == 303
+    assert "err=1" not in resp.getheader("Location", "")
+
+    saved = _yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert "daily_limit" not in saved["chains"]["premium"][0]
+    _models.load_config.cache_clear()
+
+
+def test_config_reload_on_mtime_change(monkeypatch, tmp_path):
+    """The bot process picks up an external save (e.g. from the dashboard
+    process) without a restart: load_config re-reads when the file mtime moves."""
+    import os as _os
+    from cio.committee import models as _models
+
+    p = tmp_path / "models.yaml"
+    p.write_text("chains:\n  c:\n  - {service: claude, model: m, daily_limit: 1}\n",
+                 encoding="utf-8")
+    _models.load_config.cache_clear()
+    assert _models.load_config(path=str(p))["chains"]["c"][0]["daily_limit"] == 1
+
+    p.write_text("chains:\n  c:\n  - {service: claude, model: m}\n", encoding="utf-8")
+    _os.utime(p, (_os.path.getmtime(p) + 2,) * 2)  # force mtime forward
+    assert "daily_limit" not in _models.load_config(path=str(p))["chains"]["c"][0]
+    _models.load_config.cache_clear()
+
+
 def test_configure_partial_post_preserves_limits(live, monkeypatch, tmp_path):
     """A partial POST (e.g. scripted curl with one field) must not clear
     daily_limit values or provider token caps that were not posted."""

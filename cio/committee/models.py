@@ -7,13 +7,14 @@ Usage:
         nim_settings, openai_settings,
     )
 
-``load_config`` is lru_cached.  Call ``load_config.cache_clear()`` in tests to swap configs.
+``load_config`` is cached per (path, file mtime), so edits saved from the
+dashboard (a separate process) are picked up on the next call without a bot
+restart.  Call ``load_config.cache_clear()`` in tests to swap configs.
 """
 from __future__ import annotations
 
 import logging
 import os
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +102,13 @@ MODEL_SUGGESTIONS: dict[str, list[str]] = {
 }
 
 
-@lru_cache(maxsize=1)
+# load_config cache: resolved path -> (file mtime, parsed dict). Keyed on mtime
+# so a save from the dashboard process is seen here on the next call — the bot
+# and the dashboard are separate processes, so an in-process cache_clear() in
+# one cannot reach the other.
+_CONFIG_CACHE: dict[str, tuple[float, dict]] = {}
+
+
 def load_config(path: str | None = None) -> dict:
     """
     Load and return the committee models config dict.
@@ -114,18 +121,34 @@ def load_config(path: str | None = None) -> dict:
     """
     resolved = path or os.getenv("CIO_MODELS_CONFIG") or str(_REPO_CONFIG)
     try:
+        mtime = os.path.getmtime(resolved)
+    except OSError:
+        mtime = -1.0
+    cached = _CONFIG_CACHE.get(resolved)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
         import yaml  # pyyaml is a dep
         with open(resolved, "r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
         if not isinstance(data, dict):
             raise ValueError("config root is not a dict")
-        return data
     except FileNotFoundError:
         log.debug("committee_models.yaml not found at %s; using built-in defaults", resolved)
-        return _BUILTIN
+        data = _BUILTIN
     except Exception as exc:
         log.warning("Failed to parse committee_models.yaml (%s): %s; using built-in defaults", resolved, exc)
-        return _BUILTIN
+        data = _BUILTIN
+    _CONFIG_CACHE[resolved] = (mtime, data)
+    return data
+
+
+def _config_cache_clear() -> None:
+    _CONFIG_CACHE.clear()
+
+
+# Keep the lru_cache-era API: tests and write_doc() call load_config.cache_clear().
+load_config.cache_clear = _config_cache_clear  # type: ignore[attr-defined]
 
 
 def resolve(role_key: str) -> tuple[str, str | None]:

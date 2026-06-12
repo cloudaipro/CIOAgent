@@ -260,7 +260,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         length = int(self.headers.get("Content-Length", 0) or 0)
-        form = parse_qs(self.rfile.read(length).decode("utf-8")) if length else {}
+        # keep_blank_values: "present but blank" must stay distinguishable from
+        # "absent" — e.g. clearing a chain link's daily_limit posts an empty field.
+        form = (parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True)
+                if length else {})
 
         if path == "/watchlist":
             self._watchlist_post(form, set_cookie)
@@ -454,8 +457,9 @@ class _Handler(BaseHTTPRequestHandler):
         """Save the committee_models.yaml edits from the Configure tab.
 
         Reads the live doc (round-trip, comments preserved), assigns the posted
-        values onto the existing structure, writes it back, and clears the model
-        config cache so the next committee run picks up the change. PRG back."""
+        values onto the existing structure, and writes it back. The bot process
+        reloads the file on mtime change, so the save takes effect on its next
+        committee call without a restart. PRG back."""
         def f(name: str) -> str:
             return form.get(name, [""])[0].strip()
 
@@ -588,7 +592,7 @@ class _Handler(BaseHTTPRequestHandler):
                 doc["model_catalog"] = catalog
 
             models.write_doc(doc)
-            msg = "saved committee_models.yaml — applies to the next run"
+            msg = "saved committee_models.yaml — takes effect immediately (next committee call)"
             if notes:
                 msg += " (" + "; ".join(notes) + ")"
         except Exception as exc:  # never 500 the operator on a bad form
