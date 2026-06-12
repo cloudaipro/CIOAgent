@@ -756,6 +756,31 @@ class _Handler(BaseHTTPRequestHandler):
                 res = portfolio.refresh_live_prices()
                 msg = f"refreshed {len(res['updated'])}, failed {len(res['failed'])}"
                 err = bool(res["failed"]) and not res["updated"]
+            elif action == "align_ibkr":
+                # Destructive ledger rebuild — restore point FIRST, same
+                # backup-before-delete rule as nightly maintenance.
+                from cio import backup
+                backup.backup_all()
+                res = portfolio.align_with_ibkr()
+                if "error" in res:
+                    msg, err = res["error"], True
+                else:
+                    msg = (f"aligned with IBKR {res['account']}: replaced "
+                           f"{res['wiped']} transaction(s) with {res['adopted']} "
+                           f"position(s) at broker avg cost (backup taken)")
+            elif action == "sync_ibkr":
+                res = portfolio.sync_ibkr()
+                if "error" in res:
+                    msg, err = res["error"], True
+                else:
+                    msg = (f"IBKR {res['account']}: synced {len(res['synced'])} "
+                           f"price(s), {len(res['drift'])} quantity drift(s)")
+                    if res["drift"]:
+                        details = "; ".join(
+                            f"{d['symbol']} ibkr={d['ibkr_qty']} local={d['local_qty']}"
+                            for d in res["drift"][:5])
+                        msg += f" — {details}"
+                        err = True  # drift means the local ledger is stale
             elif action in ("import_txns", "import_prices"):
                 text = form.get("csv_text", [""])[0]
                 if not text.strip():

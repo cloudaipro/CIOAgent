@@ -21,6 +21,8 @@ pandas-market-calendars>=4.0   # NYSE trading-day alignment
 pandas_ta>=0.4.71b0            # technical-analysis engine used by the strategies
 finta>=1.3                     # indicators.py helper (find_swings etc.)
 scikit-learn>=1.3              # pvt_strategy scoring
+# IBKR live portfolio via TWS API (read-only; see cio/data/ibkr.py)
+ib_async>=2.0          # community continuation of ib_insync (BSD-2, ib-api-reloaded)
 # PDF report rendering (committee output)
 weasyprint                     # HTML → PDF with CJK font support
 markdown                       # Markdown → HTML (tables/fenced_code/sane_lists exts)

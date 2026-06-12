@@ -279,6 +279,111 @@ def refresh_live_prices(symbols=None, quote_fn=None, db_path=db.DB_PATH) -> dict
     }
 
 
+def sync_ibkr(db_path=db.DB_PATH, snapshot_fn=None) -> dict:
+    """Pull the live IBKR snapshot and reconcile it against the local book.
+
+    The transactions table stays the source of truth for cost basis — IBKR
+    positions are NOT written as transactions. The sync does two things:
+      1. writes IBKR's mark price for every held symbol into the prices table
+         (same effect as refresh_live_prices, but broker-quality marks), and
+      2. reports drift: symbols where IBKR quantity != local book quantity,
+         so the operator knows the manual ledger is stale.
+
+    Returns {"account", "synced": [{symbol, price}], "drift": [...],
+             "cash": {...}} or {"error": ...} when IBKR is not configured or
+    TWS / IB Gateway is unreachable.
+    """
+    if snapshot_fn is None:
+        from .data import ibkr
+        if not ibkr.enabled():
+            return {"error": "IBKR not configured (set CIO_IBKR_TWS=host:port)"}
+        snapshot_fn = ibkr.snapshot
+
+    snap = snapshot_fn()
+    if not snap:
+        return {"error": "TWS / IB Gateway unreachable — make sure it is "
+                         "running, logged in, and the API socket is enabled"}
+
+    local = positions(db_path)
+    local_qty = dict(zip(local["symbol"], local["quantity"])) if len(local) else {}
+
+    synced, drift = [], []
+    for p in snap["positions"]:
+        sym = p["symbol"]
+        if p.get("last_price") is not None:
+            set_price(sym, p["last_price"], db_path=db_path)
+            synced.append({"symbol": sym, "price": p["last_price"]})
+        lq = float(local_qty.get(sym, 0.0))
+        if abs(lq - p["quantity"]) > 1e-6:
+            drift.append({"symbol": sym, "ibkr_qty": p["quantity"], "local_qty": lq})
+    # Symbols held locally but absent at IBKR are drift too (sold elsewhere?).
+    ibkr_syms = {p["symbol"] for p in snap["positions"]}
+    for sym, lq in local_qty.items():
+        if sym not in ibkr_syms and lq > 1e-6:
+            drift.append({"symbol": sym, "ibkr_qty": 0.0, "local_qty": float(lq)})
+
+    return {"account": snap["account"], "synced": synced,
+            "drift": drift, "cash": snap.get("cash", {})}
+
+
+def align_with_ibkr(db_path=db.DB_PATH, snapshot_fn=None) -> dict:
+    """Rebuild the local book from the live IBKR snapshot (destructive).
+
+    Replaces ALL rows in the transactions table with one synthetic BUY per
+    current IBKR position, priced at IBKR's own average cost — so quantities
+    AND cost basis match the broker exactly. Realized-P&L / dividend history
+    is wiped with the old rows (the caller backs the DB up first; the
+    dashboard wires this through backup.backup_all()).
+
+    Also writes each position's mark price into the prices table, so the
+    portfolio view values immediately.
+
+    Returns {"account", "wiped": n_old_rows, "adopted": n_positions} or
+    {"error": ...} mirroring sync_ibkr's failure modes.
+    """
+    from datetime import date as _date
+
+    if snapshot_fn is None:
+        from .data import ibkr
+        if not ibkr.enabled():
+            return {"error": "IBKR not configured (set CIO_IBKR_TWS=host:port)"}
+        snapshot_fn = ibkr.snapshot
+
+    snap = snapshot_fn()
+    if not snap:
+        return {"error": "TWS / IB Gateway unreachable — make sure it is "
+                         "running, logged in, and the API socket is enabled"}
+
+    today = _date.today().isoformat()
+    rows = [
+        (today, p["symbol"], "BUY", p["quantity"], p.get("avg_cost") or 0.0,
+         0.0, p.get("currency") or "USD",
+         f"ibkr-align {snap['account']} {today}")
+        for p in snap["positions"]
+    ]
+
+    conn = db.connect(db_path)
+    try:
+        # One transaction: wipe + adopt commit together or not at all.
+        with conn:
+            wiped = conn.execute("SELECT COUNT(*) c FROM transactions").fetchone()["c"]
+            conn.execute("DELETE FROM transactions")
+            conn.executemany(
+                "INSERT INTO transactions "
+                "(txn_date,symbol,action,quantity,price,fees,currency,notes) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                rows,
+            )
+    finally:
+        conn.close()
+
+    for p in snap["positions"]:
+        if p.get("last_price") is not None:
+            set_price(p["symbol"], p["last_price"], db_path=db_path)
+
+    return {"account": snap["account"], "wiped": wiped, "adopted": len(rows)}
+
+
 def summary(db_path=db.DB_PATH) -> dict:
     """Portfolio totals."""
     pos = positions(db_path)

@@ -968,7 +968,22 @@ def render_portfolio(summ, positions, realized, level: int,
     refresh_form = (
         "<form method='post' action='/portfolio' class='inline'>"
         "<input type='hidden' name='action' value='refresh_live'>"
-        "<button type='submit'>Refresh live prices</button></form>")
+        "<button type='submit'>Refresh live prices</button></form>"
+        # IBKR sync: broker marks + qty-drift report. Server-side no-op with a
+        # flash error when CIO_IBKR_TWS is unset, so always shown.
+        "<form method='post' action='/portfolio' class='inline'>"
+        "<input type='hidden' name='action' value='sync_ibkr'>"
+        "<button type='submit'>Sync from IBKR</button></form>"
+        # Destructive: replaces the whole transactions ledger with the live
+        # IBKR positions (at broker average cost). DB is backed up first
+        # server-side; still confirmed client-side like other wipes.
+        "<form method='post' action='/portfolio' class='inline' "
+        "onsubmit=\"return confirm('Align book with IBKR? This DELETES all "
+        "local transactions (incl. realized P&amp;L / dividend history) and "
+        "rebuilds them from current IBKR positions at broker average cost. "
+        "A DB backup is taken first.');\">"
+        "<input type='hidden' name='action' value='align_ibkr'>"
+        "<button type='submit' class='danger'>Align book with IBKR</button></form>")
     txns_form = (
         "<form method='post' action='/portfolio'>"
         "<input type='hidden' name='action' value='import_txns'>"
