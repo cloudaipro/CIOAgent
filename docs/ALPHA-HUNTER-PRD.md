@@ -81,8 +81,10 @@ Trend template: price > 50MA, 50MA > 150MA, 150MA > 200MA.
 Only Quality-PASS names are ranked. Sorted desc by Final.
 
 ### FR-006 Watchlist Generator
-Top 20 by Final Score. Fields: ticker, sector, regime, momentum, trend, earnings,
-revenue growth, forward EPS growth, surprise, final. Published as a watchlist.
+Candidates with **Final Score ≥ threshold** (operator-configurable in the dashboard,
+default **80**, persisted in `meta.alpha_threshold`, clamped 0–100), in ranked order.
+Fields: ticker, sector, regime, momentum, trend, earnings, revenue growth, forward EPS
+growth, surprise, final. Published as a watchlist.
 
 ## 5. Watchlist naming + Telegram operability
 

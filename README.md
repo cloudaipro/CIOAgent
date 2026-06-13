@@ -20,7 +20,7 @@ backend outage or budget exhaustion degrades gracefully instead of silencing a r
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 40 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 41 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
                   │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
@@ -212,18 +212,20 @@ and offline-safe — same cost discipline as TIRF.
   - **L3 Momentum** — relative strength vs QQQ (3M & 6M) + trend template
     (price > 50MA > 150MA > 200MA).
   - **L4 Ranking** — `Final = 0.30·Momentum + 0.20·Trend + 0.30·Earnings +
-    0.10·Revenue + 0.10·VolumeExpansion` (0–100), Top 20.
+    0.10·Revenue + 0.10·VolumeExpansion` (0–100). Every candidate scoring **Final ≥
+    threshold** (default **80**, configurable in the dashboard) is selected.
 - **Auto-named watchlist**: each run publishes/refreshes a list named
   **`Alpha-yyyy-mm-dd`** and **sets it active**, so Telegram `/watchlist` shows it
   immediately. Same-day re-runs refresh the one dated list in place (no duplicates);
   the `^IXIC` benchmark floor is kept.
-- **Operate from Telegram**: `/alpha` runs the funnel; then the agent tools
+- **Operate from Telegram**: `/alpha` runs the funnel; ask **"what's the market
+  regime"** for the GREEN/YELLOW/RED light (`market_regime` tool); then the agent tools
   `list_watchlists` / `watchlist_add` / `watchlist_remove` / `watchlist_activate` let
   you manage the published list conversationally ("add TSLA to the alpha list",
   "switch to Alpha-2026-06-12").
-- **Dashboard**: the **Alpha Hunter** tab (`/alpha`) has a **Run** button and shows the
-  regime light, sector ranking, ranked candidates, run history, and a link to the
-  published list.
+- **Dashboard**: the **Alpha Hunter** tab (`/alpha`) has a **Run** button, a
+  **selection-threshold** control (default 80), and shows the regime light, sector
+  ranking, selected candidates, run history, and a link to the published list.
 - **Universe**: the candidate pool is `config/alpha_universe.txt` (one ticker per line,
   `#` comments; ~40 liquid NASDAQ names by default). Override with
   `CIO_ALPHA_UNIVERSE=/path/to/file` or the CLI `--universe FILE`. Run time scales with
@@ -387,8 +389,9 @@ Pages:
 - **Watchlist** — manage symbol lists (create/activate/rename/delete/search, add/remove
   symbols, drag-to-reorder, CSV import). One scoped JS for drag; no-JS safe.
 - **Alpha Hunter** — the deterministic NASDAQ swing funnel. A **Run** button scans the
-  universe and publishes the `Alpha-yyyy-mm-dd` watchlist (active); the page shows the
-  market-regime light, sector ranking, ranked Top-20 candidates, and run history.
+  universe and publishes the `Alpha-yyyy-mm-dd` watchlist (active); a **selection
+  threshold** field (default 80) controls which candidates make the list; the page shows
+  the market-regime light, sector ranking, selected candidates, and run history.
 - **Committee** — every run, each with its **Trigger** (`chat` ask vs `/committee` slash
   vs `cli`), drills into every LLM call: the exact content **sent** (system + user prompt)
   and the content **returned**, per role, in order. Includes a **delete-all-runs** button.

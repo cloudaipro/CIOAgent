@@ -606,11 +606,11 @@ def _alpha_num(x, suffix: str = "") -> str:
     return f"{esc(x)}{suffix}"
 
 
-def render_alpha(latest, runs, level: int, flash: str = "",
+def render_alpha(latest, runs, level: int, threshold: float = 80.0, flash: str = "",
                  flash_err: bool = False) -> str:
-    """Alpha Hunter tab (PRD §7): regime light, sector ranking, ranked candidates,
-    a Run button, and recent run history. *latest* is alpha_store.latest_run() (or
-    None); *runs* is alpha_store.list_runs()."""
+    """Alpha Hunter tab (PRD §7): regime light, sector ranking, selected candidates,
+    a Run button, a selection-threshold control, and recent run history. *latest* is
+    alpha_store.latest_run() (or None); *runs* is alpha_store.list_runs()."""
     flash_html = (f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
                   if flash else "")
 
@@ -619,13 +619,23 @@ def render_alpha(latest, runs, level: int, flash: str = "",
         "<input type='hidden' name='action' value='run_hunter'>"
         "<button type='submit'>▶ Run Alpha Hunter</button></form>"
     )
+    thr_form = (
+        "<form class='inline' method='post' action='/alpha' style='margin-left:10px'>"
+        "<input type='hidden' name='action' value='set_threshold'>"
+        "<label>Selection threshold (Final ≥) "
+        f"<input type='number' name='threshold' min='0' max='100' step='1' "
+        f"value='{esc(threshold)}' style='width:5em'></label> "
+        "<button type='submit'>Save</button></form>"
+    )
+    controls = f"<div style='display:flex;align-items:center;flex-wrap:wrap'>{run_btn}{thr_form}</div>"
     intro = ("<p>Deterministic NASDAQ swing funnel — Market → Sector → Quality → "
-             "Earnings → Momentum → Top&nbsp;20. Zero LLM cost. A run publishes the "
+             f"Earnings → Momentum → Ranking. Zero LLM cost. A run publishes every "
+             f"candidate scoring <b>Final ≥ {esc(threshold)}</b> to the "
              "<code>Alpha-yyyy-mm-dd</code> watchlist and sets it active, so Telegram "
              "<code>/watchlist</code> shows it immediately.</p>")
 
     if latest is None:
-        body = ("<h1>Alpha Hunter</h1>" + flash_html + intro + run_btn +
+        body = ("<h1>Alpha Hunter</h1>" + flash_html + intro + controls +
                 "<p class='empty'>No runs yet. Click <b>Run Alpha Hunter</b> to scan "
                 "the universe (may take a minute on a cold cache).</p>")
         return _page("Alpha Hunter", body, level)
@@ -656,7 +666,7 @@ def render_alpha(latest, runs, level: int, flash: str = "",
         f"<td class='num'>{_alpha_num(c.get('fwd_eps_growth'), '%')}</td>"
         f"<td class='num'>{_alpha_num(c.get('surprise'))}</td></tr>"
         for c in (latest.get("candidates") or [])
-    ) or "<tr><td class='empty' colspan='10'>no candidates passed the quality filter</td></tr>"
+    ) or "<tr><td class='empty' colspan='10'>no candidates met the selection threshold</td></tr>"
 
     wl_link = ""
     if latest.get("watchlist_id"):
@@ -676,13 +686,13 @@ def render_alpha(latest, runs, level: int, flash: str = "",
     ) or "<tr><td class='empty' colspan='6'>no runs</td></tr>"
 
     body = (
-        "<h1>Alpha Hunter</h1>" + flash_html + intro + run_btn +
+        "<h1>Alpha Hunter</h1>" + flash_html + intro + controls +
         f"<h2>Latest run — {esc(latest.get('run_date'))}{wl_link}</h2>"
         f"<p>Market regime: {light}</p>"
         "<h3>Sector ranking <span class='muted'>(RS = 0.5·3M + 0.5·6M)</span></h3>"
         "<table><tr><th>Sector</th><th>RS</th><th>3M</th><th>6M</th></tr>"
         f"{sect_rows}</table>"
-        "<h3>Top candidates</h3>"
+        f"<h3>Selected candidates <span class='muted'>(Final ≥ {esc(threshold)})</span></h3>"
         "<table><tr><th>#</th><th>Ticker</th><th>Sector</th><th>Final</th>"
         "<th>Mom</th><th>Trend</th><th>Earn</th><th>Rev</th><th>fEPS</th>"
         f"<th>Surp</th></tr>{cand_rows}</table>"

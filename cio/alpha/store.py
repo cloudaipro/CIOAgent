@@ -10,7 +10,13 @@ from __future__ import annotations
 import json
 
 from .. import db, watchlist
-from .engine import AlphaResult, TOP_N
+from .engine import AlphaResult
+
+# Candidate-selection threshold: names with Final Score >= this are published to the
+# watchlist (replaces the old fixed Top-20). Operator-configurable in the dashboard;
+# persisted in the meta table. Default 80.
+DEFAULT_THRESHOLD = 80.0
+_THRESHOLD_KEY = "alpha_threshold"
 
 
 def watchlist_name(run_date: str) -> str:
@@ -18,12 +24,44 @@ def watchlist_name(run_date: str) -> str:
     return f"Alpha-{run_date}"
 
 
-def publish_watchlist(result: AlphaResult, *, top_n: int = TOP_N,
+def get_threshold(db_path=db.DB_PATH) -> float:
+    """The configured Final-Score selection threshold (default 80)."""
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (_THRESHOLD_KEY,)).fetchone()
+        if row is None:
+            return DEFAULT_THRESHOLD
+        try:
+            return float(row["value"])
+        except (TypeError, ValueError):
+            return DEFAULT_THRESHOLD
+    finally:
+        conn.close()
+
+
+def set_threshold(value, db_path=db.DB_PATH) -> float:
+    """Persist the selection threshold (clamped to 0..100). Returns the stored value."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"threshold must be a number, got {value!r}") from e
+    v = max(0.0, min(100.0, v))
+    conn = db.connect(db_path)
+    try:
+        with conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                         (_THRESHOLD_KEY, str(v)))
+        return v
+    finally:
+        conn.close()
+
+
+def publish_watchlist(result: AlphaResult, *, threshold: float,
                       activate: bool = True, db_path=db.DB_PATH) -> tuple[int, str]:
-    """Create or refresh ``Alpha-<run_date>`` with the top-N candidate tickers.
-    Returns (watchlist_id, name). Idempotent across same-day re-runs."""
+    """Create or refresh ``Alpha-<run_date>`` with every candidate scoring at/above
+    *threshold*. Returns (watchlist_id, name). Idempotent across same-day re-runs."""
     name = watchlist_name(result.run_date)
-    tickers = [c["ticker"] for c in result.top(top_n)]
+    tickers = [c["ticker"] for c in result.select(threshold)]
     existing = watchlist.find_by_name(name, db_path=db_path)
     wid = existing["id"] if existing else watchlist.create(name, db_path=db_path)
     watchlist.set_symbols(wid, tickers, db_path=db_path)
@@ -32,13 +70,16 @@ def publish_watchlist(result: AlphaResult, *, top_n: int = TOP_N,
     return wid, name
 
 
-def save_run(result: AlphaResult, *, publish: bool = True, top_n: int = TOP_N,
+def save_run(result: AlphaResult, *, publish: bool = True, threshold: float | None = None,
              db_path=db.DB_PATH) -> dict:
-    """Persist a run (+ optionally publish its watchlist). Returns
-    {run_id, watchlist_id, watchlist_name}."""
-    wid, wname = (publish_watchlist(result, top_n=top_n, db_path=db_path)
+    """Persist a run (+ optionally publish its watchlist). Candidates with Final
+    Score >= *threshold* (default = the configured value) are selected. Returns
+    {run_id, watchlist_id, watchlist_name, threshold, selected_count}."""
+    if threshold is None:
+        threshold = get_threshold(db_path=db_path)
+    wid, wname = (publish_watchlist(result, threshold=threshold, db_path=db_path)
                   if publish else (None, None))
-    ranked = result.top(top_n)
+    ranked = result.select(threshold)
     conn = db.connect(db_path)
     try:
         with conn:
@@ -63,7 +104,8 @@ def save_run(result: AlphaResult, *, publish: bool = True, top_n: int = TOP_N,
                      c.get("surprise"), c.get("volume_expansion"), c.get("final"),
                      1 if c.get("quality_pass", True) else 0),
                 )
-        return {"run_id": run_id, "watchlist_id": wid, "watchlist_name": wname}
+        return {"run_id": run_id, "watchlist_id": wid, "watchlist_name": wname,
+                "threshold": threshold, "selected_count": len(ranked)}
     finally:
         conn.close()
 

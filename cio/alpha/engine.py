@@ -33,6 +33,12 @@ class AlphaResult:
     def top(self, n: int = TOP_N) -> list:
         return self.candidates[:n]
 
+    def select(self, threshold: float) -> list:
+        """Ranked candidates whose Final Score meets *threshold* (>=). Candidates
+        are already sorted desc, so this returns the qualifying prefix."""
+        return [c for c in self.candidates
+                if c.get("final") is not None and c["final"] >= threshold]
+
 
 def _round(x, n=2):
     return round(x, n) if isinstance(x, (int, float)) else x

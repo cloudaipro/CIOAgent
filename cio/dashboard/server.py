@@ -202,6 +202,7 @@ class _Handler(BaseHTTPRequestHandler):
             elif path == "/alpha":
                 html = views.render_alpha(
                     alpha_store.latest_run(), alpha_store.list_runs(10), level,
+                    threshold=alpha_store.get_threshold(),
                     flash=query.get("msg", [""])[0],
                     flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/portfolio":
@@ -754,8 +755,11 @@ class _Handler(BaseHTTPRequestHandler):
             if action == "run_hunter":
                 result, meta = alpha.run_and_save()
                 msg = (f"ran Alpha Hunter — regime {result.regime.get('status')}, "
-                       f"{len(result.candidates)} candidate(s); published "
-                       f"{meta['watchlist_name']} (active)")
+                       f"{meta['selected_count']} candidate(s) at Final ≥ "
+                       f"{meta['threshold']:g}; published {meta['watchlist_name']} (active)")
+            elif action == "set_threshold":
+                v = alpha_store.set_threshold(form.get("threshold", [""])[0].strip())
+                msg = f"selection threshold set to {v:g}"
             else:
                 msg, err = f"unknown action {action!r}", True
         except Exception as exc:  # never 500 the operator

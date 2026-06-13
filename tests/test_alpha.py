@@ -204,7 +204,7 @@ def test_save_run_publishes_dated_watchlist(tmp_path):
                      "fwd_eps_growth": 25, "surprise": 100, "volume_expansion": 50,
                      "final": 77.0, "quality_pass": True}],
         universe_size=2)
-    meta = store.save_run(res, db_path=dbf)
+    meta = store.save_run(res, threshold=0, db_path=dbf)
     assert meta["watchlist_name"] == "Alpha-2026-06-12"
 
     wl = watchlist.find_by_name("Alpha-2026-06-12", db_path=dbf)
@@ -222,11 +222,11 @@ def test_publish_is_idempotent_same_day(tmp_path):
     res = engine.AlphaResult(run_date="2026-06-12", regime={"status": "GREEN"},
                              candidates=[{"rank": 1, "ticker": "AAA", "final": 1.0}],
                              universe_size=1)
-    m1 = store.save_run(res, db_path=dbf)
+    m1 = store.save_run(res, threshold=0, db_path=dbf)
     res2 = engine.AlphaResult(run_date="2026-06-12", regime={"status": "GREEN"},
                               candidates=[{"rank": 1, "ticker": "BBB", "final": 2.0}],
                               universe_size=1)
-    m2 = store.save_run(res2, db_path=dbf)
+    m2 = store.save_run(res2, threshold=0, db_path=dbf)
     assert m1["watchlist_id"] == m2["watchlist_id"]   # same dated list, refreshed
     wl = watchlist.find_by_name("Alpha-2026-06-12", db_path=dbf)
     assert "BBB" in wl["symbols"] and "AAA" not in wl["symbols"]
