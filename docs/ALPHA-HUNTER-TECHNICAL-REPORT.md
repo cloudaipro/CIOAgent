@@ -11,8 +11,9 @@ Hunter subsystem (`cio/alpha/`). Companion docs: `ALPHA-HUNTER-PRD.md` (contract
 
 Alpha Hunter is a **repeatable, deterministic NASDAQ swing-selection engine**. It runs
 a fixed five-layer funnel — **Market → Sector → Quality → Earnings → Momentum →
-Ranking** — over a configurable ticker universe and publishes a **Top-20 watchlist**
-of names the market is re-pricing higher.
+Ranking** — over a configurable ticker universe and publishes a **threshold-selected
+watchlist** (Final ≥ a configurable score, default 80) of names the market is
+re-pricing higher.
 
 It is a **compute layer**, not a predictor and not an agent:
 
@@ -242,6 +243,13 @@ Final = 0.30 × Momentum + 0.20 × Trend + 0.30 × Earnings
 All five sub-scores are 0–100 and the weights sum to 1.0, so **Final is bounded
 0–100**. Only quality-PASS names are ranked; sorted descending; ranks assigned 1..N.
 
+**Selection (threshold, not Top-N).** From the ranked list, every candidate with
+**Final ≥ threshold** is selected for the watchlist. The threshold is operator-
+configurable (dashboard field, persisted in the `meta` table, key `alpha_threshold`),
+**default 80**, clamped 0–100. `AlphaResult.select(threshold)` returns the qualifying
+prefix; `store.get_threshold()` / `set_threshold()` read/write it. A run may therefore
+publish more or fewer than 20 names depending on how many clear the bar.
+
 ---
 
 ## 5. Output: watchlist publishing & naming (FR-006, PRD §5)
@@ -249,7 +257,8 @@ All five sub-scores are 0–100 and the weights sum to 1.0, so **Final is bounde
 A run produces an `AlphaResult` (regime + sectors + ranked candidates). `store.save_run`
 then:
 
-1. Takes the **Top-20** candidates.
+1. Takes the **threshold-selected** candidates (Final ≥ the configured threshold,
+   default 80).
 2. Creates or **refreshes** a watchlist named **`Alpha-yyyy-mm-dd`** (the run date) —
    the naming rule. A same-day re-run reuses the same list (`find_by_name`) and
    **replaces its contents in place** (`set_symbols`), so there are never duplicate
@@ -287,12 +296,15 @@ the watchlist price path, never read back from these snapshot rows.
 
 | Surface | Trigger | Behaviour |
 |---------|---------|-----------|
-| **CLI** | `python -m cio.alpha [--universe FILE] [--no-publish] [--json]` | run funnel, print table/JSON, publish unless `--no-publish` |
-| **Dashboard** | tab **Alpha Hunter** `/alpha`, "Run Alpha Hunter" button (POST `run_hunter`) | synchronous run; renders regime light, sector table, candidate table, run history, link to the published list |
-| **Telegram** | `/alpha` command + inline button | heads-up message, runs in a worker thread, replies regime + Top candidates + published-list note |
-| **Agent tools** | `run_alpha_hunter` (+ `list_watchlists`, `watchlist_add`, `watchlist_remove`, `watchlist_activate`) | conversational run + watchlist operation |
+| **CLI** | `python -m cio.alpha [--universe FILE] [--threshold N] [--no-publish] [--json]` | run funnel, print table/JSON, publish unless `--no-publish` |
+| **Dashboard** | tab **Alpha Hunter** `/alpha`, "Run" button (POST `run_hunter`) + threshold field (POST `set_threshold`) | synchronous run; renders regime light, sector table, selected-candidate table, run history, link to the published list |
+| **Telegram** | `/alpha` command + inline button | heads-up message, runs in a worker thread, replies regime + selected candidates + published-list note |
+| **Agent tools** | `run_alpha_hunter`, `market_regime` (+ `list_watchlists`, `watchlist_add`, `watchlist_remove`, `watchlist_activate`) | conversational run, regime check, and watchlist operation |
 
-CIO_TOOLS total is **40** (the 5 above are new; guarded by a count test).
+`market_regime` returns the GREEN/YELLOW/RED light (Layer 0) on its own — the operator
+can ask "what's the market regime" in Telegram without a full scan.
+
+CIO_TOOLS total is **41** (the 6 alpha/watchlist tools are new; guarded by a count test).
 
 ---
 
@@ -303,7 +315,9 @@ CIO_TOOLS total is **40** (the 5 above are new; guarded by a count test).
 | `config/alpha_universe.txt` | default candidate universe |
 | `CIO_ALPHA_UNIVERSE` (path) | override the universe (all surfaces) |
 | `--universe FILE` (CLI) | override the universe (one run) |
+| selection threshold | dashboard field / `meta.alpha_threshold` (default 80); `--threshold` (CLI) overrides one run |
 | `FINNHUB_API_KEY` | enables the earnings-surprise component (else surprise = 0) |
+| `CIO_HTTP_TIMEOUT` | read/connect timeout (s) for cio.data GETs (default 15) |
 | `CIO_STOCK_CACHE_DIR` | OHLCV cache dir (shared with the rest of the app) |
 
 Data sources: **yfinance** (OHLCV + `.info` fundamentals: market cap, forward/trailing

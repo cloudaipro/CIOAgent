@@ -47,7 +47,7 @@ flowchart LR
     CAND --> AR["AlphaResult<br/>regime + sectors + candidates"]
 
     subgraph Persist["store.save_run"]
-        AR --> TOP["top_n (20)"]
+        AR --> TOP["select Final >= threshold<br/>(default 80)"]
         TOP --> WL["watchlist Alpha-yyyy-mm-dd<br/>(symbols)"]
         TOP --> RUNS["alpha_runs row"]
         TOP --> CANDS["alpha_candidates rows"]

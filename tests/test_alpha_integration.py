@@ -212,23 +212,24 @@ def _result(date="2026-06-12", candidates=None, sectors_=None):
 def test_save_run_no_publish(tmp_path):
     dbf = tmp_path / "t.db"
     res = _result(candidates=[{"rank": 1, "ticker": "AAA", "final": 1.0}])
-    meta = store.save_run(res, publish=False, db_path=dbf)
+    meta = store.save_run(res, publish=False, threshold=0, db_path=dbf)
     assert meta["watchlist_name"] is None
     assert watchlist.find_by_name("Alpha-2026-06-12", db_path=dbf) is None
     assert store.latest_run(db_path=dbf)["candidate_count"] == 1
 
 
-def test_top_n_cap(tmp_path):
+def test_threshold_selection(tmp_path):
     dbf = tmp_path / "t.db"
     cands = [{"rank": i, "ticker": f"T{i:02d}", "final": 100 - i} for i in range(1, 26)]
     res = _result(candidates=cands)
-    store.save_run(res, db_path=dbf)            # default top_n=20
+    store.save_run(res, threshold=85, db_path=dbf)   # finals 99..75 -> >=85 keeps 15
     latest = store.latest_run(db_path=dbf)
-    assert latest["candidate_count"] == 20
-    assert len(latest["candidates"]) == 20
+    assert latest["candidate_count"] == 15           # finals 100-i >= 85 -> i <= 15
+    assert len(latest["candidates"]) == 15
     wl = watchlist.find_by_name("Alpha-2026-06-12", db_path=dbf)
     non_index = [s for s in wl["symbols"] if s != watchlist.NASDAQ_INDEX]
-    assert len(non_index) == 20
+    assert len(non_index) == 15
+    assert "T15" in non_index and "T16" not in non_index
 
 
 def test_empty_candidates_publishes_index_only(tmp_path):
@@ -247,7 +248,7 @@ def test_latest_run_roundtrip(tmp_path):
                      "revenue_growth": 40, "fwd_eps_growth": 25, "surprise": 75,
                      "volume_expansion": 50, "quality_pass": True}],
         sectors_=[{"ticker": "SMH", "rs": 12.0, "ret_3m": 5.0, "ret_6m": 19.0}])
-    store.save_run(res, db_path=dbf)
+    store.save_run(res, threshold=0, db_path=dbf)
     latest = store.latest_run(db_path=dbf)
     assert latest["sectors"][0]["ticker"] == "SMH"
     assert latest["candidates"][0]["sector"] == "SMH"
@@ -259,7 +260,7 @@ def test_run_and_save_end_to_end(tmp_path, monkeypatch):
     uni = tmp_path / "u.txt"; uni.write_text("STRONG\nWEAK\n")
     dbf = tmp_path / "t.db"
     res, meta = alpha_pkg.run_and_save(
-        db_path=dbf, universe_path=str(uni), fetch=_fetch_factory(),
+        db_path=dbf, threshold=0, universe_path=str(uni), fetch=_fetch_factory(),
         fundamentals_fn=lambda s: _good_fund(), surprises_fn=lambda s: [{"beat": True}] * 4)
     assert meta["watchlist_name"].startswith("Alpha-")
     wl = watchlist.find_by_name(meta["watchlist_name"], db_path=dbf)
@@ -315,6 +316,48 @@ def test_report_renders_without_raise():
     from cio.alpha import report
     res = _result(candidates=[{"rank": 1, "ticker": "AAA", "final": 9.0,
                                "momentum": 80, "trend": 100, "earnings": 60}])
-    txt = report.format_telegram(res, {"watchlist_name": "Alpha-2026-06-12"})
+    txt = report.format_telegram(res, {"watchlist_name": "Alpha-2026-06-12", "threshold": 0})
     assert "Alpha-2026-06-12" in txt and "AAA" in txt
     assert "No candidates" in report.format_telegram(_result(candidates=[]), None)
+
+
+# ---- threshold selection ---------------------------------------------------
+def test_select_method():
+    res = _result(candidates=[{"ticker": "A", "final": 90.0}, {"ticker": "B", "final": 80.0},
+                              {"ticker": "C", "final": 79.9}, {"ticker": "D", "final": None}])
+    picked = [c["ticker"] for c in res.select(80.0)]
+    assert picked == ["A", "B"]            # >= 80, None excluded
+
+
+def test_threshold_get_set_default(tmp_path):
+    dbf = tmp_path / "t.db"
+    assert store.get_threshold(db_path=dbf) == store.DEFAULT_THRESHOLD == 80.0
+    assert store.set_threshold(72, db_path=dbf) == 72.0
+    assert store.get_threshold(db_path=dbf) == 72.0
+
+
+def test_threshold_clamped_and_validated(tmp_path):
+    dbf = tmp_path / "t.db"
+    assert store.set_threshold(150, db_path=dbf) == 100.0   # clamp high
+    assert store.set_threshold(-5, db_path=dbf) == 0.0      # clamp low
+    with pytest.raises(ValueError):
+        store.set_threshold("abc", db_path=dbf)
+
+
+def test_save_run_uses_configured_threshold(tmp_path):
+    dbf = tmp_path / "t.db"
+    store.set_threshold(85, db_path=dbf)
+    res = _result(candidates=[{"rank": 1, "ticker": "HI", "final": 90.0},
+                              {"rank": 2, "ticker": "LO", "final": 80.0}])
+    meta = store.save_run(res, db_path=dbf)        # no explicit threshold -> uses 85
+    assert meta["threshold"] == 85.0 and meta["selected_count"] == 1
+    wl = watchlist.find_by_name(meta["watchlist_name"], db_path=dbf)
+    assert "HI" in wl["symbols"] and "LO" not in wl["symbols"]
+
+
+def test_regime_report_format():
+    from cio.alpha import report
+    txt = report.format_regime({"status": "GREEN", "detail": "uptrend", "qqq": 700.0,
+                                "ma50": 680.0, "ma200": 620.0, "slope_up": True})
+    assert "GREEN" in txt and "🟢" in txt and "700" in txt
+    assert "UNKNOWN" in report.format_regime({"status": "UNKNOWN"})

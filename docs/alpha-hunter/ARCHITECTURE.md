@@ -2,7 +2,7 @@
 
 How the Alpha Hunter subsystem is composed and how it sits inside CIOAgent. Alpha
 Hunter is a **deterministic, zero-LLM compute layer** over data the agent already
-fetches. It produces a ranked Top-20 watchlist from a five-layer funnel and exposes
+fetches. It produces a threshold-selected watchlist from a five-layer funnel and exposes
 that through three surfaces: a CLI, the dev dashboard, and the Telegram bot.
 
 ## C4-ish component view

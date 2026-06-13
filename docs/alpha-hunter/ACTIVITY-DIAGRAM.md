@@ -45,7 +45,7 @@ flowchart TB
         Result --> Publish{"publish?"}
         Publish -- no --> InsertRun
         Publish -- yes --> WlFind["Find/Create<br/>Alpha-yyyy-mm-dd"]
-        WlFind --> WlSet["set_symbols = Top-20<br/>(keep ^IXIC floor)"]
+        WlFind --> WlSet["set_symbols = Final >= threshold<br/>(default 80; keep ^IXIC floor)"]
         WlSet --> WlActive["set_active"]
         WlActive --> InsertRun["Insert alpha_runs +<br/>alpha_candidates rows"]
     end

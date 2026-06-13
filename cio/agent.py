@@ -761,14 +761,25 @@ async def t_watchlist_activate(args):
 
 
 @tool("run_alpha_hunter",
-      "Run the Alpha Hunter funnel (Market→Sector→Quality→Earnings→Momentum→Top 20) "
+      "Run the Alpha Hunter funnel (Market→Sector→Quality→Earnings→Momentum→Ranking) "
       "over the NASDAQ universe and publish a fresh watchlist named "
-      "Alpha-yyyy-mm-dd (set active). Deterministic, no model cost; it is "
+      "Alpha-yyyy-mm-dd (set active) with every candidate scoring at/above the "
+      "configured Final-Score threshold. Deterministic, no model cost; it is "
       "network-bound and can take a minute. Use when the user asks to 'run alpha "
       "hunter', 'find me strong stocks', or 'generate a watchlist'.", {})
 async def t_run_alpha_hunter(args):
     result, meta = await asyncio.to_thread(alpha.run_and_save)
-    return _text(alpha.report.format_telegram(result, meta, top_n=20))
+    return _text(alpha.report.format_telegram(result, meta))
+
+
+@tool("market_regime",
+      "Current market regime light — GREEN / YELLOW / RED — from QQQ vs its 50/200-day "
+      "moving averages (Alpha Hunter's Layer 0). GREEN = uptrend (QQQ>50MA>200MA, 50MA "
+      "rising), RED = QQQ below its 200-day MA, YELLOW = mixed. Use when the user asks "
+      "'what's the market regime', 'is the market green/red', or 'market light'.", {})
+async def t_market_regime(args):
+    reg = await asyncio.to_thread(alpha.regime.evaluate)
+    return _text(alpha.report.format_regime(reg))
 
 
 @tool("market_clock",
@@ -996,7 +1007,7 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_run_strategy_profile,
              t_refresh_prices, t_stock_panel, t_watchlist_prices,
              t_list_watchlists, t_watchlist_add, t_watchlist_remove,
-             t_watchlist_activate, t_run_alpha_hunter,
+             t_watchlist_activate, t_run_alpha_hunter, t_market_regime,
              t_market_clock, t_web_search, t_web_scrape, t_committee,
              t_sec_filings, t_analyst_ratings, t_earnings_info, t_company_profile,
              t_clinical_trials]

@@ -588,11 +588,12 @@ class TestBuildReport:
 # ---------------------------------------------------------------------------
 
 def test_cio_tools_count():
-    """CIO_TOOLS must still be exactly 40 (portfolio/memory/stock/web + market_clock +
+    """CIO_TOOLS must still be exactly 41 (portfolio/memory/stock/web + market_clock +
     run_committee + the 5 evidence-integrity primary-source tools +
-    run_strategy_profile + the 4 watchlist-ops tools + run_alpha_hunter)."""
+    run_strategy_profile + the 4 watchlist-ops tools + run_alpha_hunter +
+    market_regime)."""
     from cio.agent import CIO_TOOLS
-    assert len(CIO_TOOLS) == 40, f"CIO_TOOLS count changed: {len(CIO_TOOLS)}"
+    assert len(CIO_TOOLS) == 41, f"CIO_TOOLS count changed: {len(CIO_TOOLS)}"
 
 
 # ---------------------------------------------------------------------------

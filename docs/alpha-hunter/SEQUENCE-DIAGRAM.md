@@ -33,7 +33,7 @@ sequenceDiagram
     Eng-->>Pkg: AlphaResult (ranked)
     Pkg->>Store: save_run(result)
     Store->>WL: find_by_name / create Alpha-<date>
-    Store->>WL: set_symbols(Top-20) + set_active
+    Store->>WL: set_symbols(Final >= threshold) + set_active
     WL->>DB: upsert watchlist_items
     Store->>DB: insert alpha_runs + alpha_candidates
     Store-->>Pkg: {run_id, watchlist_id, watchlist_name}
@@ -89,7 +89,7 @@ sequenceDiagram
     Pkg->>WL: publish Alpha-<date> (active)
     WL->>DB: write items
     Pkg-->>Tool1: (result, meta)
-    Tool1-->>Bot: regime + Top-20 + published name
+    Tool1-->>Bot: regime + selected names + published name
     Bot->>Tool2: watchlist_add(symbol="TSLA")
     Tool2->>WL: resolve active list -> add_symbol
     WL->>DB: insert TSLA
@@ -131,7 +131,7 @@ sequenceDiagram
     WL->>DB: SELECT by name
     DB-->>WL: existing row (id=7)
     WL-->>Store: found id=7
-    Store->>WL: set_symbols(id=7, new Top-20)
+    Store->>WL: set_symbols(id=7, new selection)
     WL->>DB: DELETE old items, INSERT new (^IXIC first)
     Store->>WL: set_active(id=7)
     Note over Store,DB: same list refreshed in place — no duplicate Alpha-<date>
