@@ -34,7 +34,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import charts, memory, recall, scheduler, watchlist
+from . import alpha, charts, memory, recall, scheduler, watchlist
 from .agent import CIOAgent
 
 load_dotenv()
@@ -67,6 +67,7 @@ def _safe_name(text: str, fallback: str = "report") -> str:
 # description) pairs are what the user sees when they type "/".
 BOT_COMMANDS = [
     ("watchlist", "Latest watchlist prices"),
+    ("alpha", "Run Alpha Hunter — new Alpha-yyyy-mm-dd watchlist"),
     ("playbooks", "List saved playbooks you can ask me to run"),
     ("committee", "Investment committee on a symbol — /committee AAPL [zh]"),
     ("briefing", "Pre-market watchlist briefing — /briefing [SYMBOL…] [zh]"),
@@ -80,8 +81,9 @@ BOT_COMMANDS = [
 # literal "/command" — Telegram only parses a tap as a command if it starts with
 # "/", so emoji labels can't go here (they'd be sent as plain text to the agent).
 _REPLY_KEYBOARD = ReplyKeyboardMarkup(
-    [["/watchlist", "/briefing"],
-     ["/committee", "/playbooks"],
+    [["/watchlist", "/alpha"],
+     ["/committee", "/briefing"],
+     ["/playbooks"],
      ["/subscribe", "/unsubscribe"],
      ["/help"]],
     resize_keyboard=True,
@@ -95,7 +97,8 @@ _REPLY_KEYBOARD = ReplyKeyboardMarkup(
 # keyboard / "/" autocomplete where the normal command path handles args + /stop.
 _INLINE_MENU = InlineKeyboardMarkup(
     [[InlineKeyboardButton("📋 Watchlist", callback_data="cb:watchlist"),
-      InlineKeyboardButton("📒 Playbooks", callback_data="cb:playbooks")],
+      InlineKeyboardButton("🔍 Alpha Hunter", callback_data="cb:alpha")],
+     [InlineKeyboardButton("📒 Playbooks", callback_data="cb:playbooks")],
      [InlineKeyboardButton("🔔 Subscribe", callback_data="cb:subscribe"),
       InlineKeyboardButton("🔕 Unsubscribe", callback_data="cb:unsubscribe")],
      [InlineKeyboardButton("❓ Help", callback_data="cb:help")]],
@@ -364,6 +367,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     action = data.removeprefix("cb:")
     if action == "watchlist":
         await cmd_watchlist(update, ctx)
+    elif action == "alpha":
+        await cmd_alpha(update, ctx)
     elif action == "subscribe":
         await cmd_subscribe(update, ctx)
     elif action == "unsubscribe":
@@ -402,6 +407,27 @@ async def cmd_watchlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await update.effective_message.reply_photo(f, caption=f"📋 {snap['watchlist']}")
     else:
         await update.effective_message.reply_text(watchlist.format_prices(snap))
+
+
+async def cmd_alpha(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the Alpha Hunter funnel, publish the Alpha-yyyy-mm-dd watchlist (set
+    active), and report the regime + top candidates. Deterministic — zero model
+    tokens. The scan is network-bound, so it runs in a thread; a heads-up goes out
+    first since a cold cache can take a minute."""
+    chat_id = update.effective_chat.id
+    log.info("/alpha from chat %s", chat_id)
+    await update.effective_chat.send_action(ChatAction.TYPING)
+    await update.effective_message.reply_text(
+        "🔍 Running Alpha Hunter across the NASDAQ universe… (may take a minute)")
+    try:
+        result, meta = await asyncio.to_thread(alpha.run_and_save)
+    except Exception:
+        log.exception("/alpha run failed")
+        await update.effective_message.reply_text(
+            "Alpha Hunter hit an error — check the logs. Nothing was published.")
+        return
+    await update.effective_message.reply_text(
+        alpha.report.format_telegram(result, meta), parse_mode="Markdown")
 
 
 async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -695,6 +721,7 @@ def main() -> None:
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
+    app.add_handler(CommandHandler("alpha", cmd_alpha, block=False))
     app.add_handler(CommandHandler("playbooks", cmd_playbooks))
     app.add_handler(CommandHandler("stop", cmd_stop))
     # Long handlers run block=False so the dispatcher keeps reading updates while

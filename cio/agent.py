@@ -27,7 +27,7 @@ from claude_agent_sdk import (
 
 import urllib.parse
 
-from . import charts, context, convlog, memory, portfolio, recall, timeutil, watchlist, web
+from . import alpha, charts, context, convlog, memory, portfolio, recall, timeutil, watchlist, web
 from .data import source_policy as _sp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -694,6 +694,83 @@ async def t_watchlist_prices(args):
     return _text(json.dumps(snap, indent=2) + note)
 
 
+# ----- watchlist operations (Telegram can manage the lists, not just read) ---
+def _resolve_watchlist(name: str | None) -> dict | None:
+    """A watchlist by name (case-insensitive), else the active one."""
+    name = (name or "").strip()
+    if name:
+        wl = watchlist.find_by_name(name)
+        if wl:
+            return wl
+        for w in watchlist.list_watchlists():
+            if w["name"].lower() == name.lower():
+                return watchlist.get(w["id"])
+        return None
+    return watchlist.active()
+
+
+@tool("list_watchlists",
+      "List every watchlist the user has (id, name, whether it's the active one, "
+      "and symbol count). Use to answer 'what watchlists do I have' or before "
+      "adding/removing on a specific list.", {})
+async def t_list_watchlists(args):
+    return _text(json.dumps(watchlist.list_watchlists(), indent=2))
+
+
+@tool("watchlist_add",
+      "Add a symbol to a watchlist. Targets the named list if `name` is given "
+      "(e.g. an Alpha-yyyy-mm-dd list), otherwise the ACTIVE list. Use when the user "
+      "says 'add NVDA to my watchlist' or 'put TSLA on the alpha list'.",
+      {"symbol": str, "name": str})
+async def t_watchlist_add(args):
+    wl = _resolve_watchlist(args.get("name"))
+    if wl is None:
+        return _text("No matching watchlist. Ask the user which list, or create one in the dashboard.")
+    try:
+        added = watchlist.add_symbol(wl["id"], args["symbol"])
+    except watchlist.WatchlistError as e:
+        return _text(f"Could not add: {e}")
+    sym = args["symbol"].strip().upper()
+    return _text(f"{'Added' if added else 'Already present:'} {sym} on {wl['name']!r}.")
+
+
+@tool("watchlist_remove",
+      "Remove a symbol from a watchlist (named list, else the ACTIVE one). The "
+      "NASDAQ index ^IXIC is the benchmark floor and cannot be removed.",
+      {"symbol": str, "name": str})
+async def t_watchlist_remove(args):
+    wl = _resolve_watchlist(args.get("name"))
+    if wl is None:
+        return _text("No matching watchlist to remove from.")
+    try:
+        watchlist.remove_symbol(wl["id"], args["symbol"])
+    except watchlist.WatchlistError as e:
+        return _text(f"Could not remove: {e}")
+    return _text(f"Removed {args['symbol'].strip().upper()} from {wl['name']!r}.")
+
+
+@tool("watchlist_activate",
+      "Make a watchlist the ACTIVE one (the list /watchlist and watchlist_prices "
+      "report). Identify it by name, e.g. 'Alpha-2026-06-12'.", {"name": str})
+async def t_watchlist_activate(args):
+    wl = _resolve_watchlist(args.get("name"))
+    if wl is None:
+        return _text(f"No watchlist named {args.get('name')!r}.")
+    watchlist.set_active(wl["id"])
+    return _text(f"{wl['name']!r} is now the active watchlist.")
+
+
+@tool("run_alpha_hunter",
+      "Run the Alpha Hunter funnel (Market→Sector→Quality→Earnings→Momentum→Top 20) "
+      "over the NASDAQ universe and publish a fresh watchlist named "
+      "Alpha-yyyy-mm-dd (set active). Deterministic, no model cost; it is "
+      "network-bound and can take a minute. Use when the user asks to 'run alpha "
+      "hunter', 'find me strong stocks', or 'generate a watchlist'.", {})
+async def t_run_alpha_hunter(args):
+    result, meta = await asyncio.to_thread(alpha.run_and_save)
+    return _text(alpha.report.format_telegram(result, meta, top_n=20))
+
+
 @tool("market_clock",
       "Authoritative current date/time: local + US/Eastern wall clock, NASDAQ "
       "open/closed status, and the latest settled trading session. Call this whenever "
@@ -918,6 +995,8 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
              t_run_strategy_profile,
              t_refresh_prices, t_stock_panel, t_watchlist_prices,
+             t_list_watchlists, t_watchlist_add, t_watchlist_remove,
+             t_watchlist_activate, t_run_alpha_hunter,
              t_market_clock, t_web_search, t_web_scrape, t_committee,
              t_sec_filings, t_analyst_ratings, t_earnings_info, t_company_profile,
              t_clinical_trials]

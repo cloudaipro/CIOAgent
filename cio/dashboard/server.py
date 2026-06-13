@@ -29,7 +29,8 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from cio import convlog, db, devcapture, econ_calendar, memory, portfolio, version, watchlist
+from cio import alpha, convlog, db, devcapture, econ_calendar, memory, portfolio, version, watchlist
+from cio.alpha import store as alpha_store
 from cio.committee import agent_memory, models, sanitizer_log, transcript, usage
 from . import views
 
@@ -198,6 +199,11 @@ class _Handler(BaseHTTPRequestHandler):
                 html = views.render_sanitizer(sanitizer_log.recent(200), level)
             elif path == "/watchlist":
                 html = self._watchlist_view(query, level)
+            elif path == "/alpha":
+                html = views.render_alpha(
+                    alpha_store.latest_run(), alpha_store.list_runs(10), level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/portfolio":
                 html = views.render_portfolio(
                     portfolio.summary(),
@@ -271,6 +277,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._overview_post(form, set_cookie)
         elif path == "/watchlist":
             self._watchlist_post(form, set_cookie)
+        elif path == "/alpha":
+            self._alpha_post(form, set_cookie)
         elif path == "/portfolio":
             self._portfolio_post(form, set_cookie)
         elif path == "/memory":
@@ -735,6 +743,29 @@ class _Handler(BaseHTTPRequestHandler):
             params["err"] = "1"
         target = "/watchlist" + (("?" + urlencode(params)) if params else "")
         self._redirect(target, set_cookie)
+
+    def _alpha_post(self, form: dict, set_cookie: str | None) -> None:
+        """Alpha Hunter mutation. Only action: run_hunter — runs the full funnel
+        synchronously (bounded by universe size), persists the run, and publishes/
+        refreshes the Alpha-<date> watchlist (set active). Zero LLM cost. PRG back."""
+        action = form.get("action", [""])[0].strip()
+        msg, err = "", False
+        try:
+            if action == "run_hunter":
+                result, meta = alpha.run_and_save()
+                msg = (f"ran Alpha Hunter — regime {result.regime.get('status')}, "
+                       f"{len(result.candidates)} candidate(s); published "
+                       f"{meta['watchlist_name']} (active)")
+            else:
+                msg, err = f"unknown action {action!r}", True
+        except Exception as exc:  # never 500 the operator
+            log.warning("alpha POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/alpha?" + urlencode(params), set_cookie)
 
     def _portfolio_post(self, form: dict, set_cookie: str | None) -> None:
         """Portfolio mutations: set_price / refresh_live / import_txns /

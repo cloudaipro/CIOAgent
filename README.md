@@ -20,7 +20,7 @@ backend outage or budget exhaustion degrades gracefully instead of silencing a r
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 27 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 40 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
                   │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
@@ -41,9 +41,13 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   │     note_sanitizer.py  LLM figures-sanitizer (salvage) + sanitizer_log.py audit
                   │     render_pdf.py / translate.py  PDF + 繁體中文
                   │
-                  └─► cio/watchlist_monitor/*  pre-market Watchlist Monitoring Agent:
-                        per-security assessment (bundle + web news + wma chain)
-                        + one shared global macro/geopolitical snapshot → briefing PDF
+                  ├─► cio/watchlist_monitor/*  pre-market Watchlist Monitoring Agent:
+                  │     per-security assessment (bundle + web news + wma chain)
+                  │     + one shared global macro/geopolitical snapshot → briefing PDF
+                  │
+                  └─► cio/alpha/*       Alpha Hunter: deterministic 5-layer NASDAQ swing funnel
+                        (regime → sector → quality → earnings → momentum → Top-20)
+                        zero-LLM; publishes the Alpha-yyyy-mm-dd watchlist (active)
 ```
 
 - **Cost basis**: average-cost method. Positions & P&L are *derived* from the
@@ -190,6 +194,46 @@ what deserves a deeper look.
   (daily 200k) → NVIDIA NIM `kimi-k2.6` (last resort) — the same fallback machinery as
   the CIO.
 
+## Alpha Hunter (`/alpha`)
+
+A **deterministic NASDAQ swing-selection engine**. It runs a fixed five-layer funnel —
+**Market → Sector → Quality → Earnings → Momentum → Ranking** — over a configurable
+ticker universe and publishes a **Top-20 watchlist** of names the market is re-pricing
+higher. **Zero model tokens** (pure compute over yfinance + finnhub), deterministic,
+and offline-safe — same cost discipline as TIRF.
+
+- **The funnel** (`cio/alpha/`):
+  - **L0 Market Regime** — QQQ vs 50/200-day MAs + slope → 🟢 GREEN / 🟡 YELLOW / 🔴 RED.
+  - **L1 Sector Ranking** — RS = 0.5·3M + 0.5·6M over QQQ/SMH/IGV/HACK/BOTZ.
+  - **L2 Quality Filter** (fail-closed) — cap > $2B, 20-day avg $-vol > $50M, revenue
+    growth > 15%, forward-EPS growth > 15%, free cash flow > 0. Missing data → FAIL.
+  - **L2.5 Earnings Engine** — 0.40·forward-EPS-growth + 0.40·EPS-revision (Lite: a >5%
+    earnings gap-up unfilled for 10 days) + 0.20·surprise (last-4-quarter beat ratio).
+  - **L3 Momentum** — relative strength vs QQQ (3M & 6M) + trend template
+    (price > 50MA > 150MA > 200MA).
+  - **L4 Ranking** — `Final = 0.30·Momentum + 0.20·Trend + 0.30·Earnings +
+    0.10·Revenue + 0.10·VolumeExpansion` (0–100), Top 20.
+- **Auto-named watchlist**: each run publishes/refreshes a list named
+  **`Alpha-yyyy-mm-dd`** and **sets it active**, so Telegram `/watchlist` shows it
+  immediately. Same-day re-runs refresh the one dated list in place (no duplicates);
+  the `^IXIC` benchmark floor is kept.
+- **Operate from Telegram**: `/alpha` runs the funnel; then the agent tools
+  `list_watchlists` / `watchlist_add` / `watchlist_remove` / `watchlist_activate` let
+  you manage the published list conversationally ("add TSLA to the alpha list",
+  "switch to Alpha-2026-06-12").
+- **Dashboard**: the **Alpha Hunter** tab (`/alpha`) has a **Run** button and shows the
+  regime light, sector ranking, ranked candidates, run history, and a link to the
+  published list.
+- **Universe**: the candidate pool is `config/alpha_universe.txt` (one ticker per line,
+  `#` comments; ~40 liquid NASDAQ names by default). Override with
+  `CIO_ALPHA_UNIVERSE=/path/to/file` or the CLI `--universe FILE`. Run time scales with
+  universe size (cached after the first run).
+- **CLI**: `python -m cio.alpha [--universe FILE] [--no-publish] [--json]`.
+- **Docs**: `docs/ALPHA-HUNTER-TECHNICAL-REPORT.md` (full reference),
+  `docs/ALPHA-HUNTER-PRD.md`, `docs/ALPHA-HUNTER-TEST-PLAN.md`, and the
+  `docs/alpha-hunter/` diagram set (architecture / activity / control-flow /
+  data-flow / sequence).
+
 ## Economic-event alerts
 
 A 24/7 CIO should warn you *before* a market-moving release, not explain the drop
@@ -323,8 +367,9 @@ Sample data: `data/sample_transactions.csv`.
 ## Developer dashboard
 
 A localhost-only web view to verify the agent is behaving correctly. Mostly read-only;
-write surfaces are the **Watchlist** / **Portfolio** / **Configure** pages (manage lists,
-set prices, import CSVs, edit model routing) and **delete** controls on the Telegram /
+write surfaces are the **Watchlist** / **Portfolio** / **Configure** / **Alpha Hunter**
+pages (manage lists, set prices, import CSVs, edit model routing, run the swing funnel)
+and **delete** controls on the Telegram /
 Memory / Committee / Playbooks / Econ-events pages. Every mutation POSTs then redirects
 (PRG), behind the same auth gate, and destructive deletes ask for confirmation first.
 
@@ -341,6 +386,9 @@ Pages:
   (chat id + subscribed-since), so you can see exactly who receives the scheduled pushes.
 - **Watchlist** — manage symbol lists (create/activate/rename/delete/search, add/remove
   symbols, drag-to-reorder, CSV import). One scoped JS for drag; no-JS safe.
+- **Alpha Hunter** — the deterministic NASDAQ swing funnel. A **Run** button scans the
+  universe and publishes the `Alpha-yyyy-mm-dd` watchlist (active); the page shows the
+  market-regime light, sector ranking, ranked Top-20 candidates, and run history.
 - **Committee** — every run, each with its **Trigger** (`chat` ask vs `/committee` slash
   vs `cli`), drills into every LLM call: the exact content **sent** (system + user prompt)
   and the content **returned**, per role, in order. Includes a **delete-all-runs** button.
