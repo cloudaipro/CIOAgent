@@ -59,6 +59,41 @@ CREATE TABLE IF NOT EXISTS watchlist_items (
     PRIMARY KEY (watchlist_id, symbol)             -- re-adding a symbol is a no-op
 );
 
+-- Alpha Hunter: one row per funnel run (point-in-time scan) + its ranked
+-- candidates. These are STORED snapshots of a scan, distinct from the figures
+-- firewall (live watchlist prices stay live). The run publishes a watchlist named
+-- Alpha-<run_date>; watchlist_id/name link to it. See cio/alpha/.
+CREATE TABLE IF NOT EXISTS alpha_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date        TEXT    NOT NULL,                 -- ISO date of the scan
+    regime          TEXT    NOT NULL DEFAULT 'UNKNOWN',
+    regime_detail   TEXT    NOT NULL DEFAULT '',
+    sectors_json    TEXT    NOT NULL DEFAULT '[]',    -- ranked sector list (JSON)
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    universe_size   INTEGER NOT NULL DEFAULT 0,
+    watchlist_id    INTEGER,                          -- published Alpha-<date> list
+    watchlist_name  TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS alpha_candidates (
+    run_id           INTEGER NOT NULL REFERENCES alpha_runs(id) ON DELETE CASCADE,
+    rank             INTEGER NOT NULL,
+    ticker           TEXT    NOT NULL,
+    sector           TEXT    NOT NULL DEFAULT '',
+    momentum         REAL,
+    trend            REAL,
+    earnings         REAL,
+    revenue_growth   REAL,
+    fwd_eps_growth   REAL,
+    surprise         REAL,
+    volume_expansion REAL,
+    final            REAL,
+    quality_pass     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (run_id, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_alpha_cand_run ON alpha_candidates(run_id, rank);
+
 -- Idempotency ledger for CSV imports. A redelivered Telegram upload (e.g. the
 -- process died mid-turn before acking, so Telegram replays the message) has
 -- identical bytes -> identical hash -> skipped, preventing duplicate rows from

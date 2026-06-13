@@ -157,6 +157,37 @@ def company_profile(symbol: str) -> dict | None:
     return cached if cached else None
 
 
+# --- earnings surprises (beat history) -------------------------------------
+def earnings_surprises(symbol: str, quarters: int = 4) -> list[dict] | None:
+    """Last *quarters* reported EPS actual-vs-estimate rows, newest first.
+
+    Each row: {period, actual, estimate, beat}. None when finnhub is disabled.
+    Empty list when finnhub is enabled but returns no history (so callers can tell
+    "disabled" from "no data"). Source: /stock/earnings (free tier).
+    """
+    tok = _token()
+    if not tok:
+        return None
+    sym = symbol.strip().upper()
+    cached = _cache.read("finnhub_surprise", sym, _EARN_TTL)
+    if cached is None:
+        data = get_json(f"{_BASE}/stock/earnings",
+                        params={"symbol": sym, "token": tok}, limiter=_limiter)
+        cached = data if isinstance(data, list) else []
+        _cache.write("finnhub_surprise", sym, cached)
+    rows = sorted(
+        (r for r in cached if isinstance(r, dict) and r.get("period")),
+        key=lambda r: r.get("period", ""), reverse=True,
+    )[:quarters]
+    out = []
+    for r in rows:
+        actual, est = r.get("actual"), r.get("estimate")
+        beat = actual is not None and est is not None and actual > est
+        out.append({"period": r.get("period"), "actual": actual,
+                    "estimate": est, "beat": beat})
+    return out
+
+
 def earnings_calendar(symbol: str, days_ahead: int = 120):
     """Next (or most recent) earnings event dict, or None when disabled/missing."""
     tok = _token()

@@ -254,6 +254,8 @@ _FUNDAMENTALS_FIELDS = (
     "name", "pe", "forward_pe", "pb", "yield_pct", "eps", "roe_pct", "margin_pct",
     "market_cap", "wk52_high", "wk52_low", "short_ratio", "shares_short",
     "revenue_q", "quoteType",
+    # Alpha Hunter quality/earnings inputs (yfinance .info, fail to None):
+    "forward_eps", "free_cash_flow", "revenue_growth_pct", "earnings_growth_pct",
 )
 
 
@@ -295,6 +297,14 @@ def fundamentals(symbol: str) -> dict:
         result["short_ratio"] = _get("shortRatio")
         result["shares_short"] = _get("sharesShort")
         result["quoteType"] = _get("quoteType")
+
+        # Alpha Hunter inputs. forwardEps/trailingEps drive forward-EPS growth;
+        # freeCashflow gates quality; revenueGrowth/earningsGrowth are yoy fractions
+        # from yfinance -> percent. All optional; None when yfinance omits them.
+        result["forward_eps"] = _get("forwardEps")
+        result["free_cash_flow"] = _get("freeCashflow")
+        result["revenue_growth_pct"] = _get("revenueGrowth", lambda v: v * 100)
+        result["earnings_growth_pct"] = _get("earningsGrowth", lambda v: v * 100)
 
         # Quarterly revenue
         try:

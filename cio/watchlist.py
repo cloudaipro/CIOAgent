@@ -187,6 +187,61 @@ def get(watchlist_id: int, db_path=db.DB_PATH) -> dict | None:
         conn.close()
 
 
+def find_by_name(name: str, db_path=db.DB_PATH) -> dict | None:
+    """The watchlist with this exact name (with symbols), or None. Used by Alpha
+    Hunter to refresh its dated list in place instead of creating duplicates."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    conn = db.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT id, name, is_active, created_at FROM watchlists WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["symbols"] = _symbols(conn, out["id"])
+        return out
+    finally:
+        conn.close()
+
+
+def set_symbols(watchlist_id: int, symbols, *, db_path=db.DB_PATH) -> list[str]:
+    """Replace a list's contents with *symbols* (order preserved). The NASDAQ index
+    floor (^IXIC) is always kept/seeded so the benchmark invariant holds. Returns the
+    resulting symbol order. Raises WatchlistError on an unknown list."""
+    norm: list[str] = []
+    seen: set[str] = set()
+    for s in symbols or []:
+        try:
+            sym = _norm_symbol(s)
+        except WatchlistError:
+            continue
+        if sym not in seen:
+            seen.add(sym)
+            norm.append(sym)
+    conn = db.connect(db_path)
+    try:
+        with conn:
+            if conn.execute(
+                "SELECT 1 FROM watchlists WHERE id = ?", (watchlist_id,)
+            ).fetchone() is None:
+                raise WatchlistError(f"no watchlist with id {watchlist_id}")
+            conn.execute("DELETE FROM watchlist_items WHERE watchlist_id = ?", (watchlist_id,))
+            final = ([NASDAQ_INDEX] + [s for s in norm if s != NASDAQ_INDEX])
+            for pos, sym in enumerate(final):
+                conn.execute(
+                    "INSERT OR IGNORE INTO watchlist_items (watchlist_id, symbol, position) "
+                    "VALUES (?,?,?)",
+                    (watchlist_id, sym, pos),
+                )
+        return final
+    finally:
+        conn.close()
+
+
 def active(db_path=db.DB_PATH) -> dict | None:
     """The active watchlist (with symbols), or None if none exists yet."""
     conn = db.connect(db_path)

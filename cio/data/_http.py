@@ -8,10 +8,21 @@ offline-safe: any failure returns None, never raises.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 
 log = logging.getLogger(__name__)
+
+# Default read/connect timeout (seconds) for every cio.data GET. Overridable via
+# CIO_HTTP_TIMEOUT so a slow upstream (e.g. finnhub /stock/earnings under the free
+# tier) can be given more headroom without a code change. Falls back to 15s on an
+# unset/garbage value.
+def _default_timeout() -> float:
+    try:
+        return float(os.getenv("CIO_HTTP_TIMEOUT", "15"))
+    except (TypeError, ValueError):
+        return 15.0
 
 
 class RateLimiter:
@@ -31,14 +42,17 @@ class RateLimiter:
             self._last = time.monotonic()
 
 
-def get_json(url, *, params=None, headers=None, timeout=15.0, limiter=None):
+def get_json(url, *, params=None, headers=None, timeout=None, limiter=None):
     """GET *url* and return parsed JSON, or ``None`` on any error.
 
     Never raises — a flaky network or a rate-limit response degrades to ``None``
-    and the caller falls back to its empty result.
+    and the caller falls back to its empty result. *timeout* defaults to
+    ``CIO_HTTP_TIMEOUT`` (15s) when not given explicitly.
     """
     import httpx
 
+    if timeout is None:
+        timeout = _default_timeout()
     try:
         if limiter is not None:
             limiter.wait()

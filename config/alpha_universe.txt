@@ -1,0 +1,44 @@
+# Alpha Hunter candidate universe — liquid NASDAQ swing names.
+# One ticker per line. Blank lines and lines starting with '#' are ignored.
+# Override the whole list with env CIO_ALPHA_UNIVERSE=/path/to/file or the
+# `--universe FILE` CLI flag. Keep this focused: run time scales with size.
+AAPL
+MSFT
+NVDA
+AMZN
+GOOGL
+META
+AVGO
+TSLA
+AMD
+NFLX
+ADBE
+COST
+PEP
+CSCO
+QCOM
+INTC
+AMAT
+MU
+LRCX
+KLAC
+INTU
+PANW
+CRWD
+SNPS
+CDNS
+MRVL
+ASML
+ADI
+MELI
+PYPL
+ABNB
+SBUX
+ MDLZ
+GILD
+REGN
+VRTX
+ON
+FTNT
+TEAM
+DDOG

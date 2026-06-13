@@ -176,6 +176,8 @@ textarea { width: 100%; min-height: 96px; resize: vertical; font-family: ui-mono
          text-transform: uppercase; letter-spacing: .4px; }
 .badge.up { background: var(--up-soft); color: var(--up); border-color: color-mix(in srgb, var(--up) 40%, transparent); }
 .badge.down { background: var(--down-soft); color: var(--down); border-color: color-mix(in srgb, var(--down) 40%, transparent); }
+.badge.warn { background: color-mix(in srgb, #d99e00 18%, transparent); color: #b58100; border-color: color-mix(in srgb, #d99e00 40%, transparent); }
+.muted { color: var(--muted); font-size: 12px; }
 .daynav { color: var(--muted); margin: 12px 0 18px; display: flex; gap: 6px;
           flex-wrap: wrap; align-items: center; }
 
@@ -205,6 +207,7 @@ _NAV = [
     ("Overview", "/"), ("Token usage", "/usage"), ("Telegram", "/telegram"),
     ("Detailed history", "/detailed"),
     ("Committee", "/committee"), ("Watchlist", "/watchlist"),
+    ("Alpha Hunter", "/alpha"),
     ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
     ("Memory", "/memory"), ("Playbooks", "/playbooks"),
     ("Econ events", "/econ"), ("Sanitizer", "/sanitizer"),
@@ -590,6 +593,104 @@ def render_playbooks(rows, level: int, flash: str = "", flash_err: bool = False)
         f"<th>Created</th><th></th></tr>{body_rows}</table>"
     )
     return _page("Playbooks", body, level)
+
+
+_REGIME_CLASS = {"GREEN": "up", "YELLOW": "warn", "RED": "down", "UNKNOWN": ""}
+
+
+def _alpha_num(x, suffix: str = "") -> str:
+    if x is None:
+        return "—"
+    if isinstance(x, float):
+        return f"{x:g}{suffix}"
+    return f"{esc(x)}{suffix}"
+
+
+def render_alpha(latest, runs, level: int, flash: str = "",
+                 flash_err: bool = False) -> str:
+    """Alpha Hunter tab (PRD §7): regime light, sector ranking, ranked candidates,
+    a Run button, and recent run history. *latest* is alpha_store.latest_run() (or
+    None); *runs* is alpha_store.list_runs()."""
+    flash_html = (f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+                  if flash else "")
+
+    run_btn = (
+        "<form class='inline' method='post' action='/alpha'>"
+        "<input type='hidden' name='action' value='run_hunter'>"
+        "<button type='submit'>▶ Run Alpha Hunter</button></form>"
+    )
+    intro = ("<p>Deterministic NASDAQ swing funnel — Market → Sector → Quality → "
+             "Earnings → Momentum → Top&nbsp;20. Zero LLM cost. A run publishes the "
+             "<code>Alpha-yyyy-mm-dd</code> watchlist and sets it active, so Telegram "
+             "<code>/watchlist</code> shows it immediately.</p>")
+
+    if latest is None:
+        body = ("<h1>Alpha Hunter</h1>" + flash_html + intro + run_btn +
+                "<p class='empty'>No runs yet. Click <b>Run Alpha Hunter</b> to scan "
+                "the universe (may take a minute on a cold cache).</p>")
+        return _page("Alpha Hunter", body, level)
+
+    reg = (latest.get("regime") or "UNKNOWN")
+    light = (f"<span class='badge {_REGIME_CLASS.get(reg, '')}'>{esc(reg)}</span> "
+             f"<span class='muted'>{esc(latest.get('regime_detail') or '')}</span>")
+
+    # Sectors.
+    sect_rows = "".join(
+        f"<tr><td>{esc(s.get('ticker'))}</td>"
+        f"<td class='num'>{_alpha_num(s.get('rs'))}</td>"
+        f"<td class='num'>{_alpha_num(s.get('ret_3m'), '%')}</td>"
+        f"<td class='num'>{_alpha_num(s.get('ret_6m'), '%')}</td></tr>"
+        for s in (latest.get("sectors") or [])
+    ) or "<tr><td class='empty' colspan='4'>no sector data</td></tr>"
+
+    # Candidates.
+    cand_rows = "".join(
+        f"<tr><td class='num'>{esc(c.get('rank'))}</td>"
+        f"<td><b>{esc(c.get('ticker'))}</b></td>"
+        f"<td>{esc(c.get('sector'))}</td>"
+        f"<td class='num'>{_alpha_num(c.get('final'))}</td>"
+        f"<td class='num'>{_alpha_num(c.get('momentum'))}</td>"
+        f"<td class='num'>{_alpha_num(c.get('trend'))}</td>"
+        f"<td class='num'>{_alpha_num(c.get('earnings'))}</td>"
+        f"<td class='num'>{_alpha_num(c.get('revenue_growth'), '%')}</td>"
+        f"<td class='num'>{_alpha_num(c.get('fwd_eps_growth'), '%')}</td>"
+        f"<td class='num'>{_alpha_num(c.get('surprise'))}</td></tr>"
+        for c in (latest.get("candidates") or [])
+    ) or "<tr><td class='empty' colspan='10'>no candidates passed the quality filter</td></tr>"
+
+    wl_link = ""
+    if latest.get("watchlist_id"):
+        wl_link = (f" · published <a href='/watchlist?wl={esc(latest['watchlist_id'])}'>"
+                   f"{esc(latest.get('watchlist_name'))}</a>")
+
+    # Run history.
+    hist_rows = "".join(
+        f"<tr><td>{esc(r.get('run_date'))}</td>"
+        f"<td><span class='badge {_REGIME_CLASS.get(r.get('regime',''), '')}'>"
+        f"{esc(r.get('regime'))}</span></td>"
+        f"<td class='num'>{esc(r.get('candidate_count'))}</td>"
+        f"<td class='num'>{esc(r.get('universe_size'))}</td>"
+        f"<td>{(f'<a href=' + chr(39) + '/watchlist?wl=' + str(r.get('watchlist_id')) + chr(39) + '>' + esc(r.get('watchlist_name') or '') + '</a>') if r.get('watchlist_id') else '—'}</td>"
+        f"<td>{esc_ts(r.get('created_at'))}</td></tr>"
+        for r in (runs or [])
+    ) or "<tr><td class='empty' colspan='6'>no runs</td></tr>"
+
+    body = (
+        "<h1>Alpha Hunter</h1>" + flash_html + intro + run_btn +
+        f"<h2>Latest run — {esc(latest.get('run_date'))}{wl_link}</h2>"
+        f"<p>Market regime: {light}</p>"
+        "<h3>Sector ranking <span class='muted'>(RS = 0.5·3M + 0.5·6M)</span></h3>"
+        "<table><tr><th>Sector</th><th>RS</th><th>3M</th><th>6M</th></tr>"
+        f"{sect_rows}</table>"
+        "<h3>Top candidates</h3>"
+        "<table><tr><th>#</th><th>Ticker</th><th>Sector</th><th>Final</th>"
+        "<th>Mom</th><th>Trend</th><th>Earn</th><th>Rev</th><th>fEPS</th>"
+        f"<th>Surp</th></tr>{cand_rows}</table>"
+        "<h3>Recent runs</h3>"
+        "<table><tr><th>Date</th><th>Regime</th><th>Candidates</th><th>Universe</th>"
+        f"<th>Watchlist</th><th>Ran at</th></tr>{hist_rows}</table>"
+    )
+    return _page("Alpha Hunter", body, level)
 
 
 def render_econ_events(rows, level: int, flash: str = "", flash_err: bool = False) -> str:
