@@ -54,6 +54,24 @@ def _fig(width, height, x_range=None, title=None):
 def _candles(fig, spec: ChartSpec):
     df = spec.df
     x = list(spec.x)
+    # channels (Bollinger / Keltner) behind the candles
+    for bd in spec.price_bands:
+        up = np.asarray(bd.upper, dtype=float)
+        lo = np.asarray(bd.lower, dtype=float)
+        if len(up) != spec.n or len(lo) != spec.n:
+            continue
+        dash = "dashed" if bd.style == "--" else "solid"
+        if bd.fill_alpha:
+            fig.varea(x=x, y1=[None if np.isnan(v) else v for v in lo],
+                      y2=[None if np.isnan(v) else v for v in up],
+                      fill_color=bd.color, fill_alpha=bd.fill_alpha)
+        fig.line(x, [None if np.isnan(v) else v for v in up], color=bd.color,
+                 line_width=bd.width, line_dash=dash, legend_label=bd.label)
+        fig.line(x, [None if np.isnan(v) else v for v in lo], color=bd.color,
+                 line_width=bd.width, line_dash=dash)
+        if bd.mid is not None and len(bd.mid) == spec.n:
+            fig.line(x, [None if np.isnan(v) else v for v in bd.mid],
+                     color=bd.color, line_width=bd.width * 0.8, line_dash="dotted")
     o = df["Open"].values
     c = df["Close"].values
     h = df["High"].values
@@ -70,10 +88,10 @@ def _candles(fig, spec: ChartSpec):
         fig.vbar(x=xd, width=0.7, top=[max(o[i], c[i]) for i in xd],
                  bottom=[min(o[i], c[i]) for i in xd], fill_color=S.DOWN,
                  line_color=S.DOWN)
-    for label, vals in spec.ma.items():
-        if vals is not None and len(vals) == spec.n:
-            fig.line(x, list(vals), color=S.MA_COLORS.get(label, S.FAINT),
-                     line_width=1.2, legend_label=label)
+    for ov in spec.price_overlays:
+        if ov.values is not None and len(ov.values) == spec.n:
+            fig.line(x, list(ov.values), color=ov.color,
+                     line_width=ov.width + 0.1, legend_label=ov.label)
     fig.legend.location = "top_left"
     fig.legend.label_text_font_size = "8pt"
     fig.legend.background_fill_alpha = 0.0
@@ -126,11 +144,18 @@ def render_html(
                   title=panel.name + (f"  ({panel.verdict})" if panel.verdict else ""))
         if panel.hist is not None:
             hv = np.asarray(panel.hist[1], dtype=float)
+            if panel.hist_colors is not None:
+                fill = list(panel.hist_colors)       # TTM Squeeze 4-color scheme
+                alpha = 0.9
+            else:
+                fill = [S.UP if (not np.isnan(v) and v >= 0) else S.DOWN for v in hv]
+                alpha = 0.4
             pf.vbar(x=x, width=0.8,
                     top=[0 if np.isnan(v) else v for v in hv],
-                    fill_color=[S.UP if (not np.isnan(v) and v >= 0) else S.DOWN
-                                for v in hv],
-                    line_color=None, fill_alpha=0.4)
+                    fill_color=fill, line_color=None, fill_alpha=alpha)
+        if panel.dots:
+            pf.scatter([d[0] for d in panel.dots], [0.0] * len(panel.dots),
+                       marker="circle", size=5, color=[d[1] for d in panel.dots])
         for hl in panel.hlines:
             pf.add_layout(Span(location=hl.y, dimension="width",
                                line_color=hl.color, line_dash="dashed",
@@ -145,10 +170,11 @@ def render_html(
             _flags(pf, panel.flags, base)
         if panel.ylim:
             pf.y_range = Range1d(*panel.ylim)
-        pf.legend.location = "top_left"
-        pf.legend.label_text_font_size = "7pt"
-        pf.legend.background_fill_alpha = 0.0
-        pf.legend.border_line_color = None
+        if panel.lines:                       # no legend when only a histogram (Squeeze)
+            pf.legend.location = "top_left"
+            pf.legend.label_text_font_size = "7pt"
+            pf.legend.background_fill_alpha = 0.0
+            pf.legend.border_line_color = None
         figs.append(pf)
 
     out = Path(out_dir) if out_dir else _out_dir()

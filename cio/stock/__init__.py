@@ -113,10 +113,16 @@ def run_strategy_profile(symbol_or_df, profile: str = "committee"):
 
 def render_indicators(symbol_or_df, profile: str = "committee", *, html: bool = False, **kw):
     """
-    Render the technical-indicator chart (指標視覺化) — candles + MA, RSI/MACD/KDJ
-    sub-panels, divergence + swing markers — and return the output file path.
+    Render the technical-indicator chart (指標視覺化) and return the output path.
 
-    PNG by default (for messages / committee PDF). ``html=True`` produces an
+    Default (``indicators=None``) draws candles + MA20/60/120 with RSI/MACD/KDJ
+    sub-panels and committee divergence + swing markers. For full control pass an
+    autoplot-style ``indicators`` dict — ``{label: {"type": ..., ...}}`` with
+    over-chart types (over/MA/Swings/flags) and below-chart types (below/RSI/
+    MACD/multi/Crossover/threshold); see cio.stock.viz.spec for the contract.
+    ``over_cap`` / ``below_cap`` bound how many of each are drawn.
+
+    PNG by default (messages / committee PDF). ``html=True`` produces an
     interactive bokeh page for the dashboard (requires the optional bokeh dep).
     """
     from .viz import render_indicator_png, render_indicator_html

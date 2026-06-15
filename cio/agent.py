@@ -216,6 +216,30 @@ def _emit_image(path: str | None, ok_msg: str, empty_msg: str) -> dict:
     return _text(ok_msg)
 
 
+def _emit_image_seen(path: str | None, ok_msg: str, empty_msg: str) -> dict:
+    """Like _emit_image, but ALSO returns the image to the model so it can see
+    what it rendered (the SDK forwards an MCP image block as a vision tool
+    result). Use for chart tools whose output the model must interpret — without
+    this the model only gets the success text and is blind to its own chart."""
+    if not path:
+        return _text(empty_msg)
+    _PENDING.append(path)
+    try:
+        import base64
+        import mimetypes
+        with open(path, "rb") as fh:
+            data = base64.b64encode(fh.read()).decode("ascii")
+        mime = mimetypes.guess_type(path)[0] or "image/png"
+        return {"content": [
+            {"type": "text", "text": ok_msg},
+            {"type": "image", "data": data, "mimeType": mime},
+        ]}
+    except Exception:
+        logging.getLogger("cio.agent").debug("could not inline image %s", path,
+                                             exc_info=True)
+        return _text(ok_msg)
+
+
 def _emit_doc(path: str | None, ok_msg: str, empty_msg: str) -> dict:
     """Queue a file (e.g. PDF) for the bot to send as a document this turn."""
     if not path:
@@ -684,11 +708,13 @@ async def t_stock_panel(args):
 
 @tool("stock_indicators",
       "Render a technical-indicator chart (指標視覺化) for one stock and send it: "
-      "candlesticks + MA20/60/120 with RSI / MACD / KDJ sub-panels and divergence + "
-      "swing markers (the same signals the committee profile uses). Use whenever the "
-      "user wants to SEE indicators, divergence, or overlay lines on the chart — this "
-      "is the in-house replacement for sending them to TradingView. 'profile' selects "
-      "the indicator/signal set (committee|swing|monitor, default committee).",
+      "candlesticks + MA20/60/120 with profile-specific indicator sub-panels and "
+      "divergence + swing markers. The 'profile' DETERMINES which indicators are "
+      "drawn (dynamic, not fixed): committee→trix/kst/rsi/cmf/er, "
+      "swing→squeeze/kdj/fisher/efi + VIDYA overlay, monitor→macd/stoch/pvo/squeeze. "
+      "Use whenever the user wants to SEE indicators, divergence, or overlay lines — "
+      "the in-house replacement for sending them to TradingView. Pick the profile to "
+      "match intent (swing trade → swing). Default committee.",
       {"symbol": str, "profile": str})
 async def t_stock_indicators(args):
     from . import stock
@@ -698,9 +724,12 @@ async def t_stock_indicators(args):
         path = stock.render_indicators(sym, profile)
     except Exception as e:  # noqa: BLE001
         return _text(f"Could not render indicators for {sym}: {e}")
-    return _emit_image(path,
-        f"{sym} 指標視覺化 ({profile}) generated; it will be sent to the user. "
-        "紅色 ▼ = bear divergence (價創新高、動能未跟上)。",
+    return _emit_image_seen(path,
+        f"{sym} 指標視覺化 ({profile}) generated and sent to the user. The chart "
+        "image is attached below — READ IT and describe only what you actually "
+        "see (panels present, line shapes, Squeeze histogram colors + zero-line "
+        "dots, BB/KC positions, ▼/▲ divergence markers). Do not describe the "
+        "TTM/indicator standard from memory.",
         f"No data for {sym}.")
 
 

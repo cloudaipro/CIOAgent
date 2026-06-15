@@ -87,13 +87,29 @@ def _render_price(ax, spec: ChartSpec):
         ax.text(0.5, 0.5, "無價格資料", transform=ax.transAxes,
                 ha="center", va="center", color=S.MUTED)
         return
+    xb = np.arange(spec.n)
+    for bd in spec.price_bands:
+        up = np.asarray(bd.upper, dtype=float)
+        lo = np.asarray(bd.lower, dtype=float)
+        if len(up) != spec.n or len(lo) != spec.n:
+            continue
+        ax.plot(xb, up, color=bd.color, linewidth=bd.width, linestyle=bd.style,
+                zorder=1, alpha=0.85, label=bd.label)
+        ax.plot(xb, lo, color=bd.color, linewidth=bd.width, linestyle=bd.style,
+                zorder=1, alpha=0.85)
+        if bd.mid is not None and len(bd.mid) == spec.n:
+            ax.plot(xb, bd.mid, color=bd.color, linewidth=bd.width * 0.8,
+                    linestyle=":", zorder=1, alpha=0.6)
+        if bd.fill_alpha:
+            ax.fill_between(xb, lo, up, color=bd.color, alpha=bd.fill_alpha, zorder=0)
+
     x = S.candlestick(ax, df)
 
-    for label, vals in spec.ma.items():
-        if vals is None or len(vals) != spec.n:
+    for ov in spec.price_overlays:
+        if ov.values is None or len(ov.values) != spec.n:
             continue
-        ax.plot(x, vals, color=S.MA_COLORS.get(label, S.FAINT),
-                linewidth=1.1, label=label, zorder=4)
+        ax.plot(x, ov.values, color=ov.color, linewidth=ov.width,
+                label=ov.label, zorder=4)
 
     # swing anchors
     for px, py, tag in spec.swings:
@@ -115,7 +131,7 @@ def _render_price(ax, spec: ChartSpec):
     ax.set_xlim(-1, spec.n)
     ax.tick_params(axis="x", labelbottom=False)
 
-    if spec.ma:
+    if spec.price_overlays or spec.price_bands:
         leg = ax.legend(loc="upper left", fontsize=7, frameon=False,
                         handlelength=1.2, ncol=3, columnspacing=1.2, borderpad=0.2)
         for txt in leg.get_texts():
@@ -134,13 +150,25 @@ def _render_price(ax, spec: ChartSpec):
 
 def _render_panel(ax, panel: Panel, spec: ChartSpec, is_last: bool):
     x = spec.x
-    # histogram (MACD) first, behind lines
+    # histogram (MACD / TTM Squeeze) first, behind lines
     if panel.hist is not None:
         _, hv = panel.hist
         hv = np.asarray(hv, dtype=float)
-        colors = [S.UP if (not np.isnan(v) and v >= 0) else S.DOWN for v in hv]
+        if panel.hist_colors is not None:
+            colors = panel.hist_colors           # TTM Squeeze 4-color scheme
+            alpha = 0.9
+        else:
+            colors = [S.UP if (not np.isnan(v) and v >= 0) else S.DOWN for v in hv]
+            alpha = 0.45
         ax.bar(x, np.nan_to_num(hv), width=0.8, color=colors, linewidth=0,
-               alpha=0.45, zorder=2)
+               alpha=alpha, zorder=2)
+
+    # zero-line squeeze dots (red = ON / compressed, green = OFF / fired)
+    if panel.dots:
+        dx = [d[0] for d in panel.dots]
+        dc = [d[1] for d in panel.dots]
+        ax.scatter(dx, [0.0] * len(dx), s=10, c=dc, marker="o", zorder=6,
+                   edgecolors="none")
 
     for hl in panel.hlines:
         ax.axhline(hl.y, color=hl.color, linestyle=hl.style,
@@ -171,12 +199,13 @@ def _render_panel(ax, panel: Panel, spec: ChartSpec, is_last: bool):
         ax.text(0.12, 1.0, panel.verdict, transform=ax.transAxes,
                 fontsize=7, color=_verdict_color(panel.verdict), va="top",
                 ha="left")
-    leg = ax.legend(loc="upper right", fontsize=6.5, frameon=False,
-                    handlelength=1.0, ncol=len(panel.lines), columnspacing=1.0,
-                    borderpad=0.1)
-    if leg:
-        for txt in leg.get_texts():
-            txt.set_color(S.MUTED)
+    if panel.lines:
+        leg = ax.legend(loc="upper right", fontsize=6.5, frameon=False,
+                        handlelength=1.0, ncol=len(panel.lines), columnspacing=1.0,
+                        borderpad=0.1)
+        if leg:
+            for txt in leg.get_texts():
+                txt.set_color(S.MUTED)
 
     if is_last:
         pos, labels = _date_ticks(spec)
