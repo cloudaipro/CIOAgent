@@ -660,16 +660,47 @@ async def t_refresh_prices(args):
 
 
 @tool("stock_panel",
-      "Render a one-stop single-stock panel image (price, fundamentals, revenue, links) and send it.",
-      {"symbol": str})
+      "Render a one-stop single-stock panel image (price, fundamentals, revenue, links) and send it. "
+      "Set with_indicators=true to ALSO send the technical-indicator chart "
+      "(RSI/MACD/KDJ + divergence) alongside the panel.",
+      {"symbol": str, "with_indicators": bool})
 async def t_stock_panel(args):
     from . import stock
     sym = args["symbol"].upper()
     path = stock.render_panel(sym)
     links = stock.related_links(sym)      # dict name->url
+    if args.get("with_indicators") and path:
+        try:
+            ind = stock.render_indicators(sym, "committee")
+            _PENDING.append(ind)
+        except Exception:
+            logging.getLogger("cio.agent").debug(
+                "indicator chart skipped for panel %s", sym, exc_info=True)
     return _emit_image(path,
         "Stock panel generated; it will be sent to the user.\n相關連結: " +
         " · ".join(f"[{k}]({v})" for k, v in links.items()),
+        f"No data for {sym}.")
+
+
+@tool("stock_indicators",
+      "Render a technical-indicator chart (指標視覺化) for one stock and send it: "
+      "candlesticks + MA20/60/120 with RSI / MACD / KDJ sub-panels and divergence + "
+      "swing markers (the same signals the committee profile uses). Use whenever the "
+      "user wants to SEE indicators, divergence, or overlay lines on the chart — this "
+      "is the in-house replacement for sending them to TradingView. 'profile' selects "
+      "the indicator/signal set (committee|swing|monitor, default committee).",
+      {"symbol": str, "profile": str})
+async def t_stock_indicators(args):
+    from . import stock
+    sym = args["symbol"].upper()
+    profile = (args.get("profile") or "committee").lower()
+    try:
+        path = stock.render_indicators(sym, profile)
+    except Exception as e:  # noqa: BLE001
+        return _text(f"Could not render indicators for {sym}: {e}")
+    return _emit_image(path,
+        f"{sym} 指標視覺化 ({profile}) generated; it will be sent to the user. "
+        "紅色 ▼ = bear divergence (價創新高、動能未跟上)。",
         f"No data for {sym}.")
 
 
@@ -1005,7 +1036,7 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_add_econ_event, t_list_econ_events, t_econ_events_pdf, t_econ_events_image,
              t_stock_quote, t_stock_history, t_list_strategies, t_run_strategy,
              t_run_strategy_profile,
-             t_refresh_prices, t_stock_panel, t_watchlist_prices,
+             t_refresh_prices, t_stock_panel, t_stock_indicators, t_watchlist_prices,
              t_list_watchlists, t_watchlist_add, t_watchlist_remove,
              t_watchlist_activate, t_run_alpha_hunter, t_market_regime,
              t_market_clock, t_web_search, t_web_scrape, t_committee,
