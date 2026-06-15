@@ -1,8 +1,9 @@
 # CIO Agent — AI Investment Committee
 
 A personal CIO agent for a solo operator. Talk to it on **Telegram**; it answers
-questions about your **stock portfolio**, imports CSVs, sends charts, fetches live
-quotes / runs 38 technical strategies, **searches the live web** (Firecrawl), and —
+questions about your **stock portfolio**, imports CSVs, sends charts, renders
+**technical-indicator overlay charts** (指標視覺化), fetches live quotes / runs 40
+technical strategies, **searches the live web** (Firecrawl), and —
 on demand — convenes a **multi-agent investment committee** (`/committee SYMBOL`)
 that researches a stock and returns an institutional-grade **PDF** report (with an
 optional **Traditional Chinese** version). Every trading morning a scheduled
@@ -20,14 +21,15 @@ backend outage or budget exhaustion degrades gracefully instead of silencing a r
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 41 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 42 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
                   │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
                   │     cio/memory.py     MemCore store: tiered notes, profile, eviction
                   │     cio/context.py    session-start memory injection (token-budgeted)
                   │     cio/recall.py     hybrid recall: FTS5 + fastembed + sqlite-vec (RRF)
-                  │     cio/stock/*       yfinance quotes, cache, 38 TA strategies, panel
+                  │     cio/stock/*       yfinance quotes, cache, 40 TA strategies, panel
+                  │     cio/stock/viz/*   指標視覺化: ChartSpec core → matplotlib PNG / bokeh HTML
                   │     cio/web.py        Firecrawl-backed web search + scrape
                   │     cio/timeutil.py   local TZ + is_trading_day (NYSE calendar)
                   │     cio/econ_calendar.py  high-impact econ-event store + deterministic NFP seeding
@@ -100,6 +102,37 @@ Full design: [docs/MEMORY-AND-CONTEXT.md](docs/MEMORY-AND-CONTEXT.md).
 Tools the agent gets: `remember` / `recall` / `forget`, `memory_search` /
 `memory_get`, `save_playbook` / `list_playbooks`.
 
+## Indicator visualization (指標視覺化)
+
+The in-house replacement for sending you to TradingView: `cio/stock/viz/*` renders
+**candlesticks + MA20/60/120 with profile-specific indicator sub-panels**, divergence
+and swing markers — as a PNG for Telegram / committee PDF, or interactive bokeh HTML
+for the dashboard.
+
+- **One core, two adapters (DRY)**: `spec.py` builds a backend-agnostic `ChartSpec`
+  (`build_spec`); `mpl_plot.py` renders it headless (Agg → PNG, the primary path) and
+  `bokeh_plot.py` renders the same spec to HTML (optional `bokeh` dep — no browser /
+  selenium needed). Entry point: `stock.render_indicators(symbol, profile, html=False)`.
+- **Profile-driven panels** (not hardcoded): the `profile` *determines* which indicators
+  are drawn — `committee` → trix/kst/rsi/cmf/er, `swing` → squeeze/kdj/fisher/efi + VIDYA
+  overlay, `monitor` → macd/stoch/pvo/squeeze. Pass an autoplot-style generic
+  `indicators` dict (`{label: {"type": ..., ...}}`, over/below types) for full manual control.
+- **TTM Squeeze done right**: the 4-color momentum histogram + red(ON)/green(OFF)
+  zero-line dots (thinkorswim TTM_Squeeze convention), and when Squeeze is shown the price
+  panel auto-overlays **Bollinger Bands** (SMA20±2σ) and **Keltner Channels** (EMA20±1.5·ATR).
+- **Divergence + swings**: bear/bull divergence comes from committee strategy flags
+  (`c_<IND>_DIVERGENCE_*`) with a geometric pivot fallback; deterministic swing anchors
+  (HH/LH/HL/LL) are capped to keep the chart readable.
+- **Agent self-vision**: the `stock_indicators` tool returns the rendered PNG to the model
+  as an image content block, so the agent reads its *own* chart and describes what it
+  actually sees (panel shapes, Squeeze colors, BB/KC positions, ▼/▲ markers) instead of
+  reciting the indicator standard from memory.
+- **Telegram**: `stock_indicators` (agent picks the profile to match intent); `stock_panel`
+  takes a `with_indicators` flag to attach the indicator chart alongside the quote panel.
+- **Docs**: `docs/indicator-viz/` — README + architecture / activity / control-flow /
+  data-flow / sequence diagrams (mermaid), plus a per-indicator `indicators/` guide set
+  (rendered chart + how-to-read + cited references) and the `img/` render samples.
+
 ## Investment committee (`/committee` or ask in chat)
 
 `/committee SYMBOL` runs a simulated buy-side process and returns a 14-section **PDF**
@@ -112,7 +145,7 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   simulate a verdict itself. The dashboard tags each run with its trigger (`chat` vs
   `/committee` vs `cli`). It's the one cost-bearing tool (~10-20 model calls); the agent
   confirms the symbol before firing.
-- **Pipeline**: gather data (price / fundamentals incl. **forward P/E** / 38 TA signals) →
+- **Pipeline**: gather data (price / fundamentals incl. **forward P/E** / 40 TA signals) →
   **9 specialist agents** (market, **geopolitical & macro**, equity, industry, valuation,
   quant, ETF, risk, catalyst) vote (valuation & equity weigh forward vs trailing P/E) →
   **debate** (bear-vs-bull + risk-vs-valuation cross-examination, then revised votes) →
@@ -170,7 +203,7 @@ A pre-market analyst that scans your watchlist and delivers a consolidated **mor
 briefing** — cheaper than the committee (one model call per security), so you can triage
 what deserves a deeper look.
 
-- **What it does**: for each security it gathers price / fundamentals / 38 TA signals plus
+- **What it does**: for each security it gathers price / fundamentals / 40 TA signals plus
   overnight web headlines (Firecrawl), then produces a normalized assessment — overall
   status, conviction (0–100), recommendation (Buy/Add/Hold/Monitor/Reduce/Sell), new risks,
   upcoming catalysts, whether the thesis changed, plus **external-risk exposure**
@@ -292,6 +325,7 @@ harfbuzz) — already present on most Linux desktops.
 - Upload a transactions CSV: `txn_date,symbol,action,quantity,price[,fees,currency,notes]`
   (`action` ∈ BUY/SELL/DIV)
 - Send a photo of a broker screen/receipt to have it read
+- `show NVDA indicators` / `指標視覺化 LRCX swing` — technical-indicator overlay chart (profile-driven panels, TTM Squeeze, BB/KC, divergence)
 - `/watchlist` — broker-style quote-board image for your active watchlist (manage lists in the dashboard)
 - `/committee SYMBOL` — full AI investment-committee PDF report (`/committee AAPL zh` for 繁體中文)
 - `/briefing [SYMBOL…]` — pre-market watchlist briefing PDF (add `zh` for 繁體中文; auto-runs 06:00 on trading days)
@@ -388,6 +422,9 @@ Pages:
   (chat id + subscribed-since), so you can see exactly who receives the scheduled pushes.
 - **Watchlist** — manage symbol lists (create/activate/rename/delete/search, add/remove
   symbols, drag-to-reorder, CSV import). One scoped JS for drag; no-JS safe.
+- **Indicators** — 指標視覺化 entry form: type a symbol + pick a profile and it renders the
+  interactive **bokeh HTML** indicator chart (candles + MA + profile sub-panels, TTM
+  Squeeze, BB/KC, divergence) inline. Requires the optional `bokeh` dep.
 - **Alpha Hunter** — the deterministic NASDAQ swing funnel. A **Run** button scans the
   universe and publishes the `Alpha-yyyy-mm-dd` watchlist (active); a **selection
   threshold** field (default 80) controls which candidates make the list; the page shows

@@ -10,14 +10,14 @@
 chains:
   # premium: paid head -> subscription -> cheap last resort (cio, wma).
   premium:
+  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 120000}
   - {service: claude, model: claude-opus-4-8}
-  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 200000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # standard: subscription head (same primary the specialists always used),
   # degrading to paid then cheap.
   standard:
-  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 200000}
   - {service: claude, model: claude-opus-4-8}
+  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # translation: Claude sonnet head — reliable on long markdown + strong
   # Traditional Chinese. Output is ALSO post-converted with OpenCC s2twp
