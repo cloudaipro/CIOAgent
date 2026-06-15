@@ -89,10 +89,37 @@ _HTML_TEMPLATE = """\
 # Public API
 # ---------------------------------------------------------------------------
 
+def _figures_html(appendix_images, section_title: str) -> str:
+    """Build an embedded-image appendix section. Images are inlined as base64
+    data URIs so rendering never depends on cwd or weasyprint base_url."""
+    import base64
+    import mimetypes
+
+    figs = []
+    for caption, path in appendix_images:
+        try:
+            data = Path(path).read_bytes()
+        except Exception:
+            continue
+        mime = mimetypes.guess_type(str(path))[0] or "image/png"
+        b64 = base64.b64encode(data).decode("ascii")
+        cap = f"<figcaption>{caption}</figcaption>" if caption else ""
+        figs.append(
+            f'<figure style="margin:8pt 0;text-align:center">'
+            f'<img src="data:{mime};base64,{b64}" '
+            f'style="max-width:100%;height:auto"/>{cap}</figure>'
+        )
+    if not figs:
+        return ""
+    return f'<h2 style="page-break-before:always">{section_title}</h2>' + "".join(figs)
+
+
 def markdown_to_pdf(
     md: str,
     out_path: "str | Path",
     title: str = "Investment Committee Report",
+    appendix_images: "list[tuple[str, str]] | None" = None,
+    appendix_title: str = "技術指標 (指標視覺化)",
 ) -> str:
     """
     Render a Markdown string to a PDF file at *out_path*.
@@ -100,6 +127,11 @@ def markdown_to_pdf(
     Uses:
       markdown (tables/fenced_code/sane_lists extensions) → HTML
       weasyprint → PDF with embedded Noto Sans CJK TC (handles TC + Latin).
+
+    ``appendix_images`` — optional ``[(caption, image_path), ...]`` appended as a
+    final figure section (e.g. the indicator-visualization chart). Images are
+    base64-embedded, so a missing/unreadable file is skipped silently and never
+    breaks the report.
 
     Lazy-imports both heavy libs inside this function — never at module load.
     Raises on failure so the caller can decide the fallback strategy.
@@ -121,6 +153,8 @@ def markdown_to_pdf(
         md,
         extensions=["tables", "fenced_code", "sane_lists"],
     )
+    if appendix_images:
+        html_body += _figures_html(appendix_images, appendix_title)
     full_html = _HTML_TEMPLATE.format(title=title, css=_CSS, body=html_body)
 
     out = Path(out_path)

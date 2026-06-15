@@ -81,9 +81,19 @@ async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
     reports_dir.mkdir(parents=True, exist_ok=True)
     report_title = f"Investment Committee Report: {sym}{lang_label}"
     pdf_path = reports_dir / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.pdf"
+    # Best-effort indicator-visualization chart for the dossier appendix.
+    appendix_images = []
+    try:
+        from .. import stock
+        chart_path = stock.render_indicators(sym, "committee")
+        appendix_images.append((f"{sym} · RSI / MACD / KDJ · divergence", chart_path))
+    except Exception:
+        log.debug("indicator chart skipped for %s", sym, exc_info=True)
+
     try:
         from .render_pdf import markdown_to_pdf
-        markdown_to_pdf(md, pdf_path, title=report_title)
+        markdown_to_pdf(md, pdf_path, title=report_title,
+                        appendix_images=appendix_images)
         doc_path = pdf_path
         # Also persist the markdown source next to the PDF.
         pdf_path.with_suffix(".md").write_text(md, encoding="utf-8")

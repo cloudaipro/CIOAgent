@@ -27,3 +27,7 @@ ib_async>=2.0          # community continuation of ib_insync (BSD-2, ib-api-relo
 weasyprint                     # HTML → PDF with CJK font support
 markdown                       # Markdown → HTML (tables/fenced_code/sane_lists exts)
 opencc-python-reimplemented    # guarantee Traditional (Taiwan) for zh committee reports
+# Indicator visualization (指標視覺化, cio/stock/viz) — PNG path needs nothing
+# beyond matplotlib (already above). bokeh is OPTIONAL: only the interactive HTML
+# dashboard chart uses it (no selenium/webdriver — PNG export is matplotlib's job).
+bokeh>=3.4                     # optional: cio/stock/viz interactive HTML adapter

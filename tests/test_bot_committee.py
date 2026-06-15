@@ -150,7 +150,7 @@ class TestCmdCommitteeGoodResult:
         monkeypatch.setattr("cio.committee.build_report", lambda sym, r: "# Committee Report for AAPL\n\nContent here.")
 
         # Monkeypatch markdown_to_pdf to write a fake PDF file (avoids real WeasyPrint in this test)
-        def _fake_pdf(md, out_path, title=""):
+        def _fake_pdf(md, out_path, title="", **kwargs):
             from pathlib import Path
             p = Path(out_path)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -182,7 +182,7 @@ class TestCmdCommitteeGoodResult:
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
         monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
 
-        def _fake_pdf(md, out_path, title=""):
+        def _fake_pdf(md, out_path, title="", **kwargs):
             from pathlib import Path
             p = Path(out_path)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +255,7 @@ class TestCmdCommitteeGoodResult:
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
         monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
 
-        def _fake_pdf(md, out_path, title=""):
+        def _fake_pdf(md, out_path, title="", **kwargs):
             from pathlib import Path
             p = Path(out_path)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -286,7 +286,7 @@ class TestCmdCommitteeGoodResult:
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
         monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
 
-        def _fake_pdf(md, out_path, title=""):
+        def _fake_pdf(md, out_path, title="", **kwargs):
             from pathlib import Path
             p = Path(out_path)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -325,7 +325,7 @@ class TestCmdCommitteeGuardedFields:
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
         monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
 
-        def _fake_pdf(md, out_path, title=""):
+        def _fake_pdf(md, out_path, title="", **kwargs):
             from pathlib import Path
             p = Path(out_path)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -361,8 +361,11 @@ class TestCmdCommitteeGuardedFields:
 # New: PDF output + TC language tests
 # ---------------------------------------------------------------------------
 
-def _fake_pdf_writer(md, out_path, title=""):
-    """Write a minimal fake PDF so open(pdf_path, 'rb') succeeds."""
+def _fake_pdf_writer(md, out_path, title="", **kwargs):
+    """Write a minimal fake PDF so open(pdf_path, 'rb') succeeds.
+
+    Accepts **kwargs so the optional appendix_images param (indicator-chart
+    embedding added by the viz feature) doesn't break the stub."""
     from pathlib import Path
     p = Path(out_path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -435,7 +438,7 @@ class TestCmdCommitteePdfOutput:
         monkeypatch.setattr("cio.bot.UPLOAD_DIR", tmp_path)
         monkeypatch.setattr("cio.bot.REPORTS_DIR", tmp_path)
 
-        def _boom_pdf(md, out_path, title=""):
+        def _boom_pdf(md, out_path, title="", **kwargs):
             raise RuntimeError("WeasyPrint not available")
 
         monkeypatch.setattr("cio.committee.render_pdf.markdown_to_pdf", _boom_pdf)

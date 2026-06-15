@@ -111,6 +111,20 @@ def run_strategy_profile(symbol_or_df, profile: str = "committee"):
     return profile_signals(symbol_or_df, profile)
 
 
+def render_indicators(symbol_or_df, profile: str = "committee", *, html: bool = False, **kw):
+    """
+    Render the technical-indicator chart (指標視覺化) — candles + MA, RSI/MACD/KDJ
+    sub-panels, divergence + swing markers — and return the output file path.
+
+    PNG by default (for messages / committee PDF). ``html=True`` produces an
+    interactive bokeh page for the dashboard (requires the optional bokeh dep).
+    """
+    from .viz import render_indicator_png, render_indicator_html
+    if html:
+        return render_indicator_html(symbol_or_df, profile, **kw)
+    return render_indicator_png(symbol_or_df, profile, **kw)
+
+
 __all__ = [
     "get_quote",
     "get_history",
@@ -126,6 +140,7 @@ __all__ = [
     "fundamentals",
     "normalize_symbol",
     "render_panel",
+    "render_indicators",
     "related_links",
     "STOCK_CACHE_DIR",
 ]

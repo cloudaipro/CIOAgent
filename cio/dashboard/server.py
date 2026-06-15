@@ -233,6 +233,20 @@ class _Handler(BaseHTTPRequestHandler):
                     log_locked_by_env=os.getenv("CIO_LOG_TO_FILE") is not None,
                     detailed_log=convlog.enabled(),
                     detailed_locked_by_env=convlog.locked_by_env())
+            elif path == "/indicators":
+                sym = (query.get("symbol", [""])[0] or "").strip().upper()
+                prof = (query.get("profile", ["committee"])[0] or "committee").lower()
+                if not sym:
+                    html = views.render_indicators_form(level)
+                else:
+                    from cio import stock
+                    try:
+                        html_path = stock.render_indicators(sym, prof, html=True)
+                        with open(html_path, encoding="utf-8") as fh:
+                            html = fh.read()
+                    except Exception as exc:
+                        html = views.render_indicators_form(
+                            level, error=f"{sym}: {exc}")
             elif path.startswith("/committee/"):
                 run_id = path.split("/committee/", 1)[1]
                 html = views.render_committee_run(run_id, transcript.get_run(run_id), level)

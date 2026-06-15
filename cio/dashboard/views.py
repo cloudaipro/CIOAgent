@@ -207,7 +207,7 @@ _NAV = [
     ("Overview", "/"), ("Token usage", "/usage"), ("Telegram", "/telegram"),
     ("Detailed history", "/detailed"),
     ("Committee", "/committee"), ("Watchlist", "/watchlist"),
-    ("Alpha Hunter", "/alpha"),
+    ("Alpha Hunter", "/alpha"), ("Indicators", "/indicators"),
     ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
     ("Memory", "/memory"), ("Playbooks", "/playbooks"),
     ("Econ events", "/econ"), ("Sanitizer", "/sanitizer"),
@@ -238,6 +238,28 @@ _THEME_JS = """<script>
   });
 })();
 </script>"""
+
+
+def render_indicators_form(level: int, error: str = "") -> str:
+    """指標視覺化 — symbol entry form; submits to GET /indicators?symbol=…"""
+    err = (f"<p style='color:#d92b2b'>{esc(error)}</p>" if error else "")
+    body = (
+        "<h2>指標視覺化 — Technical indicators</h2>"
+        "<p>Render candlesticks + MA, RSI / MACD / KDJ sub-panels and divergence "
+        "markers (interactive). Same signals the committee profile uses.</p>"
+        + err +
+        "<form method='get' action='/indicators'>"
+        "<input name='symbol' placeholder='LRCX' autofocus "
+        "style='padding:6px 8px;font-size:14px'/> "
+        "<select name='profile' style='padding:6px'>"
+        "<option value='committee'>committee</option>"
+        "<option value='swing'>swing</option>"
+        "<option value='monitor'>monitor</option>"
+        "</select> "
+        "<button type='submit' style='padding:6px 12px'>Render</button>"
+        "</form>"
+    )
+    return _page("Indicators", body, level)
 
 
 def _page(title: str, body: str, level: int) -> str:
