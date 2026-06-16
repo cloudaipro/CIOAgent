@@ -34,7 +34,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import alpha, charts, memory, recall, scheduler, watchlist
+from . import alpha, charts, memory, recall, richmsg, scheduler, watchlist
 from .agent import CIOAgent
 
 load_dotenv()
@@ -206,8 +206,9 @@ def _chunk(text: str, limit: int = TG_LIMIT) -> list[str]:
 
 async def _reply(update: Update, text: str, images: list[str],
                  docs: list[str] | None = None) -> None:
-    for chunk in (_chunk(text) if text else []):
-        await update.effective_message.reply_text(chunk)
+    if text and not await richmsg.reply_rich(update.effective_message, text):
+        for chunk in _chunk(text):
+            await update.effective_message.reply_text(chunk)
     for img in images:
         with open(img, "rb") as f:
             await update.effective_message.reply_photo(f)
@@ -426,8 +427,9 @@ async def cmd_alpha(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(
             "Alpha Hunter hit an error — check the logs. Nothing was published.")
         return
-    await update.effective_message.reply_text(
-        alpha.report.format_telegram(result, meta), parse_mode="Markdown")
+    _alpha_md = alpha.report.format_telegram(result, meta)
+    if not await richmsg.reply_rich(update.effective_message, _alpha_md):
+        await update.effective_message.reply_text(_alpha_md, parse_mode="Markdown")
 
 
 async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -536,7 +538,8 @@ async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         # ── 4. Send report document + short summary ───────────────────────
         with open(art.doc_path, "rb") as fh:
             await update.message.reply_document(fh, filename=art.doc_path.name)
-        await update.message.reply_text(art.summary, parse_mode="Markdown")
+        if not await richmsg.reply_rich(update.message, art.summary):
+            await update.message.reply_text(art.summary, parse_mode="Markdown")
 
     except Exception as e:
         log.exception("cmd_committee crashed unexpectedly")
@@ -641,7 +644,8 @@ async def _cmd_briefing_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
             with open(md_path, "rb") as fh:
                 await update.message.reply_document(fh, filename=md_path.name)
 
-        await update.message.reply_text(summary)
+        if not await richmsg.reply_rich(update.message, summary):
+            await update.message.reply_text(summary)
 
     except Exception as e:
         log.exception("cmd_briefing crashed unexpectedly")

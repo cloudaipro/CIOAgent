@@ -208,3 +208,98 @@ def test_sync_ibkr_error_when_disabled(tmp_db, monkeypatch):
 def test_sync_ibkr_error_when_snapshot_fails(tmp_db):
     res = portfolio.sync_ibkr(db_path=tmp_db, snapshot_fn=lambda: None)
     assert "error" in res
+
+
+# ---------------------------------------------------------------------------
+# portfolio.reconcile_ibkr — non-destructive quantity reconcile
+# ---------------------------------------------------------------------------
+
+def test_reconcile_flat_ibkr_closes_local_and_keeps_history(tmp_db):
+    """IBKR holds nothing (the screenshot case): every local position is
+    closed by a SELL at avg cost (zero realized P&L), and pre-existing
+    realized-P&L history survives."""
+    # Add a prior, already-closed AAPL round-trip: realized +200 to protect.
+    conn = db.connect(tmp_db)
+    with conn:
+        conn.executemany(
+            "INSERT INTO transactions "
+            "(txn_date,symbol,action,quantity,price,fees,currency) VALUES (?,?,?,?,?,?,?)",
+            [("2026-03-01", "TSLA", "BUY", 2, 100.0, 0, "USD"),
+             ("2026-03-10", "TSLA", "SELL", 2, 200.0, 0, "USD")],  # realized +200
+        )
+    conn.close()
+
+    snap = {"account": "U1234567", "positions": [], "cash": {}}
+    res = portfolio.reconcile_ibkr(db_path=tmp_db, snapshot_fn=lambda: snap)
+
+    assert res["account"] == "U1234567"
+    assert {c["symbol"] for c in res["closed"]} == {"AAPL", "MSFT"}
+    assert res["opened"] == []
+    # Open positions are gone.
+    assert len(portfolio.positions(tmp_db)) == 0
+    # The closes booked zero realized P&L (true exit price unknown), but the
+    # earlier TSLA gain is untouched -> history preserved, not wiped.
+    rpl = {r["symbol"]: r["realized_pl"] for r in portfolio.realized_pl(tmp_db).to_dict("records")}
+    assert rpl["TSLA"] == 200.0
+    assert rpl["AAPL"] == 0.0 and rpl["MSFT"] == 0.0
+
+
+def test_reconcile_partial_close_and_open(tmp_db):
+    """Local AAPL=10/MSFT=5; IBKR AAPL=4 (sell 6), MSFT=5 (match), NVDA=3
+    (buy 3 at broker cost)."""
+    snap = {
+        "account": "U1234567",
+        "positions": [
+            {"symbol": "AAPL", "quantity": 4.0, "avg_cost": 185.0,
+             "last_price": 190.0, "currency": "USD"},
+            {"symbol": "MSFT", "quantity": 5.0, "avg_cost": 420.0,
+             "last_price": 430.0, "currency": "USD"},
+            {"symbol": "NVDA", "quantity": 3.0, "avg_cost": 900.0,
+             "last_price": 950.0, "currency": "USD"},
+        ],
+        "cash": {},
+    }
+    res = portfolio.reconcile_ibkr(db_path=tmp_db, snapshot_fn=lambda: snap)
+    closed = {c["symbol"]: c for c in res["closed"]}
+    opened = {o["symbol"]: o for o in res["opened"]}
+    assert closed["AAPL"]["sold_qty"] == 6.0
+    assert "MSFT" not in closed  # already matches -> no trade
+    assert opened["NVDA"]["bought_qty"] == 3.0
+
+    pos = {p["symbol"]: p for p in portfolio.positions(tmp_db).to_dict("records")}
+    assert pos["AAPL"]["quantity"] == 4.0
+    assert pos["MSFT"]["quantity"] == 5.0
+    assert pos["NVDA"]["quantity"] == 3.0
+    assert pos["NVDA"]["avg_cost"] == 900.0  # adopted at IBKR avg cost
+    # Reconcile is idempotent: a second pass finds no drift.
+    res2 = portfolio.reconcile_ibkr(db_path=tmp_db, snapshot_fn=lambda: snap)
+    assert res2["closed"] == [] and res2["opened"] == []
+
+
+def test_reconcile_no_drift_books_nothing(tmp_db):
+    snap = {
+        "account": "U1234567",
+        "positions": [
+            {"symbol": "AAPL", "quantity": 10.0, "avg_cost": 185.0,
+             "last_price": None, "currency": "USD"},
+            {"symbol": "MSFT", "quantity": 5.0, "avg_cost": 420.0,
+             "last_price": None, "currency": "USD"},
+        ],
+        "cash": {},
+    }
+    res = portfolio.reconcile_ibkr(db_path=tmp_db, snapshot_fn=lambda: snap)
+    assert res["closed"] == [] and res["opened"] == []
+    pos = portfolio.positions(tmp_db)
+    assert sorted(pos["symbol"].tolist()) == ["AAPL", "MSFT"]
+
+
+def test_reconcile_error_when_snapshot_fails(tmp_db):
+    res = portfolio.reconcile_ibkr(db_path=tmp_db, snapshot_fn=lambda: None)
+    assert "error" in res
+    assert len(portfolio.positions(tmp_db)) == 2  # book untouched on failure
+
+
+def test_reconcile_error_when_disabled(tmp_db, monkeypatch):
+    monkeypatch.delenv("CIO_IBKR_TWS", raising=False)
+    res = portfolio.reconcile_ibkr(db_path=tmp_db)
+    assert "error" in res

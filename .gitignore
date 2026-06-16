@@ -261,3 +261,4 @@ data/reports/
 hermes-agent-main/
 openclaw-main/
 .claude/scheduled_tasks.lock
+python-telegram-bot-master/

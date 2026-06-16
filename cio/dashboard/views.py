@@ -1107,6 +1107,16 @@ def render_portfolio(summ, positions, realized, level: int,
         "<form method='post' action='/portfolio' class='inline'>"
         "<input type='hidden' name='action' value='sync_ibkr'>"
         "<button type='submit'>Sync from IBKR</button></form>"
+        # Non-destructive reconcile: books the minimum closing SELL / opening
+        # BUY trades so local quantities match IBKR, KEEPING realized-P&L and
+        # dividend history. Closes of positions IBKR no longer holds book zero
+        # realized P&L (true exit price unknown). Light confirm — it mutates.
+        "<form method='post' action='/portfolio' class='inline' "
+        "onsubmit=\"return confirm('Reconcile with IBKR? Books closing / "
+        "opening trades so quantities match the broker. History is kept; "
+        "closed-out positions realize zero P&amp;L (exit price unknown).');\">"
+        "<input type='hidden' name='action' value='reconcile_ibkr'>"
+        "<button type='submit'>Reconcile with IBKR</button></form>"
         # Destructive: replaces the whole transactions ledger with the live
         # IBKR positions (at broker average cost). DB is backed up first
         # server-side; still confirmed client-side like other wipes.
