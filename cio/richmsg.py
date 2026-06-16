@@ -49,11 +49,19 @@ async def send_rich_text(bot, chat_id, markdown: str, *, timeout: float = 20.0) 
     """
     if not enabled() or not markdown:
         return False
-    if len(markdown) > _MAX_CHARS:
-        return False  # too big for one rich message; let the legacy chunker run
     token = getattr(bot, "token", None)
     if not token:
         return False
+
+    # Repair Telegram Rich-Markdown pitfalls (e.g. a table with no blank line
+    # before it, which otherwise renders as flattened pipe text) before send.
+    from . import richfmt
+    for w in richfmt.validate(markdown):
+        log.info("rich markdown auto-fixed: %s", w)
+    markdown = richfmt.normalize(markdown)
+
+    if len(markdown) > _MAX_CHARS:
+        return False  # too big for one rich message; let the legacy chunker run
 
     payload = {"chat_id": chat_id, "rich_message": {"markdown": markdown}}
     try:
