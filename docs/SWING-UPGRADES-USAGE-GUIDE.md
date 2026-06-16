@@ -1,9 +1,9 @@
 # Swing Upgrades — Operator Usage Guide (Telegram & Dashboard)
 
-How the pass-1→4 swing work is used from the two operator surfaces: the Telegram bot
+How the pass-1→5 swing work is used from the two operator surfaces: the Telegram bot
 (`cio/bot.py`) and the local dashboard (`cio/dashboard/`). It states what is **live now**,
-what **data prerequisites** apply, and the three **gaps** where a feature is computed but
-not yet displayed (with the wiring needed to close them).
+what **data prerequisites** apply, and how to read the coverage columns (Anlst / CovEdge /
+CovFlag) that drive the Alpha Hunter ranking.
 
 ---
 
@@ -177,7 +177,98 @@ flowchart LR
 
 ---
 
-## 7. Command and route reference
+## 7. Reading Anlst / CovEdge / CovFlag in the `/alpha` candidate table
+
+These three columns appear in the **Selected candidates** section of the Dashboard
+`/alpha` page (and drive the ranking for Telegram `/alpha`). Every cell has a hover
+tooltip; a collapsible **Column guide** accordion below the table repeats this
+reference inline.
+
+### Anlst — Analyst Count
+
+Total analysts currently covering the stock (sum of strong\_buy + buy + hold + sell +
+strong\_sell from Finnhub). Requires `FINNHUB_API_KEY`; shows `—` without one.
+
+**Not absolute** — what matters is whether the count is high or low *for the stock's
+market cap*. A $300 M name with 3 analysts is neglected; a $3 B name with 3 analysts
+is severely neglected. The model adjusts via `expected_coverage()`:
+
+| Market cap | Expected analysts |
+|------------|------------------|
+| ~$300 M | ~3 |
+| ~$3 B | ~11 |
+| ~$30 B | ~19 |
+| ~$300 B | ~27 |
+| ~$3 T | ~35 |
+
+---
+
+### CovEdge — Coverage-Density Edge (0–100)
+
+Neglect score: how far the actual analyst count falls below the size-expected count,
+converted to a 0–100 scale. Higher = more under-covered for the stock's market cap =
+wider repricing window when a catalyst lands (Hong, Lim & Stein 2000).
+
+**Formula:** `50 − 2.5 × (actual_analysts − expected_analysts)`
+
+When `CIO_FINNHUB_INSTITUTIONAL=1`, institutional ownership % is blended in:
+`edge = avg(analyst_edge, 100 − institutional_pct)`.
+
+| CovEdge | Interpretation | Earnings score multiplier |
+|---------|---------------|--------------------------|
+| 70–100 | Significantly under-covered → strong edge window | ×1.12 → ×1.30 |
+| 55–69 | Slightly under-covered | ×1.03 → ×1.12 |
+| 45–54 | Neutral (on expectation) | ~×1.00 |
+| 30–44 | Slightly over-covered | ×0.88 → ×0.97 |
+| 0–29 | Saturated or value-trap | ×0.70 → ×0.88 |
+
+**Effect on ranking:** `final_score` amplifies the earnings/catalyst term by
+`1 + 0.30 × (CovEdge − 50) / 50`. Coverage **cannot manufacture a thesis** —
+if Earn = 0 the multiplier has no effect. Hover any CovEdge cell to see the
+exact per-row multiplier.
+
+---
+
+### CovFlag — Coverage Situation Label
+
+Qualitative diagnosis of the coverage picture. Hover a badge for the full
+explanation; summary:
+
+| Flag | Colour | Meaning | Ranking effect |
+|------|--------|---------|----------------|
+| `under-covered` | 🟢 green | Fewer analysts than size expects | Earnings amplified |
+| `saturated` | 🟡 amber | More analysts than expected | Earnings dampened |
+| `value-trap` | 🔴 red | 0 analysts + market cap < $1 B — un-investable neglect | Amplification zeroed |
+| `inst-neglected` | 🟢 green | Institutional ownership < 30 % — reinforces analyst neglect | Blended into CovEdge |
+| `inst-crowded` | 🟡 amber | Institutional ownership > 70 % — crowded from both angles | Blended into CovEdge |
+| `count-only` | neutral | No market-cap data; raw count used (conservative estimate) | Moderate edge at best |
+| `—` | — | Legacy row (pre-upgrade) or no Finnhub key | No coverage effect |
+
+---
+
+### Reading a row — worked examples
+
+```
+NVDA   Anlst=52   CovEdge=18   CovFlag=saturated
+```
+52 analysts on a mega-cap: well over expected. Catalyst already priced in fast.
+Earnings score **dampened ×0.82**. Ranks below a same-fundamentals neglected peer.
+
+```
+SMCI   Anlst=6    CovEdge=81   CovFlag=under-covered
+```
+Only 6 analysts on a mid-cap ($5–10 B). Catalyst news diffuses slowly.
+Earnings score **amplified ×1.19**. Ranks above a crowded peer with identical fundamentals.
+
+```
+XYZ    Anlst=0    CovEdge=0    CovFlag=value-trap
+```
+Zero coverage, micro-cap < $1 B. Not neglect — un-investable. Amplification forced
+to 0; name will not surface near the top regardless of other scores.
+
+---
+
+## 8. Command and route reference (quick ref)
 
 | Surface | Entry point | Backed by |
 |---------|-------------|-----------|
@@ -192,7 +283,7 @@ flowchart LR
 
 ---
 
-## 8. Status — pass 5 complete
+## 9. Status — pass 5 complete
 
 All three gaps in Section 6 are closed: coverage columns in `/alpha`, the
 "Sync trade ledger" trigger on `/portfolio`, and the Hold-posture line in the
