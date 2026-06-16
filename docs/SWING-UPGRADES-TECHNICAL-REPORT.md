@@ -322,6 +322,34 @@ stateDiagram-v2
 This is the structural implementation of the "肥 for the AI boom" conclusion: capture the
 multi-quarter right tail HFT cannot arbitrage, but never buy-and-forget.
 
+#### Action set: hold / trim / exit — and deliberately no "add"
+
+`hold_decision` returns one of three actions — `hold`, `trim`, `exit` — and intentionally
+has no "add" / pyramid action. Two reasons:
+
+- **Separation of concern.** `hold_decision` is a *risk-management* function over an
+  already-open position. Adding size is an *entry* decision, and entry is the Alpha Hunter
+  funnel's job: a candidate to add to is scored from scratch (coverage-amplified
+  `final_score`, four-layer gate) exactly like any new name. Routing "add" through the hold
+  manager would duplicate that logic with none of its gating.
+- **It contradicts the edge thesis.** The exploitable edge is *neglect* — information not
+  yet priced (Hong, Lim & Stein 2000). The hold logic encodes this directly: when the
+  behavior layer reaches euphoric (`behavior ≥ BEHAVIOR_EUPHORIC = 85`) in a live uptrend,
+  the action is **trim**, because the crowd has arrived and the edge is gone. Adding into
+  that strength is the precise opposite of the strategy; pyramiding also concentrates risk
+  into an already-extended position right where the catalyst-break guard exists to *reduce*
+  exposure.
+
+#### The stop is a posture, not a price
+
+`stop_mode` is an advisory **label** — `trailing` (GREEN/肥), `standard` (YELLOW), or
+`tight` (RED/勤) — not a computed stop price. `hold_decision` deliberately emits no number:
+there is no ATR, high-water-mark, or chandelier-exit calculation anywhere in `cio/alpha`,
+and none is persisted per position. The system tells the operator *what posture to hold the
+stop at*, not *where to place it*. This is consistent with the readonly IBKR integration
+(`ib_async` readonly): even a computed price could not be sent as an order, so the system
+stays report-only and the operator sets and manages the actual stop. See §11.
+
 ---
 
 ## 7. Methodology — the Three Man Team loop
@@ -510,6 +538,13 @@ turned into a standing invariant in every ARCHITECT-BRIEF after pass 1.
 - **IBKR backfill accuracy.** Seeded positions use today's date as a proxy entry date, so
   hold-period analytics are approximate until `reconcile_orphan` supplies a real entry;
   per-trade pct magnitude is correct.
+- **Hold stops are advisory labels, not prices.** `hold_decision.stop_mode` emits
+  `trailing` / `standard` / `tight` as a posture only; no trailing-stop *price* is computed
+  (no ATR / high-water-mark / chandelier-exit math exists) or persisted. Because IBKR is
+  readonly, the system could not place a stop order even if it computed one, so it stays
+  report-only — the operator sets and manages the actual stop. A future enhancement could
+  emit a concrete `stop_price` (e.g. `peak_high − k·ATR`) for display next to the posture,
+  requiring per-position high-water tracking + ATR; this is deferred by design, not a defect.
 - **Environment.** `pandas_ta` is not installed here, so the strategy-engine and
   visualization suites cannot run locally.
 

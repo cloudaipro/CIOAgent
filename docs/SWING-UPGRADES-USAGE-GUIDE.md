@@ -15,6 +15,7 @@ CovFlag) that drive the Alpha Hunter ranking.
 | Four-layer gate (2) | `/committee` PDF | `/committee/<run_id>` | Live |
 | Expectancy KPI (3) | — | `/expectancy` tab | Live; populate the ledger via the Sync button below |
 | Trade ledger / IBKR sync (2, 3) | — | `/portfolio` "Sync trade ledger" button | Trigger wired (pass 5); needs `CIO_IBKR_TWS` |
+| Market regime / trend light — 肥/勤 driver (3, 5) | `/alpha` top line | `/alpha` header badge + Run-history column | Live; QQQ 50/200MA regime, sets the hold posture |
 | Hold management 肥/勤 (3, 5) | `/briefing` (Hold posture line) | — | Surfaced in the monitor briefing since pass 5 |
 | Rule 6 / OOS check (4) | — | — | Analytic helper (`expectancy.oos_check`); documented only |
 
@@ -32,6 +33,15 @@ names that also carry a real catalyst rank higher, because `coverage.apply` ampl
 earnings/catalyst term inside `final_score`. Analyst count is live on the free Finnhub
 tier; institutional ownership only contributes on a premium key (otherwise None, no
 effect — see Section 5).
+
+**Reading the trend (rise/down) here.** The first line of the `/alpha` reply is the
+**market regime** light: `🟢/🟡/🔴 Market regime: GREEN/YELLOW/RED (detail)`. This *is* the
+"trend" referred to by the hold-management posture — it is the whole-market read from QQQ
+versus its 50- and 200-day moving averages (`cio/alpha/regime.py`), not a per-stock arrow.
+🟢 **GREEN** = uptrend (QQQ > 50MA > 200MA, 50MA rising) → posture 肥; 🔴 **RED** = downtrend
+(QQQ < 200MA) → posture 勤; 🟡 **YELLOW** = mixed → neutral. One light sets the posture for
+every held name. To see the trend *change* over time (a GREEN→RED flip), use the Dashboard
+`/alpha` Run-history table (Section 3) — Telegram shows only the current run.
 
 ### `/committee SYMBOL [zh]`
 Runs the committee and returns the report as a PDF (`zh` for Traditional Chinese). The
@@ -52,6 +62,17 @@ breaks (thesis gone) even if the chart still looks green; TRIM on euphoric behav
 uptrend or a defensive (RED) regime; HOLD while the layers stay intact. The posture is
 omitted for a name with no hold decision (degrades cleanly).
 
+Two things this line does **not** do, by design (see technical report §6):
+
+- **No "add" action.** The actions are only HOLD / TRIM / EXIT. Adding size is an *entry*
+  decision — run the name back through `/alpha`, where it is re-scored and gated. The hold
+  manager never says "buy more"; in fact a crowded (euphoric) name in an uptrend is
+  **trimmed**, because the neglect edge is gone.
+- **No stop price.** "trailing stop" is a *posture label*, not a number — CIOAgent does not
+  compute or tell you a stop price (no ATR / high-water-mark math, and IBKR is read-only so
+  it could not place the order anyway). You set and manage the actual stop yourself; the
+  briefing only tells you which posture to hold it at (trailing / standard / tight).
+
 ---
 
 ## 3. Dashboard usage
@@ -66,6 +87,13 @@ three columns — **Anlst** (analyst count), **CovEdge** (0–100 coverage-densi
 higher = more neglected), **CovFlag** (`under_covered` / `saturated` /
 `value_trap_floor` / `institutionally_*`) — so you can see *why* a name ranked where it
 did. Legacy rows from before the upgrade show `—` in those columns.
+
+**Reading the trend here.** The page header carries a `Market regime:` badge
+(GREEN / YELLOW / RED + detail) — the same QQQ trend light as Telegram `/alpha`, colour-coded.
+Below, the **Run history** table lists one row per run date with a regime column: comparing
+those rows is the *only* place a trend *change* over time is visible (e.g. a GREEN→RED flip
+that switches the posture from 肥 to 勤). Telegram shows only the latest run, so use this
+table when you want to see when the trend turned.
 
 ### `/expectancy` (added in pass 2)
 Fully wired: pulls `trades.list_closed()`, derives `avg_hold_days` from the entry/exit
