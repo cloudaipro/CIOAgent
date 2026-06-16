@@ -199,7 +199,7 @@ def test_gap1_alpha_table_shows_coverage_columns():
                               "coverage_flag": "under_covered"}]}
     html = views.render_alpha(latest, [], 0)
     assert "CovEdge" in html and "Anlst" in html          # header columns present
-    assert "under_covered" in html                        # coverage data rendered
+    assert "under-covered" in html                        # coverage badge rendered (hyphenated label)
 
 
 def test_gap2_portfolio_has_sync_trades_button():

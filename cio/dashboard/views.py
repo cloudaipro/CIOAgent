@@ -620,6 +620,70 @@ def render_playbooks(rows, level: int, flash: str = "", flash_err: bool = False)
 
 _REGIME_CLASS = {"GREEN": "up", "YELLOW": "warn", "RED": "down", "UNKNOWN": ""}
 
+# Coverage-flag display config: (badge_css_modifier, short_label, tooltip_text)
+_COV_FLAG_META: dict[str, tuple[str, str, str]] = {
+    "under_covered": (
+        "up",
+        "under-covered",
+        "Fewer analysts than expected for this market cap → catalyst news diffuses slowly → edge window (Hong, Lim & Stein 2000). Earnings score amplified.",
+    ),
+    "saturated": (
+        "warn",
+        "saturated",
+        "More analysts than expected → news prices in fast, little edge window. Earnings score dampened.",
+    ),
+    "value_trap_floor": (
+        "down",
+        "value-trap",
+        "0 analysts + market cap < $1 B → un-investable neglect. Coverage amplification forced to 0 (no edge).",
+    ),
+    "institutionally_neglected": (
+        "up",
+        "inst-neglected",
+        "Institutional ownership < 30 % → reinforces analyst neglect signal; slow repricing expected.",
+    ),
+    "institutionally_crowded": (
+        "warn",
+        "inst-crowded",
+        "Institutional ownership > 70 % → crowded from both angles; fast price discovery.",
+    ),
+    "count_only": (
+        "",
+        "count-only",
+        "No market-cap data → edge estimated from raw analyst count only (less precise; conservative).",
+    ),
+}
+
+
+def _cov_flag_badge(flag: str | None) -> str:
+    """Return a colored <span class='badge'> for a CovFlag value."""
+    if not flag:
+        return "—"
+    meta = _COV_FLAG_META.get(flag)
+    if not meta:
+        return esc(flag)
+    mod, label, tip = meta
+    cls = f"badge {mod}".strip() if mod else "badge"
+    return f"<span class='{cls}' title='{esc(tip)}'>{esc(label)}</span>"
+
+
+def _cov_edge_tip(edge: float | None) -> str:
+    """Human-readable tooltip for a CovEdge value."""
+    if edge is None:
+        return "Coverage edge unknown"
+    mult = 1.0 + 0.30 * (float(edge) - 50.0) / 50.0
+    if edge >= 70:
+        interp = "significantly under-covered"
+    elif edge >= 55:
+        interp = "slightly under-covered"
+    elif edge >= 45:
+        interp = "neutral coverage"
+    elif edge >= 30:
+        interp = "slightly over-covered"
+    else:
+        interp = "saturated / value-trap"
+    return f"Coverage edge {edge:.0f}/100 — {interp}. Earnings score ×{mult:.2f}."
+
 
 def _alpha_num(x, suffix: str = "") -> str:
     if x is None:
@@ -677,21 +741,32 @@ def render_alpha(latest, runs, level: int, threshold: float = 80.0, flash: str =
     ) or "<tr><td class='empty' colspan='4'>no sector data</td></tr>"
 
     # Candidates.
+    def _cand_row(c: dict) -> str:
+        anlst = c.get("analyst_count")
+        anlst_tip = (
+            f"{anlst} analyst(s) covering this name"
+            if anlst is not None else "Analyst count unavailable (no Finnhub key or no coverage data)"
+        )
+        edge = c.get("coverage_edge")
+        edge_tip = _cov_edge_tip(edge)
+        return (
+            f"<tr><td class='num'>{esc(c.get('rank'))}</td>"
+            f"<td><b>{esc(c.get('ticker'))}</b></td>"
+            f"<td>{esc(c.get('sector'))}</td>"
+            f"<td class='num'>{_alpha_num(c.get('final'))}</td>"
+            f"<td class='num'>{_alpha_num(c.get('momentum'))}</td>"
+            f"<td class='num'>{_alpha_num(c.get('trend'))}</td>"
+            f"<td class='num'>{_alpha_num(c.get('earnings'))}</td>"
+            f"<td class='num'>{_alpha_num(c.get('revenue_growth'), '%')}</td>"
+            f"<td class='num'>{_alpha_num(c.get('fwd_eps_growth'), '%')}</td>"
+            f"<td class='num'>{_alpha_num(c.get('surprise'))}</td>"
+            f"<td class='num' title='{esc(anlst_tip)}'>{_alpha_num(anlst)}</td>"
+            f"<td class='num' title='{esc(edge_tip)}'>{_alpha_num(edge)}</td>"
+            f"<td>{_cov_flag_badge(c.get('coverage_flag'))}</td></tr>"
+        )
+
     cand_rows = "".join(
-        f"<tr><td class='num'>{esc(c.get('rank'))}</td>"
-        f"<td><b>{esc(c.get('ticker'))}</b></td>"
-        f"<td>{esc(c.get('sector'))}</td>"
-        f"<td class='num'>{_alpha_num(c.get('final'))}</td>"
-        f"<td class='num'>{_alpha_num(c.get('momentum'))}</td>"
-        f"<td class='num'>{_alpha_num(c.get('trend'))}</td>"
-        f"<td class='num'>{_alpha_num(c.get('earnings'))}</td>"
-        f"<td class='num'>{_alpha_num(c.get('revenue_growth'), '%')}</td>"
-        f"<td class='num'>{_alpha_num(c.get('fwd_eps_growth'), '%')}</td>"
-        f"<td class='num'>{_alpha_num(c.get('surprise'))}</td>"
-        f"<td class='num'>{_alpha_num(c.get('analyst_count'))}</td>"
-        f"<td class='num'>{_alpha_num(c.get('coverage_edge'))}</td>"
-        f"<td>{esc(c.get('coverage_flag') or '—')}</td></tr>"
-        for c in (latest.get("candidates") or [])
+        _cand_row(c) for c in (latest.get("candidates") or [])
     ) or "<tr><td class='empty' colspan='13'>no candidates met the selection threshold</td></tr>"
 
     wl_link = ""
@@ -719,11 +794,47 @@ def render_alpha(latest, runs, level: int, threshold: float = 80.0, flash: str =
         "<table><tr><th>Sector</th><th>RS</th><th>3M</th><th>6M</th></tr>"
         f"{sect_rows}</table>"
         f"<h3>Selected candidates <span class='muted'>(Final ≥ {esc(threshold)})</span></h3>"
-        "<table><tr><th>#</th><th>Ticker</th><th>Sector</th><th>Final</th>"
-        "<th>Mom</th><th>Trend</th><th>Earn</th><th>Rev</th><th>fEPS</th>"
-        "<th>Surp</th><th title='analysts covering'>Anlst</th>"
-        "<th title='coverage-density edge 0-100; higher = more neglected'>CovEdge</th>"
-        f"<th>CovFlag</th></tr>{cand_rows}</table>"
+        "<table><tr>"
+        "<th title='Rank within this run'>#</th>"
+        "<th title='Stock ticker symbol'>Ticker</th>"
+        "<th title='GICS sector'>Sector</th>"
+        "<th title='Composite score (0-100): weighted blend of momentum, trend, earnings, growth, surprise. Threshold filter applied here.'>Final</th>"
+        "<th title='Momentum score (0-100): price relative strength vs QQQ benchmark'>Mom</th>"
+        "<th title='Trend score (0-100): EMA alignment and breakout structure'>Trend</th>"
+        "<th title='Earnings score (0-100): EPS beat magnitude and guidance, before coverage amplification'>Earn</th>"
+        "<th title='Revenue growth % year-over-year'>Rev</th>"
+        "<th title='Forward EPS growth % (next fiscal year estimate vs current)'>fEPS</th>"
+        "<th title='Earnings surprise score (0-100): beat rate and magnitude across last 4 quarters'>Surp</th>"
+        "<th title='Analyst count: total analysts covering this name (strong_buy + buy + hold + sell + strong_sell). Hover each row for detail. Requires Finnhub key.'>Anlst</th>"
+        "<th title='Coverage-density edge (0-100): 50=neutral, >50=under-covered for size (edge), <50=saturated (no edge). Multiplies earnings score by up to ×1.30 or down to ×0.70. Hover each row for the exact multiplier.'>CovEdge</th>"
+        "<th title='Coverage flag: qualitative label for the coverage situation. Hover the badge for a full explanation.'>CovFlag</th>"
+        f"</tr>{cand_rows}</table>"
+        "<details><summary>Column guide — Selected candidates</summary>"
+        "<table>"
+        "<tr><th>Column</th><th>What it measures</th><th>How to read it</th></tr>"
+        "<tr><td><b>Final</b></td><td>Composite score 0–100</td><td>Weighted blend: 30% Mom + 20% Trend + 30% Earn (coverage-amplified) + 10% Rev + 10% fEPS. Threshold (default 80) filters this column.</td></tr>"
+        "<tr><td><b>Mom</b></td><td>Price momentum 0–100</td><td>Relative strength vs QQQ over 3M/6M. Higher = outperforming the index.</td></tr>"
+        "<tr><td><b>Trend</b></td><td>Technical trend 0–100</td><td>EMA alignment + breakout structure. Higher = cleaner uptrend.</td></tr>"
+        "<tr><td><b>Earn</b></td><td>Earnings quality 0–100</td><td>EPS beat magnitude + guidance. <em>Before</em> coverage amplification — compare with Final to see the coverage lift.</td></tr>"
+        "<tr><td><b>Rev</b></td><td>Revenue growth %</td><td>Year-over-year. Raw fundamental, not scored.</td></tr>"
+        "<tr><td><b>fEPS</b></td><td>Forward EPS growth %</td><td>Next fiscal year estimate vs current. Captures consensus expectation.</td></tr>"
+        "<tr><td><b>Surp</b></td><td>Earnings surprise 0–100</td><td>Beat rate + magnitude over last 4 quarters. Anchors the catalyst evidence.</td></tr>"
+        "<tr><td><b>Anlst</b></td><td>Analyst count</td><td>Total analysts covering (any rating). Context: ~$300M cap expects ~3; ~$3B expects ~11; ~$30B expects ~19. Requires Finnhub key. — = unavailable.</td></tr>"
+        "<tr><td><b>CovEdge</b></td><td>Coverage-density edge 0–100</td><td>"
+        "50 = neutral (no effect). &gt;50 = under-covered for size → earnings score amplified (×1.00 to ×1.30). "
+        "&lt;50 = saturated → earnings score dampened (×1.00 to ×0.70). "
+        "Formula: 50 − 2.5 × (actual − expected_analysts). "
+        "Blended with institutional % when CIO_FINNHUB_INSTITUTIONAL=1. "
+        "Hover each cell for the exact multiplier.</td></tr>"
+        "<tr><td><b>CovFlag</b></td><td>Coverage situation label</td><td>"
+        "<span class='badge up'>under-covered</span> Fewer analysts than size expects → edge. "
+        "<span class='badge warn'>saturated</span> More analysts than expected → no edge. "
+        "<span class='badge down'>value-trap</span> 0 analysts + micro-cap → un-investable; amplification zeroed. "
+        "<span class='badge up'>inst-neglected</span> Institutional ownership &lt;30 % → reinforces neglect. "
+        "<span class='badge warn'>inst-crowded</span> Institutional ownership &gt;70 % → crowded. "
+        "<span class='badge'>count-only</span> No market-cap data; conservative estimate. "
+        "— = no coverage data or legacy row.</td></tr>"
+        "</table></details>"
         "<h3>Recent runs</h3>"
         "<table><tr><th>Date</th><th>Regime</th><th>Candidates</th><th>Universe</th>"
         f"<th>Watchlist</th><th>Ran at</th></tr>{hist_rows}</table>"
