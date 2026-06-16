@@ -125,24 +125,128 @@ def _thesis(report: ResearchReport) -> str:
     return "\n".join(lines) if lines else _NA
 
 
-def _four_layer_gate_block(review: dict) -> str:
-    """Compact four-layer gate summary for the dossier/appendix. Never raises."""
+# What each layer answers — used by the verbose (operator-facing) gate block.
+_LAYER_DOC: dict[str, str] = {
+    "catalyst": "WHY the price should move — earnings, guidance, filings, regulatory change",
+    "behavior": "Is the move NOT yet priced in — analyst-estimate revisions, fund flow, positioning, ownership",
+    "momentum": "Durable trend alpha — relative strength, 6–12 month trend, new highs",
+    "execution": "Entry timing only — RSI / MACD / KDJ / Squeeze / Fisher; a timing tool, never a reason to buy",
+}
+_GATE_ORDER = ("catalyst", "behavior", "momentum", "execution")
+
+
+def _four_layer_gate_block(review: dict, verbose: bool = False) -> str:
+    """Four-layer gate summary. Never raises.
+
+    verbose=False → compact score echo (audit appendix + dossier header).
+    verbose=True  → full self-explanatory block: per-layer table, causal
+                    reading order, and the exact verdict logic. Used for the
+                    operator-facing advisory section of the committee report.
+    """
     try:
         gate = review.get("four_layer_gate")
         if not gate:
             return ""
         scores = gate.get("scores") or gate.get("layer_scores") or {}
         blocked = gate.get("blocked_by") or []
+        missing = gate.get("missing") or []
         thresholds = gate.get("thresholds") or {}
-        lines: list[str] = []
-        for layer in ("catalyst", "behavior", "momentum", "execution"):
-            score = scores.get(layer)
-            thr = thresholds.get(layer, "?")
-            flag = " ⚠" if layer in blocked else ""
-            score_str = f"{score:.0f}" if isinstance(score, float) else ("—" if score is None else str(score))
-            lines.append(f"  {layer}: {score_str}/{thr}{flag}")
-        verdict = "**PASS**" if gate.get("pass") else f"**⚠ gate: blocked by {blocked}**"
-        return f"\n**Four-Layer Gate:** {verdict}\n" + "\n".join(lines) + "\n"
+        passed = bool(gate.get("pass"))
+
+        def _thr(layer: str) -> str:
+            try:
+                return f"{float(thresholds.get(layer)):.0f}"
+            except (TypeError, ValueError):
+                return "?"
+
+        def _score_str(layer: str) -> str:
+            s = scores.get(layer)
+            if isinstance(s, (int, float)):
+                return f"{s:.0f}"
+            return "—" if s is None else str(s)
+
+        # ── compact echo (unchanged behaviour) ──────────────────────────────
+        if not verbose:
+            lines: list[str] = []
+            for layer in _GATE_ORDER:
+                flag = " ⚠" if layer in blocked else ""
+                lines.append(f"  {layer}: {_score_str(layer)}/{_thr(layer)}{flag}")
+            verdict = "**PASS**" if passed else f"**⚠ gate: blocked by {blocked}**"
+            return f"\n**Four-Layer Gate:** {verdict}\n" + "\n".join(lines) + "\n"
+
+        # ── verbose, self-explanatory block ─────────────────────────────────
+        def _status(layer: str) -> str:
+            s = scores.get(layer)
+            if layer in missing or s is None:
+                return "✖ missing — blocks the gate" if layer in blocked else "— no evidence (optional layer)"
+            if layer in blocked:
+                return "⚠ below threshold — blocks the gate"
+            return "✅ clears threshold"
+
+        verdict = "**PASS**" if passed else "**⚠ BLOCKED**"
+        out: list[str] = [
+            f"**Verdict:** {verdict}",
+            "",
+            "The four-layer gate is a swing-trade safety check. It splits the "
+            "committee's evidence into four *causal* layers, scores each one "
+            "independently on a 0–100 scale, then **AND-gates** them: every layer "
+            "must clear its own threshold on its own merits, so one strong layer can "
+            "never paper over a weak one. It is the structural fix for the \"ROKU "
+            "trap\" — a flawless entry-timing reading (5/5 oscillators green) that "
+            "masked a catalyst which had already been spent.",
+            "",
+            "| Layer | What it asks | Score | Threshold | Status |",
+            "|---|---|---|---|---|",
+        ]
+        for layer in _GATE_ORDER:
+            out.append(
+                f"| {layer} | {_LAYER_DOC.get(layer, '')} | {_score_str(layer)} "
+                f"| {_thr(layer)} | {_status(layer)} |"
+            )
+
+        # Verdict logic — spelled out from this run's numbers.
+        if passed:
+            cleared = ", ".join(
+                f"{l} {_score_str(l)}≥{_thr(l)}" for l in _GATE_ORDER if l in scores
+            )
+            logic = (
+                "**Verdict logic.** The gate passes only when the mandatory "
+                "*catalyst* layer is present **and** every present layer sits at or "
+                f"above its own threshold. Here all clear: {cleared} → **PASS**."
+            )
+        else:
+            reasons: list[str] = []
+            for l in blocked:
+                if l in missing:
+                    extra = (" (catalyst is mandatory — a trade with no \"why\" is "
+                             "the indicator-soup trap)") if l == "catalyst" else ""
+                    reasons.append(f"*{l}* has no evidence at all{extra}")
+                else:
+                    reasons.append(f"*{l}* {_score_str(l)} is below its {_thr(l)} threshold")
+            logic = (
+                "**Verdict logic.** Because the layers are AND-gated, a single "
+                "failing layer blocks the whole gate. Blocked by: "
+                + "; ".join(reasons) + "."
+            )
+
+        out += [
+            "",
+            logic,
+            "",
+            "**How to read it (causal order).** A swing trade is *entered* on "
+            "**catalyst + behavior** — the move must be real *and* not yet priced "
+            "in — and only *timed* with **momentum + execution**. That is why the "
+            "\"why\" layers carry the higher bar (catalyst 60, behavior 50) while "
+            "execution carries the lowest (40): a green execution score is a timing "
+            "tool, never a reason to enter. Catalyst is the single **mandatory** "
+            "layer — its absence blocks the gate even if the other three are green.",
+            "",
+            "**This gate is advisory.** It makes a spent-catalyst / green-chart "
+            "setup visible to the committee; it does not change, override, or veto "
+            "the CIO vote.",
+            "",
+        ]
+        return "\n".join(out)
     except Exception:
         return ""
 

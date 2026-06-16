@@ -468,7 +468,7 @@ def build_report(symbol: str, result) -> str:
             # compact advisory block (swing upgrade #2, pass-2 wiring). Advisory
             # only — never blocks the committee run.
             rv_tirf = getattr(tirf_report, "review", None) or {}
-            gate_block = _four_layer_gate_block(rv_tirf)
+            gate_block = _four_layer_gate_block(rv_tirf, verbose=True)
             if gate_block and gate_block.strip():
                 sections.append("\n## Four-Layer Gate (swing advisory)\n\n"
                                 + gate_block)

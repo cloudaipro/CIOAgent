@@ -112,6 +112,59 @@ def test_committee_gate_from_specialist_evidence():
     assert "catalyst" in v["layer_scores"]
 
 
+# ===================== Four-layer gate block — verbose explanation ===========
+def _gate_review(**over):
+    base = {"four_layer_gate": {
+        "pass": True, "blocked_by": [], "missing": [],
+        "scores": {"catalyst": 73.0, "behavior": 77.0, "momentum": 75.0, "execution": 73.0},
+        "thresholds": {"catalyst": 60.0, "behavior": 50.0, "momentum": 50.0, "execution": 40.0}}}
+    base["four_layer_gate"].update(over)
+    return base
+
+
+def test_gate_block_verbose_pass_is_self_explanatory():
+    from cio.committee.tirf.dossier import _four_layer_gate_block
+    md = _four_layer_gate_block(_gate_review(), verbose=True)
+    # explanatory scaffold present
+    assert "| Layer | What it asks | Score | Threshold | Status |" in md
+    assert "AND-gate" in md and "ROKU" in md
+    assert "Verdict logic" in md and "advisory" in md
+    # every layer documented + its threshold shown
+    for layer in ("catalyst", "behavior", "momentum", "execution"):
+        assert layer in md
+    assert "catalyst 73≥60" in md            # logic spelled out from the numbers
+    assert "mandatory" in md                 # catalyst-mandatory rule explained
+
+
+def test_gate_block_verbose_blocked_names_failures():
+    from cio.committee.tirf.dossier import _four_layer_gate_block
+    md = _four_layer_gate_block(
+        _gate_review(**{"pass": False, "blocked_by": ["catalyst", "behavior"],
+                        "missing": ["catalyst"],
+                        "scores": {"behavior": 42.0, "momentum": 68.0, "execution": 90.0}}),
+        verbose=True)
+    assert "BLOCKED" in md
+    assert "has no evidence at all" in md            # missing catalyst
+    assert "indicator-soup trap" in md               # mandatory-catalyst rationale
+    assert "below its 50 threshold" in md            # behavior 42 < 50
+    assert "✅ clears threshold" in md                # execution 90 still shown green
+
+
+def test_gate_block_compact_unchanged_and_no_table():
+    from cio.committee.tirf.dossier import _four_layer_gate_block
+    md = _four_layer_gate_block(_gate_review(), verbose=False)
+    assert "**Four-Layer Gate:** **PASS**" in md
+    assert "catalyst: 73/60" in md
+    assert "| Layer |" not in md and "Verdict logic" not in md   # stays terse
+
+
+def test_gate_block_never_raises_on_garbage():
+    from cio.committee.tirf.dossier import _four_layer_gate_block
+    assert _four_layer_gate_block({}, verbose=True) == ""
+    assert _four_layer_gate_block({"four_layer_gate": None}, verbose=True) == ""
+    assert isinstance(_four_layer_gate_block({"four_layer_gate": {}}, verbose=True), str)
+
+
 # ===================== Phase 4 — edge / never-raises fuzz ====================
 def test_pure_functions_never_raise_on_garbage():
     # coverage
