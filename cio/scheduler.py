@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from . import econ_calendar, memory, portfolio, timeutil
+from . import econ_calendar, memory, portfolio, richmsg, timeutil
 
 log = logging.getLogger("cio.scheduler")
 
@@ -138,7 +138,8 @@ async def _send_briefing(bot, chat_ids, briefing_md: str, summary_text: str,
     sent_any = False
     for chat_id in chat_ids:
         try:
-            await bot.send_message(chat_id=chat_id, text=summary_text)
+            if not await richmsg.send_rich_text(bot, chat_id, summary_text):
+                await bot.send_message(chat_id=chat_id, text=summary_text)
             if doc_path is not None:
                 with open(doc_path, "rb") as fh:
                     await bot.send_document(chat_id=chat_id, document=fh,

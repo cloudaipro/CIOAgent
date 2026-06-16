@@ -314,6 +314,16 @@ In `.env`:
 - `CIO_FIRECRAWL_URL` — web search/scrape endpoint (defaults to a self-hosted
   `http://localhost:3002`, no key); set `FIRECRAWL_API_KEY` for Firecrawl cloud.
   Tune with `CIO_WEB_MAX_CHARS` (per-result cap, 6000) and `CIO_WEB_TIMEOUT` (45s).
+- **`CIO_IBKR_TWS`** — Interactive Brokers TWS / IB Gateway API socket as
+  `host:port` (or a bare port → `127.0.0.1:port`); unset disables every IBKR
+  button. Read-only API; the bot never trades. Optional `CIO_IBKR_CLIENT_ID`
+  (default 17) sets the API client id.
+- `CIO_RICH_MESSAGES` — Telegram **Rich Messages** rendering, on by default.
+  Reports, committee summaries, and briefings are sent via the Bot API 10.1
+  `sendRichMessage` endpoint, so full Markdown renders (headings, tables,
+  lists, block quotes, LaTeX) instead of the legacy `parse_mode` subset. Set
+  `0`/`false` to force the plain-text fallback. Each send falls back
+  automatically on any API error, so the kill switch is rarely needed.
 
 The committee report PDF needs WeasyPrint's system libraries (pango/cairo/gdk-pixbuf/
 harfbuzz) — already present on most Linux desktops.
@@ -422,6 +432,18 @@ Pages:
   (chat id + subscribed-since), so you can see exactly who receives the scheduled pushes.
 - **Watchlist** — manage symbol lists (create/activate/rename/delete/search, add/remove
   symbols, drag-to-reorder, CSV import). One scoped JS for drag; no-JS safe.
+- **Portfolio** — positions, cost basis, and P&L, with manual price entry, live-price
+  refresh, and transaction/price CSV import. Three IBKR controls (need `CIO_IBKR_TWS`),
+  in increasing force:
+  - **Sync from IBKR** — read-only. Writes broker mark prices and **reports** quantity
+    drift (`SYMBOL ibkr=… local=…`); never changes the book.
+  - **Reconcile with IBKR** — non-destructive. Books the minimum closing/opening trades
+    so quantities match the broker while **keeping** realized-P&L and dividend history.
+    Positions IBKR no longer holds are closed at average cost (zero realized P&L, since
+    the true exit price is unknown). Idempotent; backs up the DB first.
+  - **Align book with IBKR** — destructive. **Deletes the whole transactions ledger**
+    (realized-P&L + dividend history included) and rebuilds one BUY per IBKR position at
+    broker average cost — an exact broker mirror. Backs up the DB first; confirm required.
 - **Indicators** — 指標視覺化 entry form: type a symbol + pick a profile and it renders the
   interactive **bokeh HTML** indicator chart (candles + MA + profile sub-panels, TTM
   Squeeze, BB/KC, divergence) inline. Requires the optional `bokeh` dep.

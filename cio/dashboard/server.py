@@ -817,6 +817,24 @@ class _Handler(BaseHTTPRequestHandler):
                     msg = (f"aligned with IBKR {res['account']}: replaced "
                            f"{res['wiped']} transaction(s) with {res['adopted']} "
                            f"position(s) at broker avg cost (backup taken)")
+            elif action == "reconcile_ibkr":
+                # Non-destructive: book closing/opening trades so quantities
+                # match IBKR, preserving realized-P&L + dividend history. Back
+                # up first anyway — it appends transactions.
+                from cio import backup
+                backup.backup_all()
+                res = portfolio.reconcile_ibkr()
+                if "error" in res:
+                    msg, err = res["error"], True
+                else:
+                    n = len(res["closed"]) + len(res["opened"])
+                    msg = (f"reconciled with IBKR {res['account']}: "
+                           f"{len(res['closed'])} closed, {len(res['opened'])} "
+                           f"opened ({n} trade(s) booked), {res['priced']} "
+                           f"price(s) (backup taken)")
+                    if n == 0:
+                        msg = (f"IBKR {res['account']}: already aligned — no "
+                               f"drift to reconcile")
             elif action == "sync_ibkr":
                 res = portfolio.sync_ibkr()
                 if "error" in res:

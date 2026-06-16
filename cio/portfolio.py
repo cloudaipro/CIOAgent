@@ -384,6 +384,97 @@ def align_with_ibkr(db_path=db.DB_PATH, snapshot_fn=None) -> dict:
     return {"account": snap["account"], "wiped": wiped, "adopted": len(rows)}
 
 
+def reconcile_ibkr(db_path=db.DB_PATH, snapshot_fn=None) -> dict:
+    """Flatten quantity drift against IBKR by BOOKING transactions, not wiping.
+
+    Unlike :func:`align_with_ibkr` (which deletes the whole ledger), this
+    appends the minimum closing / opening trades so local quantities match
+    the broker while realized-P&L and dividend history are preserved:
+
+      * local quantity > IBKR  -> a SELL of the surplus at the local average
+        cost, so the close books **zero** realized P&L. The true exit price is
+        unknown (the shares simply left the broker — sold or transferred
+        elsewhere), so we record no invented gain or loss; the operator can
+        edit the SELL later if the real fill is known.
+      * IBKR quantity > local   -> a BUY of the shortfall at IBKR's average
+        cost, adopting the extra shares the broker reports.
+
+    Symbols absent at IBKR are treated as quantity 0 (a full close). Every
+    IBKR-held symbol's mark price is written to the prices table, same as
+    :func:`sync_ibkr`.
+
+    Returns {"account", "closed": [{symbol, sold_qty, price}],
+             "opened": [{symbol, bought_qty, price}], "priced": n} or
+    {"error": ...} mirroring sync_ibkr's failure modes.
+    """
+    from datetime import date as _date
+
+    if snapshot_fn is None:
+        from .data import ibkr
+        if not ibkr.enabled():
+            return {"error": "IBKR not configured (set CIO_IBKR_TWS=host:port)"}
+        snapshot_fn = ibkr.snapshot
+
+    snap = snapshot_fn()
+    if not snap:
+        return {"error": "TWS / IB Gateway unreachable — make sure it is "
+                         "running, logged in, and the API socket is enabled"}
+
+    today = _date.today().isoformat()
+    acct = snap["account"]
+    note = f"ibkr-reconcile {acct} {today}"
+
+    local = positions(db_path)
+    local_rows = {r["symbol"]: r for r in local.to_dict("records")} if len(local) else {}
+    ibkr_pos = {p["symbol"]: p for p in snap["positions"]}
+
+    closed, opened, new_txns = [], [], []
+
+    # Local positions that exceed IBKR (or that IBKR no longer holds): SELL the
+    # surplus at local average cost -> the close realizes zero P&L.
+    for sym, r in local_rows.items():
+        lq = float(r["quantity"])
+        iq = float(ibkr_pos[sym]["quantity"]) if sym in ibkr_pos else 0.0
+        diff = round(lq - iq, 6)
+        if diff > 1e-6:
+            avg = float(r["avg_cost"])
+            cur = (ibkr_pos.get(sym, {}) or {}).get("currency") or "USD"
+            new_txns.append((today, sym, "SELL", diff, avg, 0.0, cur, note))
+            closed.append({"symbol": sym, "sold_qty": diff, "price": avg})
+
+    # IBKR positions that exceed local: BUY the shortfall at IBKR average cost.
+    for sym, p in ibkr_pos.items():
+        iq = float(p["quantity"])
+        lq = float(local_rows[sym]["quantity"]) if sym in local_rows else 0.0
+        diff = round(iq - lq, 6)
+        if diff > 1e-6:
+            avg = float(p.get("avg_cost") or 0.0)
+            cur = p.get("currency") or "USD"
+            new_txns.append((today, sym, "BUY", diff, avg, 0.0, cur, note))
+            opened.append({"symbol": sym, "bought_qty": diff, "price": avg})
+
+    if new_txns:
+        conn = db.connect(db_path)
+        try:
+            with conn:
+                conn.executemany(
+                    "INSERT INTO transactions "
+                    "(txn_date,symbol,action,quantity,price,fees,currency,notes) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    new_txns,
+                )
+        finally:
+            conn.close()
+
+    priced = 0
+    for p in snap["positions"]:
+        if p.get("last_price") is not None:
+            set_price(p["symbol"], p["last_price"], db_path=db_path)
+            priced += 1
+
+    return {"account": acct, "closed": closed, "opened": opened, "priced": priced}
+
+
 def summary(db_path=db.DB_PATH) -> dict:
     """Portfolio totals."""
     pos = positions(db_path)
