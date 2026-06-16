@@ -34,6 +34,26 @@ def classify(close) -> dict:
             "ma200": round(ma200, 2), "slope_up": rising, "detail": detail}
 
 
+#: Regime -> position style (swing upgrade #5). A trending tape (GREEN) is where
+#: the fat right tail of an AI-cycle re-rating lives, so let winners run on a
+#: trailing stop (肥). A broken tape (RED) has no tail to catch — book gains, trade
+#: tighter and shorter (勤). YELLOW is mixed: half-measures, neutral.
+_STYLE_BY_REGIME = {
+    "GREEN":  {"style": "肥", "hold": "run_winners", "stop_mode": "trailing"},
+    "YELLOW": {"style": "neutral", "hold": "selective", "stop_mode": "standard"},
+    "RED":    {"style": "勤", "hold": "book_gains", "stop_mode": "tight"},
+}
+_STYLE_UNKNOWN = {"style": "neutral", "hold": "selective", "stop_mode": "standard"}
+
+
+def position_style(regime_status: str) -> dict:
+    """Map a regime status (GREEN/YELLOW/RED/UNKNOWN) to a hold/stop style dict.
+
+    Pure lookup; unknown statuses degrade to the neutral profile. Never raises.
+    """
+    return dict(_STYLE_BY_REGIME.get(str(regime_status or "").upper(), _STYLE_UNKNOWN))
+
+
 def evaluate(fetch=None) -> dict:
     """Fetch QQQ (~400 calendar days) and classify. Offline-safe -> UNKNOWN."""
     close = _qqq_close(fetch)
