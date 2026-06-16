@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from . import extract, repro, review, scoring, validate
+from . import extract, gate, repro, review, scoring, validate
 from .models import ResearchReport
 
 log = logging.getLogger(__name__)
@@ -82,6 +82,17 @@ def build_research_report(
         # Success metrics + CIO review scorecard (deterministic)
         report.metrics = validate.compute_metrics(report, man)
         report.review = review.cio_review(report)
+
+        # Four-layer gate (swing upgrade #2, pass-2 enforcement): aggregate every
+        # specialist's evidence into catalyst/behavior/momentum/execution scores and
+        # AND-gate them, so a report whose catalyst layer is red is flagged even when
+        # the execution layer is green (the ROKU trap). Advisory — surfaced, never
+        # blocks the run. Stashed in review (review_json) to persist with zero schema
+        # drift; promote to a first-class column later if wanted.
+        try:
+            report.review["four_layer_gate"] = gate.gate_evidence(report.all_evidence())
+        except Exception:
+            log.debug("four-layer gate compute skipped for %s", ticker, exc_info=True)
         return report
     except Exception:
         log.warning("build_research_report failed for %s", ticker, exc_info=True)

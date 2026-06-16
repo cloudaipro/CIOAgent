@@ -460,9 +460,18 @@ def build_report(symbol: str, result) -> str:
     if tirf_report is not None:
         try:
             from .tirf import tirf_appendix
+            from .tirf.dossier import _four_layer_gate_block
             appendix = tirf_appendix(tirf_report)
             if appendix and appendix.strip():
                 sections.append("\n" + appendix)
+            # Surface the four-layer gate verdict in the main report body as a
+            # compact advisory block (swing upgrade #2, pass-2 wiring). Advisory
+            # only — never blocks the committee run.
+            rv_tirf = getattr(tirf_report, "review", None) or {}
+            gate_block = _four_layer_gate_block(rv_tirf)
+            if gate_block and gate_block.strip():
+                sections.append("\n## Four-Layer Gate (swing advisory)\n\n"
+                                + gate_block)
         except Exception:
             pass
 

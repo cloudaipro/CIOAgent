@@ -207,7 +207,8 @@ _NAV = [
     ("Overview", "/"), ("Token usage", "/usage"), ("Telegram", "/telegram"),
     ("Detailed history", "/detailed"),
     ("Committee", "/committee"), ("Watchlist", "/watchlist"),
-    ("Alpha Hunter", "/alpha"), ("Indicators", "/indicators"),
+    ("Alpha Hunter", "/alpha"), ("Expectancy", "/expectancy"),
+    ("Indicators", "/indicators"),
     ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
     ("Memory", "/memory"), ("Playbooks", "/playbooks"),
     ("Econ events", "/econ"), ("Sanitizer", "/sanitizer"),
@@ -686,9 +687,12 @@ def render_alpha(latest, runs, level: int, threshold: float = 80.0, flash: str =
         f"<td class='num'>{_alpha_num(c.get('earnings'))}</td>"
         f"<td class='num'>{_alpha_num(c.get('revenue_growth'), '%')}</td>"
         f"<td class='num'>{_alpha_num(c.get('fwd_eps_growth'), '%')}</td>"
-        f"<td class='num'>{_alpha_num(c.get('surprise'))}</td></tr>"
+        f"<td class='num'>{_alpha_num(c.get('surprise'))}</td>"
+        f"<td class='num'>{_alpha_num(c.get('analyst_count'))}</td>"
+        f"<td class='num'>{_alpha_num(c.get('coverage_edge'))}</td>"
+        f"<td>{esc(c.get('coverage_flag') or '—')}</td></tr>"
         for c in (latest.get("candidates") or [])
-    ) or "<tr><td class='empty' colspan='10'>no candidates met the selection threshold</td></tr>"
+    ) or "<tr><td class='empty' colspan='13'>no candidates met the selection threshold</td></tr>"
 
     wl_link = ""
     if latest.get("watchlist_id"):
@@ -717,12 +721,123 @@ def render_alpha(latest, runs, level: int, threshold: float = 80.0, flash: str =
         f"<h3>Selected candidates <span class='muted'>(Final ≥ {esc(threshold)})</span></h3>"
         "<table><tr><th>#</th><th>Ticker</th><th>Sector</th><th>Final</th>"
         "<th>Mom</th><th>Trend</th><th>Earn</th><th>Rev</th><th>fEPS</th>"
-        f"<th>Surp</th></tr>{cand_rows}</table>"
+        "<th>Surp</th><th title='analysts covering'>Anlst</th>"
+        "<th title='coverage-density edge 0-100; higher = more neglected'>CovEdge</th>"
+        f"<th>CovFlag</th></tr>{cand_rows}</table>"
         "<h3>Recent runs</h3>"
         "<table><tr><th>Date</th><th>Regime</th><th>Candidates</th><th>Universe</th>"
         f"<th>Watchlist</th><th>Ran at</th></tr>{hist_rows}</table>"
     )
     return _page("Alpha Hunter", body, level)
+
+
+def _exp_num(x, suffix: str = "") -> str:
+    """Format an expectancy stat value; None/missing → '—'."""
+    if x is None:
+        return "—"
+    if isinstance(x, float):
+        return f"{x:g}{suffix}"
+    return f"{esc(x)}{suffix}"
+
+
+def render_expectancy(closed_trades: list, summary: dict, level: int) -> str:
+    """Expectancy KPI panel (swing upgrade #3b).
+
+    Headline = expectancy (pct and R); profit_factor / SQN / payoff_ratio / n
+    are the primary stats. Win-rate is shown small/demoted — it is a sub-stat,
+    not the headline metric (the whole point of the upgrade). Empty-ledger case
+    renders gracefully.
+    """
+    if not closed_trades or not summary:
+        body = (
+            "<h1>Expectancy</h1>"
+            "<p class='empty'>No closed trades yet. Open and close a position via the "
+            "trade ledger to compute expectancy. Win-rate is demoted here by design — "
+            "it cannot distinguish a profitable book from a loss-making one.</p>"
+        )
+        return _page("Expectancy", body, level)
+
+    exp_pct = summary.get("expectancy_pct")
+    exp_r = summary.get("expectancy_R")
+    n = summary.get("n", 0)
+    low_sample = summary.get("low_sample", True)
+    pf = summary.get("profit_factor")
+    sqn_val = summary.get("sqn")
+    payoff = summary.get("payoff_ratio")
+    win_rate = summary.get("win_rate")
+    avg_win = summary.get("avg_win")
+    avg_loss = summary.get("avg_loss")
+    ann = summary.get("annualized_pct")
+    tpy = summary.get("turns_per_year")
+
+    exp_pct_str = f"{exp_pct:+.2f}%" if isinstance(exp_pct, float) else "—"
+    exp_r_str = f"{exp_r:+.3f}R" if isinstance(exp_r, float) else "—"
+    exp_class = "up" if isinstance(exp_pct, float) and exp_pct > 0 else (
+        "down" if isinstance(exp_pct, float) and exp_pct < 0 else "")
+
+    low_sample_note = (
+        f"<p class='empty'>⚠ Low sample ({n} trades, need 20+ for confidence).</p>"
+        if low_sample else ""
+    )
+
+    ann_card = ""
+    if ann is not None:
+        ann_class = "up" if ann > 0 else "down"
+        ann_card = (
+            f"<div class='stat'><div class='k'>Annualized (est.)</div>"
+            f"<div class='v {ann_class}'>{_exp_num(ann, '%')}"
+            f"<span class='sub'>{_exp_num(tpy)} turns/yr</span></div></div>"
+        )
+
+    cards = (
+        f"<div class='cards'>"
+        f"<div class='stat'><div class='k'>Expectancy / trade</div>"
+        f"<div class='v {exp_class}'>{exp_pct_str}"
+        f"<span class='sub'>{exp_r_str}</span></div></div>"
+        f"<div class='stat'><div class='k'>Profit factor</div>"
+        f"<div class='v'>{_exp_num(pf)}</div></div>"
+        f"<div class='stat'><div class='k'>SQN</div>"
+        f"<div class='v'>{_exp_num(sqn_val)}</div></div>"
+        f"<div class='stat'><div class='k'>Payoff ratio</div>"
+        f"<div class='v'>{_exp_num(payoff)}</div></div>"
+        f"<div class='stat'><div class='k'>Trades (n)</div>"
+        f"<div class='v'>{esc(n)}</div></div>"
+        f"{ann_card}"
+        f"</div>"
+    )
+
+    # Win-rate demoted to a sub-stat table below the headline cards.
+    sub_table = (
+        "<h2>Sub-stats (demoted — use expectancy, not win-rate)</h2>"
+        "<table><tr><th>Win rate</th><th>Avg win</th><th>Avg loss</th></tr>"
+        f"<tr><td class='num'>{_exp_num(win_rate, '%') if win_rate is not None else '—'}</td>"
+        f"<td class='num up'>{_exp_num(avg_win, '%')}</td>"
+        f"<td class='num down'>{_exp_num(avg_loss, '%')}</td></tr></table>"
+    )
+
+    # Compact closed-trades ledger.
+    trade_rows = "".join(
+        f"<tr><td>{esc(t.get('ticker'))}</td>"
+        f"<td>{esc(t.get('entry_date'))}</td>"
+        f"<td>{esc(t.get('exit_date'))}</td>"
+        f"<td class='num {'up' if (t.get('pct') or 0) > 0 else 'down'}'>"
+        f"{_exp_num(t.get('pct'), '%')}</td>"
+        f"<td class='num'>{_exp_num(t.get('r_multiple'), 'R')}</td>"
+        f"<td>{esc(t.get('style') or '—')}</td></tr>"
+        for t in closed_trades[:50]  # cap display at 50
+    ) or "<tr><td class='empty' colspan='6'>no trades</td></tr>"
+
+    body = (
+        "<h1>Expectancy</h1>"
+        "<p>Expectancy = win% × avg_win − loss% × avg_loss. "
+        "A 65%-win book can lose money; a 45%-win book can compound hard. "
+        "Expectancy captures both magnitude and frequency. Win-rate is demoted.</p>"
+        + low_sample_note + cards + sub_table +
+        "<h2>Closed trades ledger</h2>"
+        "<table><tr><th>Ticker</th><th>Entry</th><th>Exit</th>"
+        f"<th>Pct</th><th>R</th><th>Style</th></tr>{trade_rows}</table>"
+    )
+    return _page("Expectancy", body, level)
 
 
 def render_econ_events(rows, level: int, flash: str = "", flash_err: bool = False) -> str:
@@ -1102,6 +1217,13 @@ def render_portfolio(summ, positions, realized, level: int,
         "<form method='post' action='/portfolio' class='inline'>"
         "<input type='hidden' name='action' value='refresh_live'>"
         "<button type='submit'>Refresh live prices</button></form>"
+        # Swing trade-ledger sync (cio.alpha.trades) — seeds open positions then
+        # logs fills, so /expectancy has data. Distinct from the portfolio drift
+        # sync below. No-op with a flash when CIO_IBKR_TWS is unset.
+        "<form method='post' action='/portfolio' class='inline'>"
+        "<input type='hidden' name='action' value='sync_trades'>"
+        "<button type='submit' title='populate the swing trade ledger from IBKR fills "
+        "for the Expectancy tab'>Sync trade ledger</button></form>"
         # IBKR sync: broker marks + qty-drift report. Server-side no-op with a
         # flash error when CIO_IBKR_TWS is unset, so always shown.
         "<form method='post' action='/portfolio' class='inline'>"

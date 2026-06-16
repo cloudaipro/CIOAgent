@@ -10,6 +10,13 @@ Why profiles (research-backed, 2026-06):
     slow/smoothed indicators for position decisions, fast oscillators +
     volatility compression for short-term (wave/swing) timing.
 
+Four-layer architecture (swing upgrade #2): every strategy here belongs to the
+EXECUTION layer — entry timing, turn detection, stop placement. They are NOT
+signal generators and must never originate a trade on their own. The "why" comes
+from the catalyst + behavior layers (committee/TIRF) and the momentum layer
+(cio.alpha.momentum); these oscillators only *time* a thesis those layers already
+established. A full-bull TA composite with no catalyst is the ROKU trap, not a buy.
+
 Each profile picks a small cross-category set tuned to one CIOAgent situation:
 
   committee — deep position decisions (slow, high-conviction, divergence-aware)
@@ -62,12 +69,19 @@ PROFILES: dict[str, dict[str, Any]] = {
     "swing": {
         "strategies": ["squeeze", "kdj", "fisher", "efi", "vidya"],
         "window": 3,
+        "layer": "execution",
         "description": (
             "Wave-trading set: SQUEEZE (coil/release setup), KDJ (entry timing), "
-            "FISHER (turn detection), EFI (volume force), VIDYA (adaptive trend)."
+            "FISHER (turn detection), EFI (volume force), VIDYA (adaptive trend). "
+            "EXECUTION layer only — times a catalyst, never originates one."
         ),
     },
 }
+
+#: Every profile in this module is the EXECUTION layer of the four-layer
+#: architecture; callers reading a composite from here must AND it with the
+#: catalyst/behavior/momentum layers (see cio.committee.tirf.gate), never alone.
+EXECUTION_LAYER = "execution"
 
 #: Aliases accepted anywhere a profile name is taken.
 ALIASES = {"wave": "swing", "wma": "monitor", "watchlist": "monitor"}

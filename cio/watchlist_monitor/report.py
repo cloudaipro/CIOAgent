@@ -148,6 +148,15 @@ def _security_block(a: dict) -> str:
         f"**Thesis change:** {a.get('investment_thesis_change', 'unchanged')}",
         "",
     ]
+    hd = a.get("hold_decision")
+    if isinstance(hd, dict) and hd.get("action"):
+        # Four-layer / regime hold posture (swing upgrade #5): action + why.
+        style = hd.get("style") or "neutral"
+        stop = hd.get("stop_mode") or "standard"
+        body.append(
+            f"**Hold posture:** {hd['action'].upper()} "
+            f"({style}, {stop} stop) — {hd.get('reason', '')}")
+        body.append("")
     if a.get("summary"):
         body += [a["summary"], ""]
     body += [

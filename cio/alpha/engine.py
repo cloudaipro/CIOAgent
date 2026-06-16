@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from . import earnings, momentum, quality, regime, scoring, sectors, universe, metrics
+from . import earnings, momentum, quality, regime, scoring, sectors, universe, metrics, coverage
 
 log = logging.getLogger(__name__)
 
@@ -56,8 +56,17 @@ def _ohlcv(symbol, fetch):
         return None
 
 
-def _evaluate_ticker(symbol, *, fetch, fundamentals_fn, surprises_fn,
-                     qqq_r3, qqq_r6, regime_status) -> dict | None:
+def _market_cap(fund: dict) -> float | None:
+    """Best-effort market cap (USD millions) from the fundamentals dict."""
+    for key in ("market_cap", "marketCap", "marketCapitalization"):
+        v = fund.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return None
+
+
+def _evaluate_ticker(symbol, *, fetch, fundamentals_fn, surprises_fn, recs_fn,
+                     institutional_fn, qqq_r3, qqq_r6, regime_status) -> dict | None:
     """Run all per-ticker layers. Returns a candidate dict, or None if no OHLCV."""
     df = _ohlcv(symbol, fetch)
     if df is None:
@@ -77,10 +86,27 @@ def _evaluate_ticker(symbol, *, fetch, fundamentals_fn, surprises_fn,
     except Exception:
         surprises = None
 
+    # Coverage density (swing upgrade #1): neglected names get their catalyst
+    # amplified. Degrades to neutral (edge 50, no effect) when recs unavailable.
+    recs = None
+    if recs_fn is not None:
+        try:
+            recs = recs_fn(symbol)
+        except Exception:
+            recs = None
+    inst_pct = None
+    if institutional_fn is not None:
+        try:
+            inst_pct = institutional_fn(symbol)
+        except Exception:
+            inst_pct = None
+    cov = coverage.coverage_score(recs, _market_cap(fund), institutional_pct=inst_pct)
+
     e = earnings.evaluate(q["fwd_eps_growth"], df, surprises)
     m = momentum.evaluate(close, qqq_r3, qqq_r6)
     s = scoring.final_score(m["momentum_score"], m["trend_score"],
-                            e["earnings_score"], q["revenue_growth"], df)
+                            e["earnings_score"], q["revenue_growth"], df,
+                            coverage_edge=cov["coverage_edge"])
 
     return {
         "ticker": symbol,
@@ -92,6 +118,10 @@ def _evaluate_ticker(symbol, *, fetch, fundamentals_fn, surprises_fn,
         "trend": m["trend_score"],
         "rs_pass": m["rs_pass"],
         "earnings": e["earnings_score"],
+        "earnings_amplified": s.get("earnings_amplified"),
+        "analyst_count": cov["analyst_count"],
+        "coverage_edge": cov["coverage_edge"],
+        "coverage_flag": cov["flag"],
         "revenue_growth": _round(q["revenue_growth"]),
         "fwd_eps_growth": _round(q["fwd_eps_growth"]),
         "surprise": e["surprise_score"],
@@ -101,9 +131,16 @@ def _evaluate_ticker(symbol, *, fetch, fundamentals_fn, surprises_fn,
 
 
 def run(*, universe_path=None, fetch=None, fundamentals_fn=None,
-        surprises_fn=None) -> AlphaResult:
+        surprises_fn=None, recs_fn=None, institutional_fn=None) -> AlphaResult:
     """Execute the full funnel. All fetchers default to the live data layer; pass
-    your own for offline tests. Never raises — degrades to UNKNOWN/empty."""
+    your own for offline tests. Never raises — degrades to UNKNOWN/empty.
+
+    *recs_fn* (symbol -> analyst-rec dict) feeds the coverage-density amplifier;
+    defaults to ``finnhub.analyst_recs``. Pass ``recs_fn=lambda s: None`` to disable.
+    *institutional_fn* (symbol -> institutional-ownership %) is the second coverage
+    signal; defaults to the EDGAR 13F aggregator when available, else None (no
+    effect). Pass your own for offline tests.
+    """
     if fetch is None:
         from ..stock import data as stockdata
         fetch = stockdata.load_or_download_stock_data
@@ -113,6 +150,15 @@ def run(*, universe_path=None, fetch=None, fundamentals_fn=None,
     if surprises_fn is None:
         from ..data import finnhub
         surprises_fn = finnhub.earnings_surprises
+    if recs_fn is None:
+        from ..data import finnhub
+        recs_fn = finnhub.analyst_recs
+    if institutional_fn is None:
+        # Finnhub /stock/ownership (13F). Returns a real % on a premium key, None on
+        # the free tier (403) or when FINNHUB_API_KEY is unset — coverage treats None
+        # as "no signal", so the funnel stays back-compatible / offline-safe.
+        from ..data import finnhub
+        institutional_fn = finnhub.institutional_ownership_pct
 
     run_date = datetime.now().strftime("%Y-%m-%d")
 
@@ -131,8 +177,8 @@ def run(*, universe_path=None, fetch=None, fundamentals_fn=None,
     for sym in syms:
         cand = _evaluate_ticker(
             sym, fetch=fetch, fundamentals_fn=fundamentals_fn,
-            surprises_fn=surprises_fn, qqq_r3=qqq_r3, qqq_r6=qqq_r6,
-            regime_status=reg["status"])
+            surprises_fn=surprises_fn, recs_fn=recs_fn, institutional_fn=institutional_fn,
+            qqq_r3=qqq_r3, qqq_r6=qqq_r6, regime_status=reg["status"])
         if cand is not None:
             candidates.append(cand)
 

@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, urlencode
 
 from cio import alpha, convlog, db, devcapture, econ_calendar, memory, portfolio, version, watchlist
-from cio.alpha import store as alpha_store
+from cio.alpha import expectancy as alpha_expectancy, store as alpha_store, trades as alpha_trades
 from cio.committee import agent_memory, models, sanitizer_log, transcript, usage
 from . import views
 
@@ -205,6 +205,25 @@ class _Handler(BaseHTTPRequestHandler):
                     threshold=alpha_store.get_threshold(),
                     flash=query.get("msg", [""])[0],
                     flash_err=query.get("err", ["0"])[0] == "1")
+            elif path == "/expectancy":
+                closed = alpha_trades.list_closed()
+                # avg_hold_days from mean of (exit_date - entry_date) over closed trades
+                avg_hold = None
+                try:
+                    from datetime import datetime as _dt
+                    holds = []
+                    for t in closed:
+                        try:
+                            entry = _dt.fromisoformat(str(t["entry_date"]))
+                            exit_ = _dt.fromisoformat(str(t["exit_date"]))
+                            holds.append((exit_ - entry).days)
+                        except Exception:
+                            continue
+                    avg_hold = sum(holds) / len(holds) if holds else None
+                except Exception:
+                    pass
+                summ = alpha_expectancy.summary(closed, avg_hold_days=avg_hold) if closed else {}
+                html = views.render_expectancy(closed, summ, level)
             elif path == "/portfolio":
                 html = views.render_portfolio(
                     portfolio.summary(),
@@ -805,6 +824,20 @@ class _Handler(BaseHTTPRequestHandler):
                 res = portfolio.refresh_live_prices()
                 msg = f"refreshed {len(res['updated'])}, failed {len(res['failed'])}"
                 err = bool(res["failed"]) and not res["updated"]
+            elif action == "sync_trades":
+                # Populate the swing trade ledger (cio.alpha.trades) from IBKR fills
+                # so the Expectancy tab has data. Read-only on IBKR; no-op when
+                # CIO_IBKR_TWS is unset. Distinct from the portfolio drift sync.
+                from cio.data import ibkr as _ibkr
+                if not _ibkr.enabled():
+                    msg, err = "IBKR disabled — set CIO_IBKR_TWS to sync the trade ledger", True
+                else:
+                    res = _ibkr.sync_trades()
+                    if res.get("error"):
+                        msg, err = f"trade-ledger sync error: {res['error']}", True
+                    else:
+                        msg = (f"trade ledger: {len(res['synced'])} fill(s) logged, "
+                               f"{res['seeded']} position(s) seeded, {res['skipped']} skipped")
             elif action == "align_ibkr":
                 # Destructive ledger rebuild — restore point FIRST, same
                 # backup-before-delete rule as nightly maintenance.

@@ -125,6 +125,28 @@ def _thesis(report: ResearchReport) -> str:
     return "\n".join(lines) if lines else _NA
 
 
+def _four_layer_gate_block(review: dict) -> str:
+    """Compact four-layer gate summary for the dossier/appendix. Never raises."""
+    try:
+        gate = review.get("four_layer_gate")
+        if not gate:
+            return ""
+        scores = gate.get("scores") or gate.get("layer_scores") or {}
+        blocked = gate.get("blocked_by") or []
+        thresholds = gate.get("thresholds") or {}
+        lines: list[str] = []
+        for layer in ("catalyst", "behavior", "momentum", "execution"):
+            score = scores.get(layer)
+            thr = thresholds.get(layer, "?")
+            flag = " ⚠" if layer in blocked else ""
+            score_str = f"{score:.0f}" if isinstance(score, float) else ("—" if score is None else str(score))
+            lines.append(f"  {layer}: {score_str}/{thr}{flag}")
+        verdict = "**PASS**" if gate.get("pass") else f"**⚠ gate: blocked by {blocked}**"
+        return f"\n**Four-Layer Gate:** {verdict}\n" + "\n".join(lines) + "\n"
+    except Exception:
+        return ""
+
+
 def render_dossier(report: ResearchReport) -> str:
     """Render the full 11-section Research Dossier as Markdown. Never raises."""
     try:
@@ -137,6 +159,7 @@ def render_dossier(report: ResearchReport) -> str:
             f"**TIRF Score:** {m.get('tirf_score', '—')}  ·  "
             f"**CIO Review:** {rv.get('verdict', '—')} "
             f"({rv.get('overall_score', '—')})\n"
+            + _four_layer_gate_block(rv)
         )
 
         secs: list[str] = []
@@ -237,6 +260,10 @@ def tirf_appendix(report: ResearchReport) -> str:
             "",
             _sources(report),
         ]
+        # Four-layer gate block (swing upgrade #2 visibility)
+        gate_block = _four_layer_gate_block(rv)
+        if gate_block:
+            lines += ["", "### Four-Layer Gate", "", gate_block.strip()]
         return "\n".join(lines) + "\n"
     except Exception:
         log.warning("tirf_appendix failed", exc_info=True)
