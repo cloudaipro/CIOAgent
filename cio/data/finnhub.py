@@ -31,11 +31,21 @@ _NEWS_TTL = 3 * 3600
 _RECS_TTL = 24 * 3600
 _EARN_TTL = 24 * 3600
 _PROFILE_TTL = 24 * 3600
+_OWN_TTL = 24 * 3600
 
 
 def _token() -> str | None:
     t = (os.getenv("FINNHUB_API_KEY") or "").strip()
     return t or None
+
+
+def _institutional_enabled() -> bool:
+    """Institutional ownership is a PREMIUM Finnhub endpoint. Off by default so the
+    free tier never hammers it with 403s (one wasted ~1s rate-limited call + a log
+    warning per symbol). Opt in with CIO_FINNHUB_INSTITUTIONAL=1 once the key has
+    institutional-data access."""
+    return (os.getenv("CIO_FINNHUB_INSTITUTIONAL") or "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 # --- company news ----------------------------------------------------------
@@ -74,21 +84,27 @@ def company_news(symbol: str, days: int = 7, limit: int = 8) -> list[dict]:
 
 
 # --- analyst recommendation trends -----------------------------------------
-def _latest_recs(rows):
-    if not rows:
-        return None
-    try:
-        latest = sorted(rows, key=lambda r: r.get("period", ""), reverse=True)[0]
-    except Exception:
-        return None
+def _norm_rec_row(r: dict) -> dict:
+    """One /stock/recommendation row -> our snake_case shape."""
     return {
-        "period": latest.get("period"),
-        "strong_buy": latest.get("strongBuy"),
-        "buy": latest.get("buy"),
-        "hold": latest.get("hold"),
-        "sell": latest.get("sell"),
-        "strong_sell": latest.get("strongSell"),
+        "period": r.get("period"),
+        "strong_buy": r.get("strongBuy"),
+        "buy": r.get("buy"),
+        "hold": r.get("hold"),
+        "sell": r.get("sell"),
+        "strong_sell": r.get("strongSell"),
     }
+
+
+def _sorted_rec_rows(rows):
+    """Recommendation rows newest-first; [] when unusable."""
+    return sorted((r for r in (rows or []) if isinstance(r, dict) and r.get("period")),
+                  key=lambda r: r.get("period", ""), reverse=True)
+
+
+def _latest_recs(rows):
+    ordered = _sorted_rec_rows(rows)
+    return _norm_rec_row(ordered[0]) if ordered else None
 
 
 def analyst_recs(symbol: str):
@@ -104,6 +120,82 @@ def analyst_recs(symbol: str):
         cached = data if isinstance(data, list) else []
         _cache.write("finnhub_recs", sym, cached)
     return _latest_recs(cached)
+
+
+def analyst_recs_history(symbol: str, periods: int = 2) -> list[dict]:
+    """Latest *periods* analyst-rec snapshots, newest first. [] when disabled/missing.
+
+    Reuses the SAME cached /stock/recommendation payload as analyst_recs (Finnhub
+    returns several months of counts in one response), so a second period costs no
+    extra network call once warm. Feeds the behavior-layer trend delta (OD-4)."""
+    tok = _token()
+    if not tok:
+        return []
+    sym = symbol.strip().upper()
+    cached = _cache.read("finnhub_recs", sym, _RECS_TTL)
+    if cached is None:
+        data = get_json(f"{_BASE}/stock/recommendation",
+                        params={"symbol": sym, "token": tok}, limiter=_limiter)
+        cached = data if isinstance(data, list) else []
+        _cache.write("finnhub_recs", sym, cached)
+    return [_norm_rec_row(r) for r in _sorted_rec_rows(cached)[:max(1, periods)]]
+
+
+# --- institutional ownership (13F) -----------------------------------------
+def _institutional_pct(data) -> float | None:
+    """Sum the latest 13F report's per-holder percentages into one ownership %.
+
+    None when the payload carries no usable holder percentages. Clamped 0..100
+    (13F sums can exceed 100 via options/overlap)."""
+    if not isinstance(data, dict):
+        return None
+    reports = data.get("data")
+    if not isinstance(reports, list) or not reports:
+        return None
+    try:
+        latest = sorted(reports, key=lambda r: r.get("reportDate", ""), reverse=True)[0]
+    except Exception:
+        return None
+    holders = latest.get("ownership")
+    if not isinstance(holders, list) or not holders:
+        return None
+    total, seen = 0.0, False
+    for h in holders:
+        pct = h.get("percentage") if isinstance(h, dict) else None
+        if isinstance(pct, (int, float)):
+            total += float(pct)
+            seen = True
+    if not seen:
+        return None
+    return round(max(0.0, min(100.0, total)), 2)
+
+
+def institutional_ownership_pct(symbol: str) -> float | None:
+    """Institutional ownership % of *symbol* from 13F filings, or None.
+
+    Sums the most recent 13F report's per-holder percentages
+    (Finnhub /stock/ownership). Feeds the Alpha Hunter coverage-density blend
+    (cio.alpha.coverage): low institutional ownership = neglected = higher edge.
+
+    NOTE: /stock/ownership is a PREMIUM Finnhub endpoint, so this is OFF BY DEFAULT —
+    set CIO_FINNHUB_INSTITUTIONAL=1 to enable it once your key has institutional-data
+    access. Disabled, or no token, or a 403 on a non-premium key -> None (no signal;
+    coverage treats None safely). Gating it off by default stops the free tier from
+    hitting a guaranteed-403 endpoint once per symbol (log spam + wasted rate-limited
+    calls). The summed % is best-effort (depends on how many holders the tier returns)."""
+    if not _institutional_enabled():
+        return None
+    tok = _token()
+    if not tok:
+        return None
+    sym = symbol.strip().upper()
+    cached = _cache.read("finnhub_ownership", sym, _OWN_TTL)
+    if cached is None:
+        data = get_json(f"{_BASE}/stock/ownership",
+                        params={"symbol": sym, "token": tok}, limiter=_limiter)
+        cached = data if isinstance(data, dict) else {}
+        _cache.write("finnhub_ownership", sym, cached)
+    return _institutional_pct(cached)
 
 
 # --- earnings calendar -----------------------------------------------------

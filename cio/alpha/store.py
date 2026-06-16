@@ -96,12 +96,15 @@ def save_run(result: AlphaResult, *, publish: bool = True, threshold: float | No
                 conn.execute(
                     "INSERT OR REPLACE INTO alpha_candidates (run_id, rank, ticker, "
                     "sector, momentum, trend, earnings, revenue_growth, fwd_eps_growth, "
-                    "surprise, volume_expansion, final, quality_pass) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "surprise, volume_expansion, final, earnings_amplified, "
+                    "analyst_count, coverage_edge, coverage_flag, quality_pass) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (run_id, c.get("rank"), c["ticker"], c.get("sector", ""),
                      c.get("momentum"), c.get("trend"), c.get("earnings"),
                      c.get("revenue_growth"), c.get("fwd_eps_growth"),
                      c.get("surprise"), c.get("volume_expansion"), c.get("final"),
+                     c.get("earnings_amplified"), c.get("analyst_count"),
+                     c.get("coverage_edge"), c.get("coverage_flag"),
                      1 if c.get("quality_pass", True) else 0),
                 )
         return {"run_id": run_id, "watchlist_id": wid, "watchlist_name": wname,
@@ -111,6 +114,28 @@ def save_run(result: AlphaResult, *, publish: bool = True, threshold: float | No
 
 
 # ---- reads (dashboard) -----------------------------------------------------
+def latest_candidate(ticker, db_path=db.DB_PATH) -> dict | None:
+    """Most recent alpha_candidates row for *ticker* across all runs, or None.
+
+    Lets other subsystems reuse the funnel's already-computed, already-persisted
+    scores (momentum, coverage_edge, ...) without re-fetching OHLCV — e.g. the
+    daily watchlist monitor pulls its momentum layer from here for free. Never
+    raises; returns None when the ticker was in no run or the DB is unavailable."""
+    try:
+        conn = db.connect(db_path)
+    except Exception:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT c.* FROM alpha_candidates c JOIN alpha_runs r ON c.run_id = r.id "
+            "WHERE c.ticker = ? ORDER BY r.id DESC LIMIT 1",
+            (str(ticker).upper(),),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def list_runs(limit: int = 20, db_path=db.DB_PATH) -> list[dict]:
     """Recent runs, newest first."""
     conn = db.connect(db_path)

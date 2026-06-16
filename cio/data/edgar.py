@@ -96,6 +96,34 @@ def _parse_submissions(data: dict, forms, limit: int) -> list[dict]:
     return out
 
 
+def institutional_ownership_pct(symbol: str) -> float | None:  # noqa: ARG001
+    """EDGAR 13F institutional ownership % for *symbol*.
+
+    OPEN DECISION (OD-3, bounced to Arch):
+    EDGAR 13F is a *filer-side* form — each institution files what securities
+    it holds. There is no EDGAR API endpoint that returns "all 13F filers that
+    own ticker X". Aggregating requires:
+      (a) downloading the full quarterly 13F index (~500 MB per quarter),
+      (b) filtering for rows whose CUSIP/ticker matches *symbol*, and
+      (c) summing share counts across thousands of filers, then dividing by
+          shares-outstanding (itself a separate data point not on EDGAR).
+    The SEC EDGAR full-text search (efts.sec.gov) covers 13F-HR text but
+    returns XML filings, not a pre-aggregated ownership %, so real aggregation
+    would require substantial new infrastructure.
+
+    Recommended data source: Finnhub's institutional-ownership endpoint
+    ``GET /stock/institutional-ownership`` (free tier, no extra key), which
+    returns ``investorHolding[].share / sharesOutstanding`` → instant %.
+    Alternatively SEC EDGAR via the submissions-bulk index requires 13F index
+    download + CUSIP resolution (heavy, quarterly cadence).
+
+    Until that work is done, return None.  The coverage blend in
+    ``cio.alpha.coverage.coverage_score`` treats None as "no signal" and falls
+    through to the analyst-only path — safe, no fabrication.
+    """
+    return None
+
+
 def recent_filings(symbol: str, forms=_DEFAULT_FORMS, limit: int = 5) -> list[dict]:
     """Most-recent EDGAR filings for *symbol* limited to *forms*.
 

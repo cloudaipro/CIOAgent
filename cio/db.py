@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS alpha_candidates (
     surprise         REAL,
     volume_expansion REAL,
     final            REAL,
+    earnings_amplified REAL,
+    analyst_count    INTEGER,
+    coverage_edge    REAL,
+    coverage_flag    TEXT,
     quality_pass     INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (run_id, ticker)
 );
@@ -304,6 +308,26 @@ def _migrate_watchlist_position(conn: sqlite3.Connection) -> None:
             )
 
 
+def _migrate_alpha_coverage(conn: sqlite3.Connection) -> None:
+    """Add the coverage-density columns (swing upgrade #1) to a pre-existing
+    alpha_candidates table. CREATE TABLE IF NOT EXISTS won't alter an existing
+    table, so back-fill here. Idempotent: each ADD COLUMN is skipped once present.
+    Legacy rows read these as NULL, which store/dashboard treat as 'no coverage data'."""
+    existing = [r["name"] for r in conn.execute("PRAGMA table_info(alpha_candidates)")]
+    if not existing:
+        return                                  # fresh DB — SCHEMA already has them
+    additions = {
+        "earnings_amplified": "REAL",
+        "analyst_count": "INTEGER",
+        "coverage_edge": "REAL",
+        "coverage_flag": "TEXT",
+    }
+    with conn:
+        for col, typ in additions.items():
+            if col not in existing:
+                conn.execute(f"ALTER TABLE alpha_candidates ADD COLUMN {col} {typ}")
+
+
 def _drop_stale_vec(conn: sqlite3.Connection) -> bool:
     """If the stored embedding dim differs from EMBED_DIM, drop the vec0 tables so
     the schema recreates them at the new dim. Returns True if dropped (needs
@@ -351,6 +375,7 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _migrate(conn)
     _migrate_watchlist_position(conn)
+    _migrate_alpha_coverage(conn)
     with conn:
         conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('embed_dim',?)",
                      (str(EMBED_DIM),))
