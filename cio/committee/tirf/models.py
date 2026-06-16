@@ -28,6 +28,11 @@ class EvidenceItem:
     recency_score: int = 0
     relevance_score: int = 0
     item_score: int = 0
+    # Four-layer causal tag (swing upgrade #2): catalyst | behavior | momentum |
+    # execution. Separates "why price will move" (catalyst/behavior) from "math
+    # left after it moved" (momentum/execution) so the gate can't let a green
+    # execution layer mask a red catalyst (the ROKU failure mode).
+    layer: str = "catalyst"
 
     def to_row(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,6 +91,9 @@ class SpecialistResearch:
     evidence_quality: float = 0.0      # mean item score
     evidence_count: int = 0
     counter_count: int = 0
+    # Four-layer scores (swing upgrade #2): mean item_score per causal layer,
+    # filled by scoring.score_specialist via gate.layer_scores. Empty until scored.
+    layer_scores: dict = field(default_factory=dict)
 
     @property
     def meets_evidence_gate(self) -> bool:

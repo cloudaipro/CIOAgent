@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 
+from . import gate
 from .models import EvidenceItem, SourceRef, SpecialistResearch
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,41 @@ def classify_source(source: str) -> tuple[str, int]:
             if k in s:
                 return (label, score)
     return _UNKNOWN_RELIABILITY
+
+
+# --- Four-layer causal classification (swing upgrade #2) ----------------------
+# Checked most-specific first; whatever doesn't match a timing/flow layer is, by
+# default, a fundamental catalyst fact. Keep execution before momentum so a named
+# oscillator ("RSI breakout") tags as the timing tool it is, not as momentum.
+_LAYER_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("execution", ("rsi", "macd", "kdj", "stochastic", "squeeze", "fisher", "efi",
+                   "vidya", "bollinger", "keltner", "atr", "oscillator", "stop-loss",
+                   "stop loss", "overbought", "oversold", "golden cross", "death cross",
+                   "moving average cross", "entry timing")),
+    ("behavior", ("analyst revision", "estimate revision", "upgrade", "downgrade",
+                  "price target", "institutional", "ownership", "13f", "short interest",
+                  "fund flow", "positioning", "sentiment", "insider", "accumulation",
+                  "distribution", "buy-side", "sell-side", "coverage", "re-rating",
+                  "rerating")),
+    ("momentum", ("relative strength", "rs rating", "momentum", "52-week", "52 week",
+                  "breakout", "trend continuation", "uptrend", "new high",
+                  "outperform", "price strength", "leadership")),
+]
+_DEFAULT_LAYER = "catalyst"
+
+
+def classify_layer(*parts: str) -> str:
+    """Tag evidence into catalyst|behavior|momentum|execution from its free text.
+
+    Pass any text fragments (finding, source, impact...). First matching layer
+    wins; no match → 'catalyst' (a fundamental fact). Never raises.
+    """
+    s = " " + " ".join(str(p or "").lower() for p in parts) + " "
+    for layer, keys in _LAYER_KEYWORDS:
+        for k in keys:
+            if k in s:
+                return layer
+    return _DEFAULT_LAYER
 
 
 # --- Recency -----------------------------------------------------------------
@@ -118,6 +154,7 @@ def score_item(item: EvidenceItem, as_of: str) -> EvidenceItem:
         item.recency_score = rec
         item.relevance_score = rlv
         item.item_score = round(W_RELIABILITY * rel + W_RELEVANCE * rlv + W_RECENCY * rec)
+        item.layer = classify_layer(item.finding, item.source, item.impact)
     except Exception:
         log.debug("score_item failed for %r", getattr(item, "source", "?"), exc_info=True)
         item.source_tier = item.source_tier or "Unknown"
@@ -140,6 +177,7 @@ def score_specialist(sp: SpecialistResearch, as_of: str) -> SpecialistResearch:
                 sum(e.item_score for e in sp.evidence) / len(sp.evidence), 1)
         else:
             sp.evidence_quality = 0.0
+        sp.layer_scores = gate.layer_scores(sp.evidence)
     except Exception:
         log.debug("score_specialist failed for %s", getattr(sp, "role_key", "?"), exc_info=True)
     return sp
