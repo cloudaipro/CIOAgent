@@ -70,3 +70,20 @@ def get_detailed_log() -> bool:
 
 def set_detailed_log(enabled: bool) -> None:
     set("detailed_log", bool(enabled))
+
+
+def get_candle_style() -> str:
+    """Global candle style used by all chart renders (dashboard + bot).
+
+    "standard" — color = close vs open (intraday direction).
+    "hollow"   — color = close vs prev_close (day-over-day direction);
+                 hollow outline when close >= open, solid fill otherwise.
+    """
+    val = get("candle_style", "standard")
+    return val if val in ("standard", "hollow") else "standard"
+
+
+def set_candle_style(style: str) -> None:
+    if style not in ("standard", "hollow"):
+        raise ValueError(f"candle_style must be 'standard' or 'hollow', got {style!r}")
+    set("candle_style", style)

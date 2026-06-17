@@ -128,7 +128,19 @@ def render_indicators(symbol_or_df, profile: str = "committee", *, html: bool = 
 
     PNG by default (messages / committee PDF). ``html=True`` produces an
     interactive bokeh page for the dashboard (requires the optional bokeh dep).
+
+    ``candle_style`` defaults to the global setting in dashboard_settings.json
+    ("standard" or "hollow") so the dashboard Configure toggle affects all renders
+    — bot messages, committee PDFs, and the dashboard chart — without per-call overrides.
     """
+    # Apply global candle style setting if caller didn't supply one explicitly.
+    if "candle_style" not in kw:
+        try:
+            from ..dashboard.settings import get_candle_style
+            kw["candle_style"] = get_candle_style()
+        except Exception:
+            pass  # settings unavailable → let render use its own default
+
     from .viz import render_indicator_png, render_indicator_html
     if html:
         return render_indicator_html(symbol_or_df, profile, **kw)

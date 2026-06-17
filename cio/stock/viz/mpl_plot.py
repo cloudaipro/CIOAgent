@@ -111,7 +111,7 @@ def _render_price(ax, spec: ChartSpec):
         if bd.fill_alpha:
             ax.fill_between(xb, lo, up, color=bd.color, alpha=bd.fill_alpha, zorder=0)
 
-    x = S.candlestick(ax, df)
+    x = S.candlestick(ax, df, candle_style=spec.candle_style)
 
     for ov in spec.price_overlays:
         if ov.values is None or len(ov.values) != spec.n:
@@ -239,6 +239,7 @@ def render(
     out_dir=None,
     filename: Optional[str] = None,
     symbol: Optional[str] = None,
+    candle_style: str = "standard",
 ) -> str:
     """
     Render an indicator chart PNG and return its path.
@@ -248,7 +249,8 @@ def render(
     import matplotlib.pyplot as plt
 
     kw = {} if indicators is None else {"indicators": indicators}
-    spec = build_spec(symbol_or_df, profile, window=window, symbol=symbol, **kw)
+    spec = build_spec(symbol_or_df, profile, window=window, symbol=symbol,
+                      candle_style=candle_style, **kw)
 
     n_panels = len(spec.panels)
     height_ratios = [3.2] + [1.05] * n_panels

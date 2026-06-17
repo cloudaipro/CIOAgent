@@ -251,7 +251,8 @@ class _Handler(BaseHTTPRequestHandler):
                     log_dir=str(logsetup.log_dir()),
                     log_locked_by_env=os.getenv("CIO_LOG_TO_FILE") is not None,
                     detailed_log=convlog.enabled(),
-                    detailed_locked_by_env=convlog.locked_by_env())
+                    detailed_locked_by_env=convlog.locked_by_env(),
+                    candle_style=_settings.get_candle_style())
             elif path == "/indicators":
                 sym = (query.get("symbol", [""])[0] or "").strip().upper()
                 prof = (query.get("profile", ["committee"])[0] or "committee").lower()
@@ -265,7 +266,8 @@ class _Handler(BaseHTTPRequestHandler):
                             html = fh.read()
                     except Exception as exc:
                         html = views.render_indicators_form(
-                            level, error=f"{sym}: {exc}")
+                            level, error=f"{sym}: {exc}",
+                            symbol=sym, profile=prof)
             elif path.startswith("/committee/"):
                 run_id = path.split("/committee/", 1)[1]
                 html = views.render_committee_run(run_id, transcript.get_run(run_id), level)
@@ -549,6 +551,9 @@ class _Handler(BaseHTTPRequestHandler):
         if f("form_kind") == "detailed_log":
             self._detailed_log_post(f("detailed_log") == "1", set_cookie)
             return
+        if f("form_kind") == "candle_style":
+            self._candle_style_post(f("candle_style"), set_cookie)
+            return
 
         msg, err = "", False
         notes: list[str] = []
@@ -698,6 +703,22 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 log.warning("detailed-log toggle failed: %s", exc)
                 msg, err = f"error: {exc}", True
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/configure?" + urlencode(params), set_cookie)
+
+    def _candle_style_post(self, style: str, set_cookie: str | None) -> None:
+        """Persist the global candle style (dashboard_settings.json). PRG back."""
+        from . import settings as _settings
+        msg, err = "", False
+        try:
+            _settings.set_candle_style(style)
+            label = "Hollow (close vs prev close)" if style == "hollow" else "Standard (close vs open)"
+            msg = f"candle style → {label}"
+        except Exception as exc:
+            log.warning("candle-style toggle failed: %s", exc)
+            msg, err = f"error: {exc}", True
         params = {"msg": msg}
         if err:
             params["err"] = "1"

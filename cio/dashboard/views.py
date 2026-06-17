@@ -241,21 +241,29 @@ _THEME_JS = """<script>
 </script>"""
 
 
-def render_indicators_form(level: int, error: str = "") -> str:
+def render_indicators_form(level: int, error: str = "",
+                           symbol: str = "", profile: str = "committee") -> str:
     """指標視覺化 — symbol entry form; submits to GET /indicators?symbol=…"""
     err = (f"<p style='color:#d92b2b'>{esc(error)}</p>" if error else "")
+
+    def _prof_opt(v, label):
+        sel = " selected" if profile == v else ""
+        return f"<option value='{esc(v)}'{sel}>{esc(label)}</option>"
+
     body = (
         "<h2>指標視覺化 — Technical indicators</h2>"
         "<p>Render candlesticks + MA, RSI / MACD / KDJ sub-panels and divergence "
         "markers (interactive). Same signals the committee profile uses.</p>"
+        "<p class='hint'>Candle style is a global setting — change it on the "
+        "<a href='/configure'>Configure</a> tab.</p>"
         + err +
         "<form method='get' action='/indicators'>"
-        "<input name='symbol' placeholder='LRCX' autofocus "
+        "<input name='symbol' placeholder='LRCX' autofocus value='" + esc(symbol) + "' "
         "style='padding:6px 8px;font-size:14px'/> "
         "<select name='profile' style='padding:6px'>"
-        "<option value='committee'>committee</option>"
-        "<option value='swing'>swing</option>"
-        "<option value='monitor'>monitor</option>"
+        + _prof_opt("committee", "committee")
+        + _prof_opt("swing", "swing")
+        + _prof_opt("monitor", "monitor") +
         "</select> "
         "<button type='submit' style='padding:6px 12px'>Render</button>"
         "</form>"
@@ -1492,7 +1500,8 @@ def render_configure(cfg, level: int, services, model_suggestions,
                      log_to_file: bool = False, log_file: str = "",
                      log_dir: str = "", log_locked_by_env: bool = False,
                      detailed_log: bool = False,
-                     detailed_locked_by_env: bool = False) -> str:
+                     detailed_locked_by_env: bool = False,
+                     candle_style: str = "standard") -> str:
     """Edit committee model routing. One big POST form → /configure.
 
     Fallback-chain settings render first: each named setting is a table of
@@ -1672,6 +1681,30 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + d_toggle
     )
 
+    # --- candle style section ---
+    cs_hollow = candle_style == "hollow"
+    cs_other = "standard" if cs_hollow else "hollow"
+    cs_other_label = "Standard (close vs open)" if cs_hollow else "Hollow (close vs prev close)"
+    cs_cur_label = "Hollow (close vs prev close)" if cs_hollow else "Standard (close vs open)"
+    candle_section = (
+        "<h2>Candle style</h2>"
+        f"<p>Current: <strong>{esc(cs_cur_label)}</strong>. "
+        "Applies globally — dashboard chart, bot messages, committee PDFs.</p>"
+        "<p class='hint'>"
+        "<b>Standard:</b> green = close &ge; open (intraday up); "
+        "red = close &lt; open (intraday down). "
+        "A +1% day can show red if the stock opened higher and sold off.<br>"
+        "<b>Hollow:</b> color = close vs prev close (day-over-day direction); "
+        "hollow outline = close &ge; open; solid fill = close &lt; open. "
+        "+1% day always shows green."
+        "</p>"
+        "<form method='post' action='/configure' style='margin-top:8px'>"
+        "<input type='hidden' name='form_kind' value='candle_style'>"
+        f"<input type='hidden' name='candle_style' value='{esc(cs_other)}'>"
+        f"<button type='submit' class='primary'>Switch to {esc(cs_other_label)}</button>"
+        "</form>"
+    )
+
     body = (
         "<h1>Configure committee models</h1>"
         + flash_html
@@ -1688,6 +1721,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + "</form>"
         + logging_section
         + detailed_section
+        + candle_section
         + _configure_js({s: list(model_suggestions.get(s, []) or []) for s in services})
     )
     return _page("Configure", body, level)

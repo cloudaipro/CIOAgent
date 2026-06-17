@@ -76,18 +76,39 @@ def _candles(fig, spec: ChartSpec):
     c = df["Close"].values
     h = df["High"].values
     lo = df["Low"].values
-    inc = c >= o
-    xi = [i for i in x if inc[i]]
-    xd = [i for i in x if not inc[i]]
+    pc = df["Close"].shift(1).values  # prev_close for hollow style
     fig.segment(x, h, x, lo, color=S.MUTED, line_width=0.6)
-    if xi:
-        fig.vbar(x=xi, width=0.7, top=[max(o[i], c[i]) for i in xi],
-                 bottom=[min(o[i], c[i]) for i in xi], fill_color=S.UP,
-                 line_color=S.UP)
-    if xd:
-        fig.vbar(x=xd, width=0.7, top=[max(o[i], c[i]) for i in xd],
-                 bottom=[min(o[i], c[i]) for i in xd], fill_color=S.DOWN,
-                 line_color=S.DOWN)
+    if spec.candle_style == "hollow":
+        # color = day-over-day; fill = solid if close<open, hollow if close>=open
+        for i in x:
+            day_up = (not np.isnan(pc[i])) and c[i] >= pc[i]
+            color = S.UP if day_up else S.DOWN
+            intraday_up = c[i] >= o[i]
+            top_y = max(o[i], c[i])
+            bot_y = min(o[i], c[i])
+            if top_y == bot_y:
+                top_y += 1e-6
+            if intraday_up:
+                # hollow: no fill, colored border
+                fig.vbar(x=[i], width=0.7, top=[top_y], bottom=[bot_y],
+                         fill_color=None, fill_alpha=0, line_color=color, line_width=1.0)
+            else:
+                # solid fill
+                fig.vbar(x=[i], width=0.7, top=[top_y], bottom=[bot_y],
+                         fill_color=color, line_color=color)
+    else:
+        # standard: close vs open
+        inc = c >= o
+        xi = [i for i in x if inc[i]]
+        xd = [i for i in x if not inc[i]]
+        if xi:
+            fig.vbar(x=xi, width=0.7, top=[max(o[i], c[i]) for i in xi],
+                     bottom=[min(o[i], c[i]) for i in xi], fill_color=S.UP,
+                     line_color=S.UP)
+        if xd:
+            fig.vbar(x=xd, width=0.7, top=[max(o[i], c[i]) for i in xd],
+                     bottom=[min(o[i], c[i]) for i in xd], fill_color=S.DOWN,
+                     line_color=S.DOWN)
     for ov in spec.price_overlays:
         if ov.values is not None and len(ov.values) == spec.n:
             fig.line(x, list(ov.values), color=ov.color,
@@ -119,6 +140,7 @@ def render_html(
     out_dir=None,
     filename: Optional[str] = None,
     symbol: Optional[str] = None,
+    candle_style: str = "standard",
 ) -> str:
     """Render the indicator chart as standalone bokeh HTML; returns the path."""
     from bokeh.layouts import column
@@ -126,7 +148,8 @@ def render_html(
     from bokeh.io import output_file, save
 
     kw = {} if indicators is None else {"indicators": indicators}
-    spec = build_spec(symbol_or_df, profile, window=window, symbol=symbol, **kw)
+    spec = build_spec(symbol_or_df, profile, window=window, symbol=symbol,
+                      candle_style=candle_style, **kw)
     x = list(spec.x)
 
     price = _fig(900, 380, x_range=(-1, spec.n),

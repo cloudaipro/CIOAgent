@@ -142,6 +142,7 @@ class ChartSpec:
     asof: str
     n: int
     states: dict = field(default_factory=dict)   # {panel_name: state dict} (state.py)
+    candle_style: str = "standard"           # "standard" (close vs open) | "hollow" (close vs prev_close)
 
     @property
     def x(self) -> np.ndarray:
@@ -602,6 +603,7 @@ def build_spec(
     below_cap: int = 10,
     auto_divergence: bool = True,
     symbol: Optional[str] = None,
+    candle_style: str = "standard",
 ) -> ChartSpec:
     """
     Build a backend-agnostic ChartSpec.
@@ -731,6 +733,7 @@ def build_spec(
         price_flags=price_flags, swings=swings, panels=panels, verdicts=verdicts,
         composite=composite, profile=profile, asof=asof, n=keep,
         states={p.name: p.state for p in panels if p.state},
+        candle_style=candle_style,
     )
 
 
