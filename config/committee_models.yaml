@@ -28,7 +28,7 @@ chains:
   - {service: openai, model: gpt-5.4-mini-2026-03-17}
   - {service: nim, model: moonshotai/kimi-k2.6}
 # defaults.chain: the setting used by any agent not listed below.
-defaults: {chain: standard}
+defaults: {chain: premium}
 # agents.<key>.chain: name of the chain setting that agent uses.
 agents:
   market: {chain: standard}
