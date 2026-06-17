@@ -666,13 +666,36 @@ async def t_run_strategy_profile(args):
         return _text(str(e))
     except ValueError as e:
         return _text(str(e))
-    return _text(json.dumps({
+
+    # Continuous, state-based composite (conv_turns 304-311). The verdict comes
+    # from dead-zoned state confidence, NOT a binary event-window vote that cliffs
+    # when a cross ages out; `asof` is the CONFIRMED bar (intraday live bar dropped
+    # so re-runs don't repaint); events are supplementary triggers, never scored.
+    detail = res.get("detail", {})
+    out = {
         "symbol": sym,
         "profile": res["profile"],
+        "asof": res.get("asof"),
         "composite": res["composite"],
+        "composite_score": res.get("composite_score"),
+        "stability": res.get("stability"),
         "signals": res["signals"],
-        "recent_events": {k: v["events"] for k, v in res["detail"].items() if v["events"]},
-    }, indent=2))
+        "indicator_states": {
+            n: {"state": d.get("state"), "direction": d.get("direction"),
+                "confidence": d.get("confidence")}
+            for n, d in detail.items()
+        },
+        "recent_events": {n: d["events"] for n, d in detail.items() if d.get("events")},
+        "_note": (
+            "Scores are deterministic & continuous (state confidence, dead-zoned). "
+            "asof = the CONFIRMED bar evaluated (an in-progress intraday bar is dropped). "
+            "recent_events are supplementary triggers, NOT counted in the composite. "
+            "stability='fresh_flip' = composite changed vs the prior confirmed bar -> "
+            "treat as low-stability, step size down. Use each 'state'/'composite' label "
+            "verbatim; do NOT re-infer direction or re-score from raw numbers."
+        ),
+    }
+    return _text(json.dumps(out, indent=2))
 
 
 @tool("refresh_prices",

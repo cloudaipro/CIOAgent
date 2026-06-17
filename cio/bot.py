@@ -666,10 +666,15 @@ async def _prewarm_chat(chat_id: int) -> None:
 async def _post_init(app: Application) -> None:
     """Start the scheduler and eagerly resume known chat sessions at boot."""
     # Register the slash-command list so Telegram shows it in the "/" autocomplete
-    # and the ☰ menu button. Idempotent — safe to call on every boot.
-    await app.bot.set_my_commands(
-        [BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS]
-    )
+    # and the ☰ menu button. Idempotent — safe to call on every boot. Cosmetic, so
+    # a transient Telegram timeout here must NOT abort boot (same grace the polling
+    # loop gets in _on_error); it re-registers on the next successful boot.
+    try:
+        await app.bot.set_my_commands(
+            [BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS]
+        )
+    except (TimedOut, NetworkError) as e:
+        log.warning("set_my_commands skipped (telegram network error): %s", e)
     if memory.get_meta("vec_reindex_needed"):   # embedding dim/model changed
         log.info("re-embedding memory after model change…")
         n, t = recall.reindex_all()

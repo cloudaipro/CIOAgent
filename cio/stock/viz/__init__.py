@@ -12,7 +12,9 @@ matplotlib (PNG, always available) and bokeh (HTML, optional).
 """
 from __future__ import annotations
 
-from .spec import ChartSpec, build_spec, divergence_markers, DEFAULT_INDICATORS
+from .spec import (
+    ChartSpec, build_spec, divergence_markers, indicator_states, DEFAULT_INDICATORS,
+)
 
 
 def render_indicator_png(symbol_or_df, profile: str = "committee", **kw) -> str:
@@ -48,6 +50,7 @@ __all__ = [
     "build_spec",
     "ChartSpec",
     "divergence_markers",
+    "indicator_states",
     "DEFAULT_INDICATORS",
     "render_indicator_png",
     "render_indicator_html",

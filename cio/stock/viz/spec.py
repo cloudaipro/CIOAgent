@@ -122,6 +122,8 @@ class Panel:
     flags: list[Flag] = field(default_factory=list)
     ylim: Optional[tuple[float, float]] = None
     verdict: Optional[str] = None
+    chip: Optional[str] = None              # deterministic 2-D state string (state.py)
+    state: Optional[dict] = None            # full state dict (provenance for text/LLM path)
 
 
 @dataclass
@@ -139,6 +141,7 @@ class ChartSpec:
     profile: str
     asof: str
     n: int
+    states: dict = field(default_factory=dict)   # {panel_name: state dict} (state.py)
 
     @property
     def x(self) -> np.ndarray:
@@ -487,6 +490,26 @@ def _build_panel(label: str, cfg: dict, index, color_idx: int) -> Optional[Panel
     return panel if (panel.lines or panel.hist) else None
 
 
+def _attach_state(panel: Panel) -> None:
+    """Compute the deterministic 2-D state for a zero-centered single-line panel
+    (EFI, CMF, …) and store it on `panel.chip` / `panel.state`. No-op for
+    multi-line or non-zero-level panels. Must run on the FULL (pre-trim) series
+    so the robust scale/lookback has history. Never raises."""
+    if len(panel.lines) != 1 or not panel.hlines:
+        return
+    levels = [h.y for h in panel.hlines]
+    if 0.0 not in levels:                      # zero-centered oscillators only
+        return
+    try:
+        from .state import panel_state
+        st = panel_state(panel.lines[0].values, level=0.0)
+    except Exception:
+        st = None
+    if st:
+        panel.state = st
+        panel.chip = st["label"]
+
+
 def _spec_from_dict(
     full: pd.DataFrame,
     indicators: dict,
@@ -624,7 +647,9 @@ def build_spec(
     composite: Optional[str] = None
     try:
         from ..profiles import profile_signals
-        res = profile_signals(full, profile)
+        # Chart shows the live/last bar, so score it too (the chip already reads
+        # the plotted series); the agent/committee paths use confirmed_only=True.
+        res = profile_signals(full, profile, confirmed_only=False)
         verdicts = res.get("signals", {}) or {}
         composite = res.get("composite")
     except Exception:
@@ -668,6 +693,7 @@ def build_spec(
                   style=b.style, fill_alpha=b.fill_alpha, width=b.width)
              for b in bands]
     for p in panels:
+        _attach_state(p)                       # on FULL series, before trim
         p.lines = [Line(l.label, _tv(l.values), l.color, l.width) for l in p.lines]
         if p.hist is not None:
             p.hist = (p.hist[0], _tv(p.hist[1]))
@@ -704,4 +730,18 @@ def build_spec(
         price_markers=price_markers,
         price_flags=price_flags, swings=swings, panels=panels, verdicts=verdicts,
         composite=composite, profile=profile, asof=asof, n=keep,
+        states={p.name: p.state for p in panels if p.state},
     )
+
+
+def indicator_states(symbol_or_df, profile: str = "committee", **kw) -> dict[str, dict]:
+    """Deterministic 2-D oscillator states (see state.py) for *profile*.
+
+    Single source of truth with the rendered chart: a thin wrapper over
+    ``build_spec`` returning its ``.states``, so the text/LLM path quotes the
+    EXACT chips drawn on the panel — no parallel computation, no drift. Returns
+    ``{PANEL_NAME: state dict}`` (empty on any failure; never raises)."""
+    try:
+        return build_spec(symbol_or_df, profile, **kw).states
+    except Exception:
+        return {}
