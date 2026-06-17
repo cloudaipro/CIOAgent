@@ -144,23 +144,105 @@ def summarize_signals(signals_df, window: int = DEFAULT_WINDOW) -> dict[str, Any
         return out
 
 
-def profile_signals(symbol_or_df, profile: str = "committee") -> dict[str, Any]:
-    """Run every strategy in *profile* and aggregate verdicts.
+def _bar_date(df) -> str | None:
+    try:
+        x = df.index[-1]
+        return str(x.date()) if hasattr(x, "date") else str(x)
+    except Exception:
+        return None
+
+
+def _is_unconfirmed(last_date, now_et) -> bool:
+    """A daily bar is unconfirmed if it is today's (ET) session and the cash
+    market has not closed yet (before 16:00 ET). Pure + directly testable."""
+    try:
+        return last_date == now_et.date() and now_et.hour < 16
+    except Exception:
+        return False
+
+
+def _confirmed_view(df, now_et=None):
+    """Drop the last bar when it is an in-progress session, so a daily swing
+    thesis reads only confirmed bars (TradingView ``barstate.isconfirmed``). Two
+    intraday re-runs then return the same verdict instead of repainting. Returns
+    ``(df_view, asof_bar_date)``. ``now_et`` is injectable for testing."""
+    try:
+        if df is None or len(df) < 2:
+            return df, _bar_date(df)
+        if now_et is None:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        last = df.index[-1]
+        last_date = last.date() if hasattr(last, "date") else None
+        if last_date is not None and _is_unconfirmed(last_date, now_et):
+            view = df.iloc[:-1]
+            return view, _bar_date(view)
+        return df, _bar_date(df)
+    except Exception:
+        return df, _bar_date(df)
+
+
+def _resolve_ohlc(symbol_or_df):
+    """OHLC frame from a symbol, or pass a DataFrame straight through."""
+    import pandas as pd
+    if isinstance(symbol_or_df, pd.DataFrame):
+        return symbol_or_df
+    from datetime import datetime, timedelta
+    from .data import load_or_download_stock_data
+    end = datetime.now()
+    start = end - timedelta(days=400)
+    return load_or_download_stock_data(symbol_or_df, start, end)
+
+
+def _composite_label(df, strategies, available):
+    """(label, score) for *df*: continuous state score + dead-zone. Used for the
+    current bar and (one confirmed bar back) for the stability check."""
+    from .signal_state import strategy_state, composite_score, verdict_from_confidence
+    confs = []
+    for name in strategies:
+        if available and name not in available:
+            continue
+        st = strategy_state(df, name)
+        confs.append(st["confidence"] if st else None)
+    score = composite_score(confs)
+    return (verdict_from_confidence(score) if score is not None else "neutral"), score
+
+
+def profile_signals(symbol_or_df, profile: str = "committee", *,
+                    confirmed_only: bool = True) -> dict[str, Any]:
+    """Run every strategy in *profile* and aggregate a CONTINUOUS, state-based
+    composite.
 
     Returns:
       {"profile": name,
-       "signals": {strategy: "bull"|"bear"|"neutral"},          # compact view
-       "detail":  {strategy: full summarize_signals dict},
-       "composite": "bull"|"bear"|"neutral"}                     # majority vote
+       "signals":   {strategy: "bull"|"bear"|"neutral"},   # dead-zoned state word
+       "detail":    {strategy: {events, confidence, state, direction}},
+       "composite": "bull"|"bear"|"neutral",               # dead-zoned mean conf
+       "composite_score": float | None,                    # mean confidence [-1,1]
+       "stability": "stable"|"fresh_flip",                 # vs one confirmed bar back
+       "asof": bar_date | None}                            # confirmed bar evaluated
 
-    Per-strategy failures degrade to omission (same contract the committee
-    bundle has always had); never raises for data errors.
+    Design (conv_turns 304-311): the verdict is driven by STATE confidence
+    (``signal_state.strategy_state``), NOT by counting ``c_*_BULL``/``c_*_BEAR``
+    events in a window — the latter cliffs when an event ages out (the EFI
+    bull->neutral artifact). Events are reported in ``detail[*].events`` as
+    supplementary triggers only. With ``confirmed_only`` (default) an in-progress
+    daily bar is dropped so intraday re-runs are stable. Never raises for
+    per-strategy data errors.
     """
     from . import run_strategy, list_strategies
+    from .signal_state import strategy_state, verdict_from_confidence, composite_score
 
     key = resolve_profile(profile)
     spec = PROFILES[key]
     window = int(spec.get("window", DEFAULT_WINDOW))
+
+    df = _resolve_ohlc(symbol_or_df)
+    if confirmed_only:
+        df, asof = _confirmed_view(df)
+    else:
+        asof = _bar_date(df)
 
     try:
         available = set(list_strategies())
@@ -169,26 +251,49 @@ def profile_signals(symbol_or_df, profile: str = "committee") -> dict[str, Any]:
 
     signals: dict[str, str] = {}
     detail: dict[str, dict] = {}
+    confs: list[float | None] = []
     for name in spec["strategies"]:
         if available and name not in available:
             continue
+        # Layer 2 — events are supplementary triggers only, never scored.
+        events: list[str] = []
         try:
-            df = run_strategy(symbol_or_df, name)
+            sdf = run_strategy(df, name)
+            events = summarize_signals(sdf, window=window)["events"]
         except Exception as e:
-            log.debug("profile %s: strategy %s failed: %s", key, name, e)
-            continue
-        summary = summarize_signals(df, window=window)
-        signals[name] = summary["verdict"]
-        detail[name] = summary
+            log.debug("profile %s: %s events failed: %s", key, name, e)
+        # Layer 3 — STATE confidence (continuous) drives the verdict + dead-zone.
+        st = strategy_state(df, name)
+        c = st["confidence"] if st else None
+        confs.append(c)
+        signals[name] = verdict_from_confidence(c)
+        detail[name] = {
+            "events": events,
+            "confidence": (round(c, 3) if c is not None else None),
+            "state": (st["label"] if st else None),
+            "direction": (st["direction"] if st else None),
+        }
 
-    votes = [v for v in signals.values() if v != "neutral"]
-    composite = "neutral"
-    if votes:
-        bulls = votes.count("bull")
-        bears = votes.count("bear")
-        if bulls > bears:
-            composite = "bull"
-        elif bears > bulls:
-            composite = "bear"
+    score = composite_score(confs)
+    composite = verdict_from_confidence(score) if score is not None else "neutral"
 
-    return {"profile": key, "signals": signals, "detail": detail, "composite": composite}
+    # Layer 4 — stability: recompute one confirmed bar back; flag a fresh flip so
+    # callers can step size down (regime-transition whipsaw guard).
+    stability = "stable"
+    try:
+        if df is not None and len(df) > 8:
+            prev_label, _ = _composite_label(df.iloc[:-1], spec["strategies"], available)
+            if prev_label != composite:
+                stability = "fresh_flip"
+    except Exception:
+        pass
+
+    return {
+        "profile": key,
+        "signals": signals,
+        "detail": detail,
+        "composite": composite,
+        "composite_score": (round(score, 3) if score is not None else None),
+        "stability": stability,
+        "asof": asof,
+    }

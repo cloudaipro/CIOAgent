@@ -105,10 +105,14 @@ def list_strategy_profiles():
     return list_profiles()
 
 
-def run_strategy_profile(symbol_or_df, profile: str = "committee"):
-    """Run a situation profile (committee/monitor/swing) and aggregate verdicts."""
+def run_strategy_profile(symbol_or_df, profile: str = "committee", *,
+                         confirmed_only: bool = True):
+    """Run a situation profile (committee/monitor/swing) and aggregate verdicts.
+
+    ``confirmed_only`` (default True) drops an in-progress daily bar so intraday
+    re-runs are stable (no repaint); pass False to score the live/last bar."""
     from .profiles import profile_signals
-    return profile_signals(symbol_or_df, profile)
+    return profile_signals(symbol_or_df, profile, confirmed_only=confirmed_only)
 
 
 def render_indicators(symbol_or_df, profile: str = "committee", *, html: bool = False, **kw):

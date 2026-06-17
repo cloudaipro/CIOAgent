@@ -32,6 +32,14 @@ def _verdict_color(v: Optional[str]) -> str:
     return S.MUTED
 
 
+def _state_color(level: Optional[str]) -> str:
+    if level == "pos":
+        return S.BULL
+    if level == "neg":
+        return S.BEAR
+    return S.MUTED
+
+
 def _date_ticks(spec: ChartSpec, max_ticks: int = 6):
     idx = spec.df.index
     n = spec.n
@@ -195,7 +203,14 @@ def _render_panel(ax, panel: Panel, spec: ChartSpec, is_last: bool):
     title = panel.name
     ax.text(0.0, 1.0, title, transform=ax.transAxes, fontsize=8,
             fontweight="bold", color=S.INK, va="top", ha="left")
-    if panel.verdict:
+    # Prefer the deterministic 2-D state chip (level·direction + cross note) over
+    # the one-word verdict — the bare word ("neutral") collapsed level+direction
+    # and misled the chart's downstream narrator. Fall back to verdict if absent.
+    if panel.chip:
+        ax.text(0.12, 1.0, panel.chip, transform=ax.transAxes,
+                fontsize=6.5, color=_state_color((panel.state or {}).get("level")),
+                va="top", ha="left")
+    elif panel.verdict:
         ax.text(0.12, 1.0, panel.verdict, transform=ax.transAxes,
                 fontsize=7, color=_verdict_color(panel.verdict), va="top",
                 ha="left")
