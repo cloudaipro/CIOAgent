@@ -212,6 +212,7 @@ _NAV = [
     ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
     ("Memory", "/memory"), ("Playbooks", "/playbooks"),
     ("Econ events", "/econ"), ("Sanitizer", "/sanitizer"),
+    ("Skills", "/skills"),
     ("Configure", "/configure"),
 ]
 
@@ -624,6 +625,83 @@ def render_playbooks(rows, level: int, flash: str = "", flash_err: bool = False)
         f"<th>Created</th><th></th></tr>{body_rows}</table>"
     )
     return _page("Playbooks", body, level)
+
+
+# Status -> badge css modifier (theme-aware .badge.up/.down/.warn; plain = neutral).
+_SKILL_BADGE = {"PROPOSED": "", "VERIFIED": "warn", "APPROVED": "up",
+                "ACTIVE": "up", "REJECTED": "down", "RETIRED": ""}
+
+
+def render_skills(records, level: int, flash: str = "", flash_err: bool = False) -> str:
+    """Self-authored harness-skill approval queue (alternative to the admin CLI).
+
+    The agent may only PROPOSE a skill (harness_propose_skill); it can never
+    approve its own. The operator drives the same gate here as on the CLI:
+    Verify -> Approve -> Activate, with Approve refused before Verify and Activate
+    before Approve (enforced server-side in store.transition, not in this view —
+    the buttons are just the surface). *records* are store.all_records() dicts."""
+    def _form(action: str, label: str, sid: str, confirm: str,
+              danger: bool = False, extra: str = "") -> str:
+        cls = "danger" if danger else ""
+        return (
+            f"<form class='inline' method='post' action='/skills' "
+            f"onsubmit=\"return confirm('{esc(confirm)}');\">"
+            f"<input type='hidden' name='action' value='{esc(action)}'>"
+            f"<input type='hidden' name='id' value='{esc(sid)}'>{extra}"
+            f"<button type='submit' class='{cls}'>{esc(label)}</button></form>")
+
+    def _actions(r: dict) -> str:
+        sid, st, nm = r.get("id"), r.get("status_label"), r.get("name")
+        out = []
+        if st in ("PROPOSED", "REJECTED"):
+            out.append(_form("verify", "Verify", sid,
+                f"Verify {nm!r}? Runs committed test cases (candidates.py) if present, "
+                "otherwise records a manual owner attestation."))
+        if st == "VERIFIED":
+            who = ("<input name='by' value='operator' aria-label='approver' "
+                   "style='width:84px;padding:3px;margin-right:4px'>")
+            out.append(_form("approve", "Approve", sid,
+                f"Approve {nm!r} for activation?", extra=who))
+        if st == "APPROVED":
+            out.append(_form("activate", "Activate", sid, f"Activate {nm!r} now?"))
+        if st in ("PROPOSED", "VERIFIED"):
+            out.append(_form("reject", "Reject", sid, f"Reject {nm!r}?", danger=True))
+        if st in ("VERIFIED", "APPROVED", "ACTIVE"):
+            out.append(_form("retire", "Retire", sid, f"Retire {nm!r}?", danger=True))
+        return " ".join(out) or "<span class='hint'>—</span>"
+
+    def _row(r: dict) -> str:
+        st = r.get("status_label") or "?"
+        badge = f"<span class='badge {_SKILL_BADGE.get(st, '')}'>{esc(st)}</span>"
+        spec = (f"<pre class='steps'>{esc(r.get('rule_spec'))}</pre>"
+                if r.get("rule_spec") else "")
+        return (
+            f"<tr><td><code>{esc(r.get('id'))}</code></td>"
+            f"<td>{esc(r.get('name'))}<br>"
+            f"<span class='hint'>{esc(r.get('kind'))} · {esc(r.get('origin'))}</span></td>"
+            f"<td>{badge}</td>"
+            f"<td class='msg'>{esc(r.get('trigger'))}{spec}</td>"
+            f"<td>{esc(r.get('approved_by') or '—')}</td>"
+            f"<td>{esc_ts(r.get('created_at'))}</td>"
+            f"<td>{_actions(r)}</td></tr>")
+
+    body_rows = "".join(_row(r) for r in records) or (
+        "<tr><td class='empty' colspan='7'>no skills proposed yet — the agent files "
+        "them with the harness_propose_skill tool when a user catches a defect it "
+        "could not have caught.</td></tr>")
+    flash_html = (f"<p class='flash {'err' if flash_err else 'ok'}'>{esc(flash)}</p>"
+                  if flash else "")
+    body = (
+        "<h1>Self-authored skills</h1>" + flash_html +
+        "<p>Deterministic checks the agent proposed after a user found a defect. The "
+        "agent can <em>propose</em> but never approve its own — drive the gate here: "
+        "<b>Verify</b> (runs committed test cases from <code>candidates.py</code>, else "
+        "a manual owner attestation) → <b>Approve</b> → <b>Activate</b>. Approve is "
+        "refused before Verify, Activate before Approve — identical to "
+        "<code>python&nbsp;-m&nbsp;cio.harness.admin</code>.</p>"
+        "<table><tr><th>ID</th><th>Name</th><th>Status</th><th>Trigger / spec</th>"
+        f"<th>Approved by</th><th>Created</th><th>Actions</th></tr>{body_rows}</table>")
+    return _page("Skills", body, level)
 
 
 _REGIME_CLASS = {"GREEN": "up", "YELLOW": "warn", "RED": "down", "UNKNOWN": ""}

@@ -236,6 +236,8 @@ data/charts/
 data/uploads/
 # operator's local logging toggle (runtime state, never committed)
 data/dashboard_settings.json
+# self-authored harness skill governance store (runtime state)
+data/harness_skills.json
 
 # CFOAgent: local-only / not for publish
 .claude/settings.local.json
