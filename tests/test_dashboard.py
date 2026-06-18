@@ -461,3 +461,71 @@ def test_token_gate(monkeypatch, live):
     # Cookie alone now authorizes
     status, _, _ = _get(live, "/", headers={"Cookie": "cio_dash=secret"})
     assert status == 200
+
+
+# --- self-authored skill approval UI ---------------------------------------
+
+def _skill_rec(status, **extra):
+    r = {"id": "sk_x", "name": "n", "kind": "validator", "origin": "self_authored",
+         "trigger": "t", "rule_spec": "", "status_label": status, "approved_by": "",
+         "created_at": "2026-06-18T09:00:00"}
+    r.update(extra)
+    return r
+
+
+def _skills_html(status, **extra):
+    return views.render_skills([_skill_rec(status, **extra)], level=1)
+
+
+def test_skills_ui_gate_aware_actions_per_status():
+    # PROPOSED: verify only (no approve/activate) — the gate is visible in the UI.
+    p = _skills_html("PROPOSED")
+    assert "value='verify'" in p and "value='approve'" not in p and "value='activate'" not in p
+    # VERIFIED: approve, not activate.
+    v = _skills_html("VERIFIED")
+    assert "value='approve'" in v and "value='activate'" not in v
+    # APPROVED: activate, not approve.
+    a = _skills_html("APPROVED")
+    assert "value='activate'" in a and "value='approve'" not in a
+    # REJECTED: can retry verify.
+    assert "value='verify'" in _skills_html("REJECTED")
+    # ACTIVE: only retire.
+    act = _skills_html("ACTIVE")
+    assert "value='retire'" in act and "value='verify'" not in act and "value='approve'" not in act
+
+
+def test_skills_ui_escapes_and_empty_state():
+    assert "no skills proposed yet" in views.render_skills([], level=1)
+    html = _skills_html("PROPOSED", trigger="<script>alert(1)</script>")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_skills_route_get_and_post_lifecycle(live, monkeypatch, tmp_path):
+    """GET renders the queue; POST drives the gate, refusing approve-before-verify."""
+    from cio.harness import store as hstore
+    p = tmp_path / "h.json"
+    monkeypatch.setattr(hstore, "DEFAULT_STORE", p)
+    sid = hstore.propose("dash_demo", "agent found a defect", path=p)["id"]
+
+    status, body, _ = _get(live, "/skills")
+    assert status == 200 and "Self-authored skills" in body and sid in body
+
+    # approve before verify -> refused, state unchanged
+    s, resp = _post(live, "/skills", {"action": "approve", "id": sid, "by": "alex"})
+    assert s == 303 and "err=1" in resp.getheader("Location", "")
+    assert hstore.get(sid, path=p)["status_label"] == "PROPOSED"
+
+    # verify (manual owner attestation via dashboard) -> VERIFIED
+    s, resp = _post(live, "/skills", {"action": "verify", "id": sid})
+    assert s == 303 and "err=1" not in resp.getheader("Location", "")
+    assert hstore.get(sid, path=p)["status_label"] == "VERIFIED"
+
+    # approve -> APPROVED (records approver)
+    _post(live, "/skills", {"action": "approve", "id": sid, "by": "alex"})
+    rec = hstore.get(sid, path=p)
+    assert rec["status_label"] == "APPROVED" and rec["approved_by"] == "alex"
+
+    # activate -> ACTIVE
+    _post(live, "/skills", {"action": "activate", "id": sid})
+    assert hstore.get(sid, path=p)["status_label"] == "ACTIVE"

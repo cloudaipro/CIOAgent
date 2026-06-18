@@ -28,6 +28,7 @@ from claude_agent_sdk import (
 import urllib.parse
 
 from . import alpha, charts, context, convlog, memory, portfolio, recall, timeutil, watchlist, web
+from . import harness
 from .data import source_policy as _sp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1082,6 +1083,47 @@ async def t_clinical_trials(args):
     return _text(json.dumps(results, indent=2))
 
 
+# --- Harness layer: deterministic checks (V1/V2/V3) + self-authoring proposal (Meta) ---
+# Schemas + dispatch live in cio/harness/tools.py so the tool surface can't drift from
+# the tested capability. V2 resolves cited URLs over the network in THIS (non-sandboxed)
+# bot process, failing closed on dead links. See docs/HARNESS-ENGINEERING-SPEC.md.
+_HS = {s["name"]: s for s in harness.tools.TOOL_SPECS}
+
+
+@tool("harness_check_trade_plan", _HS["harness_check_trade_plan"]["description"],
+      _HS["harness_check_trade_plan"]["input_schema"])
+async def t_harness_check_trade_plan(args):
+    return _text(json.dumps(harness.tools.dispatch("harness_check_trade_plan", dict(args)), indent=2))
+
+
+@tool("harness_verify_citations", _HS["harness_verify_citations"]["description"],
+      _HS["harness_verify_citations"]["input_schema"])
+async def t_harness_verify_citations(args):
+    return _text(json.dumps(harness.tools.dispatch("harness_verify_citations", dict(args)), indent=2))
+
+
+@tool("harness_event_study", _HS["harness_event_study"]["description"],
+      _HS["harness_event_study"]["input_schema"])
+async def t_harness_event_study(args):
+    return _text(json.dumps(harness.tools.dispatch("harness_event_study", dict(args)), indent=2))
+
+
+@tool("harness_propose_skill",
+      "Propose a NEW deterministic harness check after a user finds a defect you could "
+      "not have caught. Files a PROPOSED skill for OWNER review only — it does NOT "
+      "activate and you CANNOT approve your own skill. kind: validator|resolver|analytic. "
+      "rule_spec: a plain, deterministic description of the check.",
+      {"name": str, "trigger": str, "kind": str, "rule_spec": str})
+async def t_harness_propose_skill(args):
+    rec = harness.store.propose(
+        name=args["name"], trigger=args["trigger"],
+        kind=args.get("kind", "validator"), rule_spec=args.get("rule_spec", ""))
+    return _text(json.dumps({
+        "proposed": rec["id"], "status": "PROPOSED",
+        "note": "Filed for owner review. Owner runs: python -m cio.harness.admin list",
+    }, indent=2))
+
+
 CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_chart,
              t_pl_chart, t_remember, t_recall, t_forget, t_search, t_get,
              t_save_playbook, t_list_playbooks,
@@ -1093,7 +1135,9 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_watchlist_activate, t_run_alpha_hunter, t_market_regime,
              t_market_clock, t_web_search, t_web_scrape, t_committee,
              t_sec_filings, t_analyst_ratings, t_earnings_info, t_company_profile,
-             t_clinical_trials]
+             t_clinical_trials,
+             t_harness_check_trade_plan, t_harness_verify_citations,
+             t_harness_event_study, t_harness_propose_skill]
 _TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
 SYSTEM_PROMPT = """You are the user's personal CIO agent, focused on their stock portfolio.
@@ -1148,6 +1192,19 @@ Rules:
   the REAL multi-agent committee and sends the official PDF. NEVER invent committee seats,
   votes, or a verdict yourself — do not simulate it inline. If unsure whether they want the
   full (cost-bearing) run, confirm the symbol first, then call the tool.
+- HARNESS CHECKS (deterministic, free, no tokens): BEFORE you give the user an entry/exit
+  PLAN, call harness_check_trade_plan with the entry/stop/target + current price + market
+  bias — it catches a pullback/limit that doubles as a relative-weakness entry (Rule 2c),
+  incoherent stops, sub-floor R:R, and short pre-earnings windows. If it returns blocked,
+  fix the plan before presenting it. A R1_REL_WEAKNESS finding at ANY severity — WARN or
+  BLOCK — means the entry is NOT a valid naked entry: run a catalyst check first (Rule 6 /
+  swing_screen_catalyst_rule) and present it only if the catalyst clears. A WARN is never
+  "safe to present" — it is "catalyst check required". BEFORE you assert a cited material fact, call
+  harness_verify_citations with the URLs — it fails closed on a dead link so you never cite
+  a page that does not resolve. For "how big can the move be" questions, call
+  harness_event_study for a return DISTRIBUTION — never invent a point number. If a user
+  catches a defect you could not have caught, call harness_propose_skill to file it for the
+  owner; you may PROPOSE but never approve or activate your own skill.
 - Be concise and direct. Lead with the number that answers the question.
 - Use allocation_chart / pl_chart when a visual helps or the user asks to "see" something.
 - If the user sends an image path, use the Read tool to view it (e.g. a receipt or broker

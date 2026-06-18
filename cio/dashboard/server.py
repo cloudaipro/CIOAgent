@@ -197,6 +197,12 @@ class _Handler(BaseHTTPRequestHandler):
                     flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/sanitizer":
                 html = views.render_sanitizer(sanitizer_log.recent(200), level)
+            elif path == "/skills":
+                from cio import harness
+                html = views.render_skills(
+                    harness.store.all_records(path=harness.store.DEFAULT_STORE), level,
+                    flash=query.get("msg", [""])[0],
+                    flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/watchlist":
                 html = self._watchlist_view(query, level)
             elif path == "/alpha":
@@ -331,6 +337,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._econ_post(form, set_cookie)
         elif path == "/configure":
             self._configure_post(form, set_cookie)
+        elif path == "/skills":
+            self._skills_post(form, set_cookie)
         else:
             self._send("<h1>404</h1>", status=404)
 
@@ -444,6 +452,40 @@ class _Handler(BaseHTTPRequestHandler):
         if err:
             params["err"] = "1"
         self._redirect("/playbooks?" + urlencode(params), set_cookie)
+
+    def _skills_post(self, form: dict, set_cookie: str | None) -> None:
+        """Self-authored skill governance — the dashboard alternative to
+        `python -m cio.harness.admin`. Actions: verify | approve | activate |
+        reject | retire. The gate ordering (approve requires VERIFIED, activate
+        requires APPROVED) is enforced in store.transition / admin._verify; this
+        handler only routes and flashes the result. PRG back to /skills."""
+        from cio import harness
+        from cio.harness import admin as hadmin
+        action = form.get("action", [""])[0].strip()
+        sid = form.get("id", [""])[0].strip()
+        actor = form.get("by", [""])[0].strip() or "operator"
+        path = harness.store.DEFAULT_STORE
+        msg, err = "", False
+        try:
+            if not sid:
+                raise ValueError("missing skill id")
+            if action == "verify":
+                # candidate cases run if committed; else a manual owner attestation.
+                res = hadmin._verify(sid, True, "verified via dashboard", path)
+            elif action in ("approve", "activate", "reject", "retire"):
+                res = harness.store.transition(sid, action, actor, path=path)
+            else:
+                res = {"ok": False, "reason": f"unknown action {action!r}"}
+            err = not res.get("ok")
+            msg = (f"{action}: {res['status']}" if res.get("ok")
+                   else f"{action} refused — {res.get('reason')}")
+        except Exception as exc:  # never 500 the operator
+            log.warning("skills POST %s failed: %s", action, exc)
+            msg, err = f"error: {exc}", True
+        params = {"msg": msg}
+        if err:
+            params["err"] = "1"
+        self._redirect("/skills?" + urlencode(params), set_cookie)
 
     def _econ_post(self, form: dict, set_cookie: str | None) -> None:
         """Econ-events page mutation. Only action: delete eid=<id>. PRG back."""
