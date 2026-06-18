@@ -36,7 +36,7 @@ def _out_dir() -> Path:
 def _fig(width, height, x_range=None, title=None):
     from bokeh.plotting import figure
     f = figure(width=width, height=height, x_range=x_range,
-               tools="xpan,xwheel_zoom,box_zoom,reset,save",
+               tools="xpan,xwheel_zoom,box_zoom,reset,save,crosshair",
                active_scroll="xwheel_zoom", toolbar_location="right",
                background_fill_color=S.BG, border_fill_color=S.BG)
     if title:
@@ -51,7 +51,8 @@ def _fig(width, height, x_range=None, title=None):
     return f
 
 
-def _candles(fig, spec: ChartSpec):
+def _candles(fig, spec: ChartSpec, date_strs: list):
+    from bokeh.models import ColumnDataSource, HoverTool
     df = spec.df
     x = list(spec.x)
     # channels (Bollinger / Keltner) behind the candles
@@ -118,6 +119,61 @@ def _candles(fig, spec: ChartSpec):
     fig.legend.background_fill_alpha = 0.0
     fig.legend.border_line_color = None
 
+    # --- hover overlay: transparent quads over each candle ---
+    hover_src = ColumnDataSource(dict(
+        x=x,
+        left=[xi - 0.45 for xi in x],
+        right=[xi + 0.45 for xi in x],
+        top=list(df["High"].values),
+        bottom=list(df["Low"].values),
+        open=list(df["Open"].values),
+        close=list(df["Close"].values),
+        high=list(df["High"].values),
+        low=list(df["Low"].values),
+        date=date_strs,
+    ))
+    hover_r = fig.quad(
+        left="left", right="right",
+        top="top", bottom="bottom", source=hover_src,
+        fill_alpha=0, line_alpha=0,
+    )
+    fig.add_tools(HoverTool(renderers=[hover_r], tooltips=[
+        ("Date",  "@date"),
+        ("Open",  "@open{0.00}"),
+        ("High",  "@high{0.00}"),
+        ("Low",   "@low{0.00}"),
+        ("Close", "@close{0.00}"),
+    ], mode="vline"))
+
+
+def _add_panel_hover(pf, panel, x, date_strs):
+    """Add HoverTool to a sub-panel figure showing date + all line/hist values."""
+    from bokeh.models import ColumnDataSource, HoverTool
+    data = dict(x=x, date=date_strs)
+    tooltips = [("Date", "@date")]
+    _y = None  # reference series for invisible vbar hit target
+    if panel.hist is not None:
+        hist_label = panel.hist[0]
+        hv = np.asarray(panel.hist[1], dtype=float)
+        data["hist"] = [float("nan") if np.isnan(v) else float(v) for v in hv]
+        tooltips.append((hist_label, "@hist{0.00}"))
+        _y = "hist"
+    for i, ln in enumerate(panel.lines):
+        key = f"line{i}"
+        v = np.asarray(ln.values, dtype=float)
+        data[key] = [float("nan") if np.isnan(t) else float(t) for t in v]
+        tooltips.append((ln.label, f"@{key}{{0.00}}"))
+        if _y is None:
+            _y = key
+    if len(tooltips) <= 1 or _y is None:
+        return
+    data["_bottom"] = [0.0] * len(x)
+    src = ColumnDataSource(data)
+    # Near-invisible scatter — alpha=0.01 keeps Bokeh hit-testing active for vline hover
+    r = pf.scatter(x="x", y=_y, size=10, source=src,
+                   fill_color=S.BG, fill_alpha=0.01, line_alpha=0)
+    pf.add_tools(HoverTool(renderers=[r], tooltips=tooltips, mode="vline"))
+
 
 def _flags(fig, flags, ys):
     for f in flags:
@@ -151,11 +207,15 @@ def render_html(
     spec = build_spec(symbol_or_df, profile, window=window, symbol=symbol,
                       candle_style=candle_style, **kw)
     x = list(spec.x)
+    date_strs = [
+        str(ts) if not hasattr(ts, "strftime") else ts.strftime("%Y-%m-%d")
+        for ts in spec.df.index
+    ]
 
     price = _fig(900, 380, x_range=(-1, spec.n),
                  title=f"{spec.symbol} · 指標視覺化 · {spec.profile} · {spec.asof}"
                        + (f"  [{(spec.composite or '').upper()}]" if spec.composite else ""))
-    _candles(price, spec)
+    _candles(price, spec, date_strs)
     _flags(price, [f for f in spec.price_flags if f.kind == "bear"],
            list(spec.df["High"].values))
     _flags(price, [f for f in spec.price_flags if f.kind == "bull"],
@@ -198,6 +258,7 @@ def render_html(
             pf.legend.label_text_font_size = "7pt"
             pf.legend.background_fill_alpha = 0.0
             pf.legend.border_line_color = None
+        _add_panel_hover(pf, panel, x, date_strs)
         figs.append(pf)
 
     out = Path(out_dir) if out_dir else _out_dir()
