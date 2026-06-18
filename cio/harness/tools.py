@@ -15,7 +15,7 @@ from typing import Any
 from . import consistency, citation, event_study
 from .consistency import TradePlan
 from .citation import Citation
-from .models import EventType, CheckResult, CitationReport
+from .models import EventType, CheckResult, CitationReport, SkillManifest
 from .registry import SkillRegistry, VerifyCase, HarnessSkill
 
 
@@ -191,14 +191,43 @@ def build_default_registry(approver: str = "owner",
     cases = _builtin_verify_cases()
     specs = [
         ("v1_consistency", "Trade-plan consistency gate", "validator",
-         "entry/stop self-contradiction (Rule 2c)", check_trade_plan_skill),
+         "entry/stop self-contradiction (Rule 2c)", check_trade_plan_skill,
+         _MANIFESTS["v1_consistency"]),
         ("v2_citation", "Fetch-before-cite", "resolver",
-         "fabricated / dead source URL", verify_citations_skill),
+         "fabricated / dead source URL", verify_citations_skill,
+         _MANIFESTS["v2_citation"]),
         ("v3_event_study", "Post-catalyst distribution", "analytic",
-         "ungrounded magnitude forecast", event_study_skill),
+         "ungrounded magnitude forecast", event_study_skill,
+         _MANIFESTS["v3_event_study"]),
     ]
-    for sid, nm, kind, trig, fn in specs:
+    for sid, nm, kind, trig, fn, manifest in specs:
         sk = HarnessSkill(id=sid, name=nm, kind=kind, trigger=trig,
-                          origin="builtin", check=fn)
+                          origin="builtin", check=fn, manifest=manifest)
         reg.admit(sk, cases[sid], approver=approver)
     return reg
+
+
+# Dogfood the change-manifest on the built-ins (HarnessX §B.3). They are origin=
+# "builtin" so the opt-in require_manifest gate exempts them, but carrying a
+# manifest keeps the dashboard/audit surface uniform and documents the trace
+# signature you'd grep production transcripts for to confirm each is firing.
+_MANIFESTS = {
+    "v1_consistency": SkillManifest(
+        bucket="processor",
+        predicted_stabilizes=["trade-plan emission"],
+        attribution_signature="CheckResult finding code in {R1_REL_WEAKNESS,R2_PLAN_COHERENCE,R3_RR_FLOOR,R4_EARNINGS_WINDOW,R5_CHASE}",
+        capability_evidence="tests/test_harness.py::TestV1Consistency",
+        rollback_target="pre-harness SYSTEM_PROMPT (no consistency gate)"),
+    "v2_citation": SkillManifest(
+        bucket="processor",
+        predicted_stabilizes=["material-fact citation"],
+        attribution_signature="CitationReport finding code in {C_DEAD_URL,C_MATERIAL_UNVERIFIED}",
+        capability_evidence="tests/test_harness.py::TestV2Citation",
+        rollback_target="source_policy tiering alone (no liveness check)"),
+    "v3_event_study": SkillManifest(
+        bucket="tool",
+        predicted_unlocks=["grounded magnitude answers"],
+        attribution_signature="EventStudyResult with sample in {historical,reference}",
+        capability_evidence="tests/test_harness.py::TestV3EventStudy",
+        rollback_target="prior heuristic point estimate"),
+}

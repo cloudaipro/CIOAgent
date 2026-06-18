@@ -21,7 +21,7 @@ backend outage or budget exhaustion degrades gracefully instead of silencing a r
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 46 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 44 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
                   │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
@@ -298,23 +298,34 @@ Agent tools: `add_econ_event`, `list_econ_events`. Timing knobs under
 
 A zero-LLM-cost, fail-closed check layer (same discipline as TIRF) that turns
 user-found agent defects into durable, automated checks instead of one-off
-patches. Four agent tools, all pure Python — no model call in the hot path:
+patches. All pure Python — no model call in the hot path. V1/V2 run as
+**after_model run-loop processors** (fired unconditionally on every reply — the
+model cannot skip them); V3 + the Meta proposer remain **tools** (see
+[docs/HARNESS-X-DESIGN.md](docs/HARNESS-X-DESIGN.md)):
 
-- **`harness_check_trade_plan`** (V1) — consistency gate for an emitted entry/exit
-  plan. Catches a pullback/limit entry that doubles as a relative-weakness signal
-  (`R1`, the "Rule 2c" / Rule-6 case), incoherent stop/target, sub-floor R:R, and
-  short pre-earnings windows. `R1` at **any** severity ⇒ catalyst-check required,
-  not a valid naked entry.
-- **`harness_verify_citations`** (V2) — fetch-before-cite. Resolves every cited URL
-  and fails closed on a dead link; only **live** sources corroborate a material
-  fact (reuses `cio/data/source_policy.py`). The liveness check the prose citation
-  rule lacked.
-- **`harness_event_study`** (V3) — post-catalyst forward-return **distribution**
-  (mean/median/quartiles), never a point forecast.
-- **`harness_propose_skill`** (Meta) — the agent may only *propose* a new check;
-  the owner drives `PROPOSED → VERIFIED → APPROVED → ACTIVE` via the **Skills**
-  dashboard tab or `python -m cio.harness.admin`. Approve is refused before Verify,
-  Activate before Approve; no model-authored code ever executes.
+- **V1 consistency** (processor) — consistency gate for an emitted entry/exit plan.
+  Catches a pullback/limit entry that doubles as a relative-weakness signal (`R1`,
+  the "Rule 2c" / Rule-6 case), incoherent stop/target, sub-floor R:R, and short
+  pre-earnings windows. `R1` at **any** severity ⇒ catalyst-check required, not a
+  valid naked entry. The model emits a plan as a ```` ```plan {json} ```` block the
+  gate parses.
+- **V2 citation** (processor) — fetch-before-cite. Resolves every cited URL and
+  fails closed on a dead link; only **live** sources corroborate a material fact
+  (reuses `cio/data/source_policy.py`). The liveness check the prose citation rule
+  lacked.
+- **`harness_event_study`** (V3, tool) — post-catalyst forward-return
+  **distribution** (mean/median/quartiles), never a point forecast. Stays a tool:
+  its trigger depends on what was asked, so there is no unconditional hook.
+- **`harness_propose_skill`** (Meta, tool) — the agent may only *propose* a new
+  check; the owner drives `PROPOSED → VERIFIED → APPROVED → ACTIVE` via the
+  **Skills** dashboard tab or `python -m cio.harness.admin`. Approve is refused
+  before Verify, Activate before Approve; no model-authored code ever executes.
+
+Variant routing (`cio/stock/profiles.py`): which processors fire is per-situation —
+`committee` runs V1+V2, `monitor` runs V2 only (a watchlist pass emits no plan),
+`swing` runs V1. A change-manifest + Level-2 round-trip gate guards skill admission,
+and a golden regression suite (`cio/harness/regression.py`) pins the
+processor/profile layer against silent regressions.
 
 Write-ups: **[docs/HARNESS-ENGINEERING-EVALUATION.md](docs/HARNESS-ENGINEERING-EVALUATION.md)**
 (why), **[docs/HARNESS-ENGINEERING-SPEC.md](docs/HARNESS-ENGINEERING-SPEC.md)** (what),

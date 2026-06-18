@@ -80,6 +80,12 @@ def _env(name, default=None):          # name without prefix, e.g. "MODEL"
 ROLL_TURNS = int(_env("ROLL_TURNS", "40"))
 ROLL_TOKENS = int(_env("ROLL_TOKENS", "16000"))
 
+# HarnessX after_model run loop (item 1): when on (default), V1/V2 fire as
+# unconditional processors on every reply instead of as model-elective tools.
+# Annotate-only — appends a ⚠️ gate note (same contract as the Haiku verifier);
+# it never drops the answer. Set CIO_HARNESS_HOOK=0 to disable.
+_HARNESS_HOOK = _env("HARNESS_HOOK", "1") != "0"
+
 # Every N turns, remind the agent to persist anything notable (Hermes-style
 # nudge) — cheap prompt augmentation, no extra LLM call.
 NUDGE_TURNS = int(_env("NUDGE_TURNS", "8"))
@@ -1085,21 +1091,16 @@ async def t_clinical_trials(args):
 
 # --- Harness layer: deterministic checks (V1/V2/V3) + self-authoring proposal (Meta) ---
 # Schemas + dispatch live in cio/harness/tools.py so the tool surface can't drift from
-# the tested capability. V2 resolves cited URLs over the network in THIS (non-sandboxed)
-# bot process, failing closed on dead links. See docs/HARNESS-ENGINEERING-SPEC.md.
+# the tested capability. See docs/HARNESS-X-DESIGN.md.
+#
+# V1 (consistency) and V2 (citation) are NO LONGER model-elective tools: they run as
+# after_model PROCESSORS fired unconditionally by the run loop in ask() (owner decision —
+# a door-guard the model cannot forget, vs a calculator it might). V3 (event_study) stays
+# a model-pulled analytic tool: it has no unconditional trigger (you must know what was
+# asked to know what to study). dispatch() still routes all three for the registry's
+# dogfooding and any internal call. V2 resolves cited URLs over the network in THIS
+# (non-sandboxed) bot process, failing closed on dead links.
 _HS = {s["name"]: s for s in harness.tools.TOOL_SPECS}
-
-
-@tool("harness_check_trade_plan", _HS["harness_check_trade_plan"]["description"],
-      _HS["harness_check_trade_plan"]["input_schema"])
-async def t_harness_check_trade_plan(args):
-    return _text(json.dumps(harness.tools.dispatch("harness_check_trade_plan", dict(args)), indent=2))
-
-
-@tool("harness_verify_citations", _HS["harness_verify_citations"]["description"],
-      _HS["harness_verify_citations"]["input_schema"])
-async def t_harness_verify_citations(args):
-    return _text(json.dumps(harness.tools.dispatch("harness_verify_citations", dict(args)), indent=2))
 
 
 @tool("harness_event_study", _HS["harness_event_study"]["description"],
@@ -1136,7 +1137,6 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_market_clock, t_web_search, t_web_scrape, t_committee,
              t_sec_filings, t_analyst_ratings, t_earnings_info, t_company_profile,
              t_clinical_trials,
-             t_harness_check_trade_plan, t_harness_verify_citations,
              t_harness_event_study, t_harness_propose_skill]
 _TOOL_NAMES = ["mcp__cio__" + t.name for t in CIO_TOOLS]
 
@@ -1192,19 +1192,26 @@ Rules:
   the REAL multi-agent committee and sends the official PDF. NEVER invent committee seats,
   votes, or a verdict yourself — do not simulate it inline. If unsure whether they want the
   full (cost-bearing) run, confirm the symbol first, then call the tool.
-- HARNESS CHECKS (deterministic, free, no tokens): BEFORE you give the user an entry/exit
-  PLAN, call harness_check_trade_plan with the entry/stop/target + current price + market
-  bias — it catches a pullback/limit that doubles as a relative-weakness entry (Rule 2c),
-  incoherent stops, sub-floor R:R, and short pre-earnings windows. If it returns blocked,
-  fix the plan before presenting it. A R1_REL_WEAKNESS finding at ANY severity — WARN or
-  BLOCK — means the entry is NOT a valid naked entry: run a catalyst check first (Rule 6 /
-  swing_screen_catalyst_rule) and present it only if the catalyst clears. A WARN is never
-  "safe to present" — it is "catalyst check required". BEFORE you assert a cited material fact, call
-  harness_verify_citations with the URLs — it fails closed on a dead link so you never cite
-  a page that does not resolve. For "how big can the move be" questions, call
-  harness_event_study for a return DISTRIBUTION — never invent a point number. If a user
-  catches a defect you could not have caught, call harness_propose_skill to file it for the
-  owner; you may PROPOSE but never approve or activate your own skill.
+- HARNESS CHECKS (deterministic, free, no tokens): the consistency gate (V1) and citation
+  gate (V2) now run AUTOMATICALLY on every reply — you do not call them. For the consistency
+  gate to read your plan, emit ANY entry/exit plan as a fenced ```plan``` block holding one
+  JSON object, e.g.
+  ```plan
+  {"symbol":"MCHP","entry_kind":"limit","entry_price":97.5,"current_price":99,"stop_price":94,"target_price":108,"market_bias":"up"}
+  ```
+  (keys: symbol, side, entry_kind [pullback|limit|breakout|market], entry_price,
+  current_price, stop_price, target_price, market_bias [up|flat|down], pct_today,
+  at_upper_band, entry_date, earnings_date, min_hold_days — include what you know). The gate
+  catches a pullback/limit that doubles as a relative-weakness entry (Rule 2c), incoherent
+  stops, sub-floor R:R, short pre-earnings windows, and chasing, and appends a ⚠️ note. A
+  R1_REL_WEAKNESS finding at ANY severity — WARN or BLOCK — means the entry is NOT a valid
+  naked entry: run a catalyst check first (Rule 6 / swing_screen_catalyst_rule) and present
+  it only if the catalyst clears; a WARN is never "safe to present", it is "catalyst check
+  required". The citation gate fails closed on a dead cited URL automatically — still cite
+  facts with their [n] source numbers so it has links to resolve. For "how big can the move
+  be" questions, call harness_event_study for a return DISTRIBUTION — never invent a point
+  number. If a user catches a defect you could not have caught, call harness_propose_skill to
+  file it for the owner; you may PROPOSE but never approve or activate your own skill.
 - Be concise and direct. Lead with the number that answers the question.
 - Use allocation_chart / pl_chart when a visual helps or the user asks to "see" something.
 - If the user sends an image path, use the Read tool to view it (e.g. a receipt or broker
@@ -1489,6 +1496,21 @@ class CIOAgent:
         # below resets this scope's registry.
         text = _append_sources(text, list(_sources_for(self._scope)),
                                searched=_SEARCHED_THIS_TURN, scope=self._scope)
+        # HarnessX after_model run loop (item 1): V1/V2 fire here as unconditional
+        # processors — the model can no longer skip the consistency/citation gates.
+        # Deterministic, zero-LLM-cost, annotate-only (never drops the answer). Runs
+        # after the Sources footer so the citation processor sees the resolved URLs.
+        if _HARNESS_HOOK:
+            try:
+                hnote = harness.processors.after_model_note(
+                    text, scope=self._scope, profile="committee",
+                    sources=list(_sources_for(self._scope)),
+                    material=_has_material_or_web_claim(text))
+                if hnote:
+                    text = text + hnote
+            except Exception as _e:                # a broken gate must never break a turn
+                import logging
+                logging.getLogger("cio.agent").warning("harness hook failed: %s", _e)
         # Optional claim verifier (CIO_VERIFY_CLAIMS=1, default off) — runs before any
         # checkpoint resets this scope's registry. No-op when disabled / no material claim.
         note = await _run_verifier(text, list(_sources_for(self._scope)))

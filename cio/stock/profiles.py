@@ -47,6 +47,11 @@ PROFILES: dict[str, dict[str, Any]] = {
     "committee": {
         "strategies": ["trix", "kst", "rsi", "cmf", "er"],
         "window": 10,
+        # HarnessX variant routing (item 4): which harness capabilities are active
+        # for this situation. v1/v2 run as after_model processors (cio.harness.
+        # processors); v3 is a model-pulled analytic tool. A deep position decision
+        # gets full scrutiny.
+        "harness": ["v1", "v2", "v3"],
         "description": (
             "Position-decision set: TRIX (slow trend), KST (long-cycle momentum), "
             "RSI (momentum + divergence), CMF (volume flow), ER (trend-vs-chop regime)."
@@ -58,6 +63,10 @@ PROFILES: dict[str, dict[str, Any]] = {
     "monitor": {
         "strategies": ["macd", "stoch", "pvo", "squeeze"],
         "window": 3,
+        # A daily watchlist pass emits no trade plan, so the consistency gate (v1)
+        # would have nothing to check and could only false-positive — drop it. Keep
+        # the cheap citation liveness check (v2). Token-light by design.
+        "harness": ["v2"],
         "description": (
             "Daily change-detection set: MACD (momentum crossovers), STOCH (zone "
             "exits), PVO (volume surprise), SQUEEZE (volatility compression watch)."
@@ -70,6 +79,9 @@ PROFILES: dict[str, dict[str, Any]] = {
         "strategies": ["squeeze", "kdj", "fisher", "efi", "vidya"],
         "window": 3,
         "layer": "execution",
+        # Short-term entry timing: run the consistency gate (v1, R1/R5 emphasis) and
+        # the magnitude analytic (v3). Citation gate is lighter here (less narrative).
+        "harness": ["v1", "v3"],
         "description": (
             "Wave-trading set: SQUEEZE (coil/release setup), KDJ (entry timing), "
             "FISHER (turn detection), EFI (volume force), VIDYA (adaptive trend). "
@@ -99,6 +111,18 @@ def resolve_profile(name: str | None) -> str:
 def list_profiles() -> dict[str, str]:
     """{profile: description} for tool/help surfaces."""
     return {k: v["description"] for k, v in PROFILES.items()}
+
+
+def harness_for(name: str | None) -> list[str]:
+    """HarnessX variant routing (item 4): the harness capability ids active for a
+    situation. v1/v2 run as after_model processors (cio.harness.processors); v3 is
+    a model-pulled analytic tool the run loop skips. Unknown/None ⇒ committee (max
+    scrutiny). Never raises."""
+    try:
+        key = resolve_profile(name)
+    except KeyError:
+        key = "committee"
+    return list(PROFILES[key].get("harness", []))
 
 
 def summarize_signals(signals_df, window: int = DEFAULT_WINDOW) -> dict[str, Any]:

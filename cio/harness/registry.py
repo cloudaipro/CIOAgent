@@ -37,12 +37,34 @@ from .models import HarnessSkill, SkillStatus, AuditEntry
 
 @dataclass
 class VerifyCase:
-    """One held-out verification case: feed ``input`` to skill.check, expect
-    ``expected`` (compared by ``matcher``, default equality)."""
+    """One held-out verification case.
+
+    Level 1 (default): feed ``input`` to ``skill.check`` and compare to
+    ``expected`` (via ``matcher``, default equality). This proves the callable
+    returns the right answer in isolation — a unit test.
+
+    Level 2 (``level=2`` + a ``runner``): the round-trip check (HarnessX App C).
+    Instead of calling ``skill.check`` directly, the registry calls
+    ``runner(skill.check, input)`` — which the case author wires to drive the skill
+    through the real path (e.g. fire it via the run loop) and return what the
+    *model's next input* would actually carry. This proves the skill is not just
+    correct in isolation but actually reaches the model when wired. The gate
+    REQUIRES a Level-2 case for ``processor``/``tool`` skills (their whole purpose
+    is to change what the model sees; a unit test can't show that).
+    """
     name: str
     input: Any
     expected: Any
     matcher: Callable[[Any, Any], bool] | None = None
+    level: int = 1
+    runner: Callable[[Callable[[Any], Any], Any], Any] | None = None
+
+    def evaluate(self, check: Callable[[Any], Any]) -> Any:
+        """Produce the observed value for this case (Level-1 calls check directly;
+        Level-2 routes through the supplied runner)."""
+        if self.level >= 2 and self.runner is not None:
+            return self.runner(check, self.input)
+        return check(self.input)
 
     def passes(self, got: Any) -> bool:
         m = self.matcher or (lambda a, b: a == b)
@@ -63,10 +85,19 @@ class GateError:
 class SkillRegistry:
     """Governs harness skills through the admission gate."""
 
+    # Skill kinds whose purpose is to change what the model sees: a unit test
+    # cannot prove that, so the gate requires a Level-2 round-trip case.
+    _L2_REQUIRED_KINDS = ("processor", "tool")
+
     def __init__(self, pass_threshold: float = 1.0,
-                 clock: Callable[[], str] | None = None):
+                 clock: Callable[[], str] | None = None,
+                 require_manifest: bool = False):
         self._skills: dict[str, HarnessSkill] = {}
         self.pass_threshold = pass_threshold
+        # Opt-in strict mode: when True, approve() refuses a non-builtin skill that
+        # lacks a complete change-manifest. Default False keeps the base gate (and
+        # its existing tests) unchanged; the dashboard/advisor path enables it.
+        self.require_manifest = require_manifest
         self._clock = clock or (lambda: time.strftime("%Y-%m-%dT%H:%M:%S"))
 
     # --- lifecycle ----------------------------------------------------------
@@ -97,21 +128,29 @@ class SkillRegistry:
             return GateError(reason="skill has no check callable")
         if not cases:
             return GateError(reason="verification requires at least one case")
+        # Processor/tool skills must carry a Level-2 round-trip case (App C): a unit
+        # pass cannot prove the model actually receives the skill's effect.
+        if sk.kind in self._L2_REQUIRED_KINDS and not any(c.level >= 2 for c in cases):
+            return GateError(
+                reason=f"{sk.kind} skill requires a Level-2 round-trip case "
+                       "(unit-only verification cannot prove the model sees it)")
 
         results = []
         passed = 0
         for case in cases:
             try:
-                got = sk.check(case.input)
+                got = case.evaluate(sk.check)
                 ok = case.passes(got)
             except Exception as e:                 # a throwing check is a failing check
                 got, ok = f"<raised {type(e).__name__}>", False
             passed += int(ok)
-            results.append({"case": case.name, "ok": ok, "got": _safe(got)})
+            results.append({"case": case.name, "ok": ok, "level": case.level,
+                            "got": _safe(got)})
 
         rate = passed / len(cases)
         detail = {"passed": passed, "total": len(cases), "rate": round(rate, 3),
-                  "results": results}
+                  "results": results,
+                  "max_level": max((c.level for c in cases), default=1)}
         if rate >= self.pass_threshold:
             sk.status = SkillStatus.VERIFIED
             sk.verify_detail = detail
@@ -134,6 +173,12 @@ class SkillRegistry:
                        "(verification must precede approval)")
         if not approver:
             return GateError(reason="approver required")
+        if (self.require_manifest and sk.origin != "builtin"
+                and (sk.manifest is None or not sk.manifest.complete())):
+            return GateError(
+                reason="approve requires a complete change-manifest "
+                       "(attribution_signature + predicted impact) for a "
+                       f"{sk.origin} skill")
         sk.status = SkillStatus.APPROVED
         sk.approved_by = approver
         self._audit(sk, approver, "approve", {})

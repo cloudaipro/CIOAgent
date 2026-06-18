@@ -480,27 +480,31 @@ class TestAdminCLI:
 
 # ================================================= AGENT WIRING (live file) ==
 class TestAgentWiring:
-    HARNESS_TOOLS = {"harness_check_trade_plan", "harness_verify_citations",
-                     "harness_event_study", "harness_propose_skill"}
+    # V1/V2 moved from model-elective MCP tools to after_model run-loop processors
+    # (see TestAfterModelHook in test_harness_x.py); only V3 + propose stay tools.
+    HARNESS_TOOLS = {"harness_event_study", "harness_propose_skill"}
+    REMOVED_TOOLS = {"harness_check_trade_plan", "harness_verify_citations"}
 
     def test_in_cio_tools(self):
         from cio.agent import CIO_TOOLS
         names = {t.name for t in CIO_TOOLS}
         assert self.HARNESS_TOOLS <= names
+        # the two consistency/citation tools are gone from the model surface
+        assert self.REMOVED_TOOLS.isdisjoint(names)
 
     def test_mcp_prefixed_and_allow_listed(self):
         from cio.agent import build_options
         allowed = set(build_options().allowed_tools)
         for t in self.HARNESS_TOOLS:
             assert f"mcp__cio__{t}" in allowed
+        for t in self.REMOVED_TOOLS:
+            assert f"mcp__cio__{t}" not in allowed
 
-    def test_agent_tool_v1_runs_end_to_end(self):
+    def test_agent_tool_event_study_runs_end_to_end(self):
         import asyncio
-        from cio.agent import t_harness_check_trade_plan
-        out = asyncio.run(t_harness_check_trade_plan.handler(
-            {"entry_kind": "limit", "entry_price": 97.5,
-             "current_price": 99.0, "market_bias": "up"}))
-        assert '"blocked": true' in out["content"][0]["text"]
+        from cio.agent import t_harness_event_study
+        out = asyncio.run(t_harness_event_study.handler({"event_type": "earnings"}))
+        assert '"sample"' in out["content"][0]["text"]
 
     def test_agent_propose_tool_files_proposed(self, monkeypatch):
         import asyncio
