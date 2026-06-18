@@ -17,22 +17,24 @@ from .models import (
     Severity, Finding, CheckResult,
     CitationVerdict, CitationReport,
     EventType, EventStudyResult,
-    SkillStatus, HarnessSkill, AuditEntry,
+    SkillStatus, HarnessSkill, AuditEntry, SkillManifest,
 )
 from .consistency import TradePlan, check_trade_plan
 from .citation import Citation, verify_citations, http_resolver
 from .event_study import study, wave2_estimate
 from .registry import SkillRegistry, VerifyCase, GateError
-from . import tools, store
+from .runloop import Hook, Event, ProcessorResult, RunResult, Runloop
+from . import tools, store, runloop, processors, regression, advisor
 
 __all__ = [
     "Severity", "Finding", "CheckResult",
     "CitationVerdict", "CitationReport",
     "EventType", "EventStudyResult",
-    "SkillStatus", "HarnessSkill", "AuditEntry",
+    "SkillStatus", "HarnessSkill", "AuditEntry", "SkillManifest",
     "TradePlan", "check_trade_plan",
     "Citation", "verify_citations", "http_resolver",
     "study", "wave2_estimate",
     "SkillRegistry", "VerifyCase", "GateError",
-    "tools", "store",
+    "Hook", "Event", "ProcessorResult", "RunResult", "Runloop",
+    "tools", "store", "runloop", "processors", "regression", "advisor",
 ]

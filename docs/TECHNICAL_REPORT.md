@@ -39,7 +39,7 @@ final report is delivered as a **PDF**, with an on-request **Traditional Chinese
 ```mermaid
 flowchart TD
     TG["Telegram"] <--> BOT["cio/bot.py<br/>handlers, access gate, /stop, single-flight, scheduler"]
-    BOT --> AGENT["cio/agent.py<br/>CIOAgent (SDK) + 46 MCP tools"]
+    BOT --> AGENT["cio/agent.py<br/>CIOAgent (SDK) + 44 MCP tools"]
     BOT --> COMM["cio/committee/*<br/>investment committee pipeline"]
     BOT --> WMA["cio/watchlist_monitor/*<br/>pre-market watchlist briefing"]
     AGENT --> CTX["cio/context.py<br/>memory injection"]
@@ -73,7 +73,7 @@ flowchart TD
 | Module | Responsibility |
 |---|---|
 | `bot.py` | Telegram I/O; **access-control gate**; routes text/photo/CSV to the per-chat agent; `/committee`, **`/briefing`**, `/subscribe`, **`/stop`**; **per-chat single-flight** (block=False long handlers); boot reindex, scheduler start, eager pre-warm |
-| `agent.py` | `CIOAgent` wraps one SDK session; 46 in-process MCP tools (incl. `web_search`/`web_scrape`/`watchlist_prices` and 4 harness checks); rolling sessions, PreCompact hook, nudge, reflection loop |
+| `agent.py` | `CIOAgent` wraps one SDK session; 44 in-process MCP tools (incl. `web_search`/`web_scrape`/`watchlist_prices` and 2 harness tools — V1/V2 run as after_model run-loop processors, not tools); rolling sessions, PreCompact hook, nudge, reflection loop, harness after_model hook |
 | `web.py` | Firecrawl-backed `search` / `scrape` (async `httpx` → `/v2`); output-capped, offline-safe; powers the agent's web tools |
 | `harness/` | Deterministic, zero-LLM check layer (§12): trade-plan consistency (V1), fetch-before-cite (V2), event-study distribution (V3), plus a self-authoring skill gate (`registry`/`store`/`admin`). Exposes 4 agent tools |
 | `context.py` | Assembles the injected "hot" memory block within a token budget (`build_memory_block` chat-scoped, `build_scope_block` arbitrary-scoped) |
@@ -700,22 +700,26 @@ that converts user-found agent defects into durable automated checks instead of
 one-off patches. Pure Python — no model call in any hot path; HTTP and DB are
 injected so the core is offline-testable.
 
-**Checks (each an agent tool via `tools.py` → `dispatch`, reusing `TOOL_SPECS`):**
+**Checks.** V1/V2 run as **after_model run-loop processors** (`cio/harness/runloop.py`
++ `processors.py`, fired in `agent.py:ask()` — unconditional, the model cannot skip
+them); V3 stays a model-pulled tool via `tools.py` → `dispatch`. See
+`docs/HARNESS-X-DESIGN.md`.
 
-- **V1 `consistency.py` → `harness_check_trade_plan`.** Cross-checks an emitted
-  trade plan against the agent's own rule set before it leaves the agent. Rules:
+- **V1 `consistency.py` (processor `ConsistencyProcessor`).** Cross-checks an emitted
+  trade plan (parsed from a ```` ```plan {json} ```` block) against the agent's own
+  rule set before it leaves the agent. Rules:
   `R1_REL_WEAKNESS` (a pullback/limit entry that fills while the market is up/flat
   implies relative underperformance — the "Rule 2c" / Rule-6 self-contradiction;
   `detail.catalyst_check_required` is set at **any** severity, so a sub-threshold
   WARN still means "catalyst check required, not a valid naked entry"), `R2`
   coherence, `R3` R:R floor, `R4` earnings window, `R5` chase. `CheckResult.blocked`
   iff any BLOCK finding.
-- **V2 `citation.py` → `harness_verify_citations`.** Fetch-before-cite: resolves
+- **V2 `citation.py` (processor `CitationProcessor`).** Fetch-before-cite: resolves
   every cited URL (injected resolver; stdlib `http_resolver` default) and fails
   closed on a dead link; only **live** sources count toward material-fact
   corroboration via `cio/data/source_policy.is_verified`. Extends the Evidence
   Integrity policy (see EVIDENCE-INTEGRITY.md) with the liveness check it lacked.
-- **V3 `event_study.py` → `harness_event_study`.** Post-catalyst forward-return
+- **V3 `event_study.py` → `harness_event_study` (tool).** Post-catalyst forward-return
   **distribution** (mean/median/quartiles/hit-rate) by event type — empirical when
   ≥8 historical analogs exist (`prices_provider_samples` off the `prices` table),
   else a labelled reference prior. Never a point forecast.

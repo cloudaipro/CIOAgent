@@ -170,6 +170,33 @@ class AuditEntry:
 
 
 @dataclass
+class SkillManifest:
+    """Change-manifest (HarnessX §B.3 / Table 9): a falsifiable record carried by an
+    admitted skill. The load-bearing field is ``attribution_signature`` — a trace
+    feature that MUST appear when the skill fires (e.g. "Finding code=R1_REL_WEAKNESS").
+    Later you grep production transcripts for it to confirm the skill is actually
+    working, not silently inert. ``capability_evidence`` is the Level-2 round-trip
+    proof; ``rollback_target`` is where to revert on regression.
+    """
+    bucket: str = ""                 # prompt | tool | processor | config | validator
+    predicted_unlocks: list[str] = field(default_factory=list)
+    predicted_stabilizes: list[str] = field(default_factory=list)
+    predicted_at_risk: list[str] = field(default_factory=list)
+    attribution_signature: str = ""
+    capability_evidence: str = ""
+    rollback_target: str = ""
+
+    def complete(self) -> bool:
+        """A self-authored skill must declare how to detect it fired AND what it
+        is expected to do (else the claim is not falsifiable)."""
+        return bool(self.attribution_signature) and bool(
+            self.predicted_unlocks or self.predicted_stabilizes)
+
+    def to_row(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class HarnessSkill:
     """A harness capability under registry governance.
 
@@ -191,6 +218,7 @@ class HarnessSkill:
     check: Callable[[Any], Any] | None = None
     audit: list[AuditEntry] = field(default_factory=list)
     verify_detail: dict[str, Any] = field(default_factory=dict)
+    manifest: "SkillManifest | None" = None
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -206,4 +234,5 @@ class HarnessSkill:
             "approved_by": self.approved_by,
             "audit": [asdict(a) for a in self.audit],
             "verify_detail": dict(self.verify_detail),
+            "manifest": self.manifest.to_row() if self.manifest else None,
         }

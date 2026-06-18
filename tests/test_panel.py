@@ -151,8 +151,8 @@ def test_stock_panel_in_cio_tools():
     assert "stock_indicators" in tool_names, (
         f"'stock_indicators' not found in CIO_TOOLS. Current tools: {tool_names}"
     )
-    assert len(agent_mod.CIO_TOOLS) == 42, (
-        f"Expected 42 tools in CIO_TOOLS, got {len(agent_mod.CIO_TOOLS)}: {tool_names}"
+    assert len(agent_mod.CIO_TOOLS) == 44, (
+        f"Expected 44 tools in CIO_TOOLS, got {len(agent_mod.CIO_TOOLS)}: {tool_names}"
     )
 
 
