@@ -21,7 +21,7 @@ backend outage or budget exhaustion degrades gracefully instead of silencing a r
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 42 in-process MCP tools
+                  ├─► cio/agent.py      Claude agent (Pro auth) + 46 in-process MCP tools
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
                   │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
@@ -31,6 +31,7 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   │     cio/stock/*       yfinance quotes, cache, 40 TA strategies, panel
                   │     cio/stock/viz/*   指標視覺化: ChartSpec core → matplotlib PNG / bokeh HTML
                   │     cio/web.py        Firecrawl-backed web search + scrape
+                  │     cio/harness/*    deterministic checks (trade-plan consistency, fetch-before-cite, event-study) + self-authoring skill gate
                   │     cio/timeutil.py   local TZ + is_trading_day (NYSE calendar)
                   │     cio/econ_calendar.py  high-impact econ-event store + deterministic NFP seeding
                   │     cio/scheduler.py  APScheduler: daily digest + EOD price refresh + 06:00 briefing + econ-event alert
@@ -293,6 +294,32 @@ auto-fills regardless. Inspect/manage everything on the dashboard's **Econ event
 Agent tools: `add_econ_event`, `list_econ_events`. Timing knobs under
 [Run 24/7](#run-247-systemd). Full write-up: **[docs/ECON-EVENT-ALERTS.md](docs/ECON-EVENT-ALERTS.md)**.
 
+## Harness — deterministic checks & self-authoring (`cio/harness/`)
+
+A zero-LLM-cost, fail-closed check layer (same discipline as TIRF) that turns
+user-found agent defects into durable, automated checks instead of one-off
+patches. Four agent tools, all pure Python — no model call in the hot path:
+
+- **`harness_check_trade_plan`** (V1) — consistency gate for an emitted entry/exit
+  plan. Catches a pullback/limit entry that doubles as a relative-weakness signal
+  (`R1`, the "Rule 2c" / Rule-6 case), incoherent stop/target, sub-floor R:R, and
+  short pre-earnings windows. `R1` at **any** severity ⇒ catalyst-check required,
+  not a valid naked entry.
+- **`harness_verify_citations`** (V2) — fetch-before-cite. Resolves every cited URL
+  and fails closed on a dead link; only **live** sources corroborate a material
+  fact (reuses `cio/data/source_policy.py`). The liveness check the prose citation
+  rule lacked.
+- **`harness_event_study`** (V3) — post-catalyst forward-return **distribution**
+  (mean/median/quartiles), never a point forecast.
+- **`harness_propose_skill`** (Meta) — the agent may only *propose* a new check;
+  the owner drives `PROPOSED → VERIFIED → APPROVED → ACTIVE` via the **Skills**
+  dashboard tab or `python -m cio.harness.admin`. Approve is refused before Verify,
+  Activate before Approve; no model-authored code ever executes.
+
+Write-ups: **[docs/HARNESS-ENGINEERING-EVALUATION.md](docs/HARNESS-ENGINEERING-EVALUATION.md)**
+(why), **[docs/HARNESS-ENGINEERING-SPEC.md](docs/HARNESS-ENGINEERING-SPEC.md)** (what),
+**[docs/HARNESS-TESTING-PLAN.md](docs/HARNESS-TESTING-PLAN.md)** (tests).
+
 ## Setup
 
 ```bash
@@ -466,6 +493,10 @@ Pages:
   the rest are populated by the agent from verified sources.
 - **Sanitizer** — audit trail of the figures-sanitizer: every note it rewrote (figures
   stripped) or rejected, with the agent, symbol, what was removed, and the stored result.
+- **Skills** — self-authored harness checks the agent proposed (it can only propose).
+  Drive the approval gate with per-row buttons: **Verify → Approve → Activate**.
+  Approve is refused before Verify, Activate before Approve — mirrors
+  `python -m cio.harness.admin`.
 - **Configure** — edit `config/committee_models.yaml` from the UI instead of a text editor.
   **Fallback chain settings** section: one editable table per named setting (per link: service
   dropdown, model dropdown, daily token limit); add new settings by name; delete settings
@@ -505,3 +536,5 @@ git-ignored; logging never breaks a turn.
 - Accounting domain (ledgers, COGS, P&L) and inventory stock — share `db.py`.
 - Richer committee data (macro/SEC/news feeds; currently yfinance + LLM reasoning).
 - FIFO cost-basis option.
+- Harness rule-pointer migration: once the harness has clean production runs, point the
+  stored swing/citation rules at the tools ([docs/HARNESS-RULE-POINTERS-DRAFT.md](docs/HARNESS-RULE-POINTERS-DRAFT.md)).

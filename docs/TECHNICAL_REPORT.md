@@ -39,7 +39,7 @@ final report is delivered as a **PDF**, with an on-request **Traditional Chinese
 ```mermaid
 flowchart TD
     TG["Telegram"] <--> BOT["cio/bot.py<br/>handlers, access gate, /stop, single-flight, scheduler"]
-    BOT --> AGENT["cio/agent.py<br/>CIOAgent (SDK) + 23 MCP tools"]
+    BOT --> AGENT["cio/agent.py<br/>CIOAgent (SDK) + 46 MCP tools"]
     BOT --> COMM["cio/committee/*<br/>investment committee pipeline"]
     BOT --> WMA["cio/watchlist_monitor/*<br/>pre-market watchlist briefing"]
     AGENT --> CTX["cio/context.py<br/>memory injection"]
@@ -73,8 +73,9 @@ flowchart TD
 | Module | Responsibility |
 |---|---|
 | `bot.py` | Telegram I/O; **access-control gate**; routes text/photo/CSV to the per-chat agent; `/committee`, **`/briefing`**, `/subscribe`, **`/stop`**; **per-chat single-flight** (block=False long handlers); boot reindex, scheduler start, eager pre-warm |
-| `agent.py` | `CIOAgent` wraps one SDK session; 23 in-process MCP tools (incl. `web_search`/`web_scrape`/`watchlist_prices`); rolling sessions, PreCompact hook, nudge, reflection loop |
+| `agent.py` | `CIOAgent` wraps one SDK session; 46 in-process MCP tools (incl. `web_search`/`web_scrape`/`watchlist_prices` and 4 harness checks); rolling sessions, PreCompact hook, nudge, reflection loop |
 | `web.py` | Firecrawl-backed `search` / `scrape` (async `httpx` → `/v2`); output-capped, offline-safe; powers the agent's web tools |
+| `harness/` | Deterministic, zero-LLM check layer (§12): trade-plan consistency (V1), fetch-before-cite (V2), event-study distribution (V3), plus a self-authoring skill gate (`registry`/`store`/`admin`). Exposes 4 agent tools |
 | `context.py` | Assembles the injected "hot" memory block within a token budget (`build_memory_block` chat-scoped, `build_scope_block` arbitrary-scoped) |
 | `recall.py` | fastembed embeddings + `sqlite-vec` ANN + FTS5, fused with RRF; strict-scope recall (`include_global`) |
 | `memory.py` | Tiered note store, profile, digests, playbooks, eviction, chat registry, **figures firewall** |
@@ -553,6 +554,11 @@ framework, zero new deps), bound `127.0.0.1`. Launch: `python -m cio.dashboard`.
   enumerates every scope across **both** stores (`chat:*` / `global` in `cio.db`,
   `committee:<role>` in `committee.db`); each scope lists its notes with tier, key, value,
   hits, importance, source, and update time. Read-only, like the rest of the dashboard.
+- `/skills` — **self-authored harness-skill approval queue** (§12). GET renders the
+  governance table (status badge, trigger/spec, gate-aware action buttons); `do_POST`
+  dispatches `verify`/`approve`/`activate`/`reject`/`retire` through the same
+  `store.transition` / `admin._verify` gate as the CLI (approve refused before VERIFIED,
+  activate before APPROVED), PRG back. The agent can only *propose*, never approve here.
 - `/` — overview of all three.
 
 **Capture funnels** (one per source, so nothing is missed and nothing is double-counted):
@@ -684,6 +690,60 @@ end-to-end against AAPL/NVDA (NIM specialists + Opus CIO) and rendered to a real
 CJK-embedded PDF; web tools live-verified against a self-hosted Firecrawl.
 
 Run: `.venv/bin/python -m pytest -q`
+
+---
+
+## 12. Harness layer (`cio/harness/`)
+
+A deterministic, zero-LLM-cost, fail-closed check layer (same discipline as TIRF)
+that converts user-found agent defects into durable automated checks instead of
+one-off patches. Pure Python — no model call in any hot path; HTTP and DB are
+injected so the core is offline-testable.
+
+**Checks (each an agent tool via `tools.py` → `dispatch`, reusing `TOOL_SPECS`):**
+
+- **V1 `consistency.py` → `harness_check_trade_plan`.** Cross-checks an emitted
+  trade plan against the agent's own rule set before it leaves the agent. Rules:
+  `R1_REL_WEAKNESS` (a pullback/limit entry that fills while the market is up/flat
+  implies relative underperformance — the "Rule 2c" / Rule-6 self-contradiction;
+  `detail.catalyst_check_required` is set at **any** severity, so a sub-threshold
+  WARN still means "catalyst check required, not a valid naked entry"), `R2`
+  coherence, `R3` R:R floor, `R4` earnings window, `R5` chase. `CheckResult.blocked`
+  iff any BLOCK finding.
+- **V2 `citation.py` → `harness_verify_citations`.** Fetch-before-cite: resolves
+  every cited URL (injected resolver; stdlib `http_resolver` default) and fails
+  closed on a dead link; only **live** sources count toward material-fact
+  corroboration via `cio/data/source_policy.is_verified`. Extends the Evidence
+  Integrity policy (see EVIDENCE-INTEGRITY.md) with the liveness check it lacked.
+- **V3 `event_study.py` → `harness_event_study`.** Post-catalyst forward-return
+  **distribution** (mean/median/quartiles/hit-rate) by event type — empirical when
+  ≥8 historical analogs exist (`prices_provider_samples` off the `prices` table),
+  else a labelled reference prior. Never a point forecast.
+
+**Self-authoring loop (the Meta capability).** `registry.py` governs an in-process
+admission gate `PROPOSED → VERIFIED → APPROVED → ACTIVE`; `store.py` persists
+governance records to `data/harness_skills.json` (cfo.db is never migrated). The
+agent's only write is `harness_propose_skill` (files a PROPOSED record — it cannot
+verify/approve/activate). The owner drives the gate via `python -m cio.harness.admin`
+or the dashboard **Skills** tab (§8). Invariants: `verify` runs an owner-committed
+`(check, cases)` from `candidates.py` (or an explicit `--manual` attestation);
+`approve` is refused unless VERIFIED; `activate` unless APPROVED; every transition
+is audited. No model-authored code ever executes — the registry governs lifecycle,
+it does not run unreviewed code.
+
+**Why it sits beside the prompt rules.** The same defects are also covered by
+stored behavioral memory (`mem_notes` `swing_entry_threesome_rule`,
+`swing_screen_catalyst_rule`, `evidence_citation_rule`) and playbook
+`swing_watchlist_reevaluation`. The harness is the deterministic enforcement of
+those binary rules; V1's severity only escalates WARN→BLOCK and never downgrades a
+relative-weakness finding to "ignore", keeping all three in agreement. Migrating
+the prose rules to point at the tools is deferred until the harness is proven
+(`HARNESS-RULE-POINTERS-DRAFT.md`).
+
+**Tests:** `tests/test_harness.py` (rules, gate, MCHP/INTC defect replays,
+store/admin gate, agent wiring) + dashboard skill-UI tests in `tests/test_dashboard.py`.
+Design notes: `HARNESS-ENGINEERING-EVALUATION.md` (why), `HARNESS-ENGINEERING-SPEC.md`
+(what), `HARNESS-TESTING-PLAN.md` (tests).
 
 ---
 
