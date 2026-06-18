@@ -237,6 +237,13 @@ ending in SHIP.
   failures, unrelated, to be triaged separately.
 - For an actual investment decision, the multi-agent committee (`run_committee`) remains the verified
   gold path; the conversational agent is advisory.
+- **Extended (2026-06) by harness V2 — fetch-before-cite.** `cio/harness/citation.py`
+  (`harness_verify_citations`) closes the residual gap this policy left open: a *live* URL on a
+  reputable host passes tiering here, but a **fabricated/dead** URL (e.g. the 2026-06-18 INTC CNBC
+  404) would not. V2 resolves every cited URL and fails closed on a dead link, then applies this
+  policy's corroboration rule (`source_policy.is_verified`) over **live sources only** — so a dead
+  link can neither be cited nor launder a material fact. It reuses `source_policy` (no second copy of
+  the trust rules). See `HARNESS-ENGINEERING-SPEC.md` and TECHNICAL_REPORT §12.
 
 ---
 
