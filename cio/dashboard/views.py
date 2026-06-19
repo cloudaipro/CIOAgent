@@ -63,33 +63,77 @@ body { font: 14px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Inter,sans-
        background-attachment: fixed; color: var(--text);
        -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 
-header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center;
-         gap: 6px; flex-wrap: wrap; padding: 11px 24px;
-         background: var(--header-bg); backdrop-filter: blur(14px) saturate(150%);
-         border-bottom: 1px solid var(--line); }
-header .brand { font-weight: 700; letter-spacing: .3px; margin-right: 16px; font-size: 15px;
-                color: var(--text); display: flex; align-items: center; gap: 9px; }
-header .brand .dot { width: 9px; height: 9px; border-radius: 50%;
+:root { --side-w: 250px; --side-w-min: 66px; }
+
+/* Left sidebar nav — fixed, vertical, collapsible to an icon rail. Hierarchical:
+   category groups (.group > .grouplabel) over their links. State (expanded/collapsed)
+   lives on <html data-nav> and persists in localStorage, applied pre-paint (no flash). */
+.sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 30; width: var(--side-w);
+       display: flex; flex-direction: column; gap: 1px; padding: 14px 12px;
+       overflow-y: auto; overflow-x: hidden;
+       background: var(--header-bg); backdrop-filter: blur(14px) saturate(150%);
+       border-right: 1px solid var(--line); transition: width .18s ease; }
+:root[data-nav="collapsed"] .sidebar { width: var(--side-w-min); padding: 14px 9px; }
+
+.sidehead { display: flex; align-items: center; gap: 8px; padding: 2px 6px 8px; }
+.sidebar .brand { font-weight: 700; letter-spacing: .3px; font-size: 15px; color: var(--text);
+       display: flex; align-items: center; gap: 10px; min-width: 0; }
+.sidebar .brand .dot { width: 9px; height: 9px; border-radius: 50%; flex: none;
        background: linear-gradient(135deg,var(--accent),var(--accent-2));
        box-shadow: 0 0 12px var(--accent); }
-header a { color: var(--muted); text-decoration: none; font-weight: 500;
-           padding: 6px 12px; border-radius: 8px; line-height: 1;
-           transition: background .15s, color .15s; }
-header a:hover { color: var(--text); background: var(--hover); }
-header a.active { color: var(--text); background: var(--accent-soft);
-                  box-shadow: inset 0 0 0 1px var(--accent-line); }
-header .themebtn { margin-left: auto; padding: 0; width: 30px; height: 30px;
+.navtoggle { margin-left: auto; flex: none; width: 28px; height: 28px; padding: 0;
        display: inline-flex; align-items: center; justify-content: center; font-size: 14px;
        line-height: 1; background: var(--surface); border: 1px solid var(--line);
-       border-radius: 999px; color: var(--text); cursor: pointer;
-       transition: background .15s, border-color .15s; }
-header .themebtn:hover { background: var(--hover); border-color: var(--line-strong); }
-header .lvl { margin-left: 8px; color: var(--muted); font-weight: 600; font-size: 11px;
-       text-transform: uppercase; letter-spacing: .5px;
-       padding: 5px 11px; border: 1px solid var(--line); border-radius: 999px;
-       background: var(--surface); }
+       border-radius: 8px; color: var(--muted); cursor: pointer;
+       transition: background .15s, border-color .15s, color .15s; }
+.navtoggle:hover { background: var(--hover); color: var(--text); border-color: var(--line-strong); }
 
-main { padding: 30px 24px 72px; max-width: 1180px; margin: 0 auto; }
+.sidebar .search { width: 100%; margin: 0 0 6px; padding: 7px 11px; font-size: 13px; }
+
+.sidebar .group { display: flex; flex-direction: column; gap: 1px; }
+.sidebar .grouplabel { font-size: 10px; font-weight: 700; text-transform: uppercase;
+       letter-spacing: .7px; color: var(--faint); padding: 13px 10px 4px; }
+.sidebar a { display: flex; align-items: center; gap: 11px; color: var(--muted);
+       text-decoration: none; font-weight: 500; padding: 8px 10px; border-radius: 8px;
+       line-height: 1.15; white-space: nowrap; transition: background .15s, color .15s; }
+.sidebar a:hover { color: var(--text); background: var(--hover); }
+.sidebar a.active { color: var(--text); background: var(--accent-soft);
+       box-shadow: inset 0 0 0 1px var(--accent-line); }
+.sidebar a .ico { flex: none; width: 22px; text-align: center; font-size: 15px; line-height: 1; }
+.sidebar a .label { overflow: hidden; text-overflow: ellipsis; }
+
+.sidebar .foot { margin-top: auto; display: flex; align-items: center; gap: 9px;
+       padding: 12px 6px 2px; }
+.themebtn { flex: none; padding: 0; width: 30px; height: 30px; display: inline-flex;
+       align-items: center; justify-content: center; font-size: 14px; line-height: 1;
+       background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+       color: var(--text); cursor: pointer; transition: background .15s, border-color .15s; }
+.themebtn:hover { background: var(--hover); border-color: var(--line-strong); }
+.lvl { color: var(--muted); font-weight: 600; font-size: 11px; text-transform: uppercase;
+       letter-spacing: .5px; padding: 5px 11px; border: 1px solid var(--line);
+       border-radius: 999px; background: var(--surface); white-space: nowrap; }
+
+/* collapsed rail — icons only, text bits hidden, controls centered */
+:root[data-nav="collapsed"] .sidebar .label,
+:root[data-nav="collapsed"] .sidebar .grouplabel,
+:root[data-nav="collapsed"] .sidebar .brandtext,
+:root[data-nav="collapsed"] .sidebar .search,
+:root[data-nav="collapsed"] .sidebar .lvl { display: none; }
+:root[data-nav="collapsed"] .sidebar a { justify-content: center; padding: 9px 0; }
+:root[data-nav="collapsed"] .sidehead { padding: 2px 0 8px; justify-content: center; }
+:root[data-nav="collapsed"] .navtoggle { margin: 0; }
+:root[data-nav="collapsed"] .sidebar .brand { justify-content: center; }
+:root[data-nav="collapsed"] .sidebar .foot { flex-direction: column; padding: 12px 0 2px; }
+
+main { margin-left: var(--side-w); margin-right: auto; padding: 30px 30px 72px;
+       max-width: 1180px; transition: margin-left .18s ease; }
+:root[data-nav="collapsed"] main { margin-left: var(--side-w-min); }
+
+/* narrow screens: never push content full width; expanded sidebar overlays */
+@media (max-width: 860px) {
+  main, :root[data-nav="collapsed"] main { margin-left: var(--side-w-min); }
+  :root[data-nav="expanded"] .sidebar { box-shadow: var(--shadow); }
+}
 h1 { font-size: 23px; font-weight: 700; letter-spacing: -.3px; margin: 0 0 22px;
      display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 h2 { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px;
@@ -201,19 +245,41 @@ ul.symlist .sym { flex: 1; font-variant-numeric: tabular-nums; font-weight: 600;
 """
 
 
-# Nav items: (label, href). The active link is matched against the page title so
-# the current tab is highlighted — Run pages fall under Committee.
+# Nav is hierarchical: a list of (category, items) where each item is (icon, label, href).
+# An empty category renders no header (top-level links). The active link is matched
+# against the page title so the current tab is highlighted — Run pages fall under Committee.
 _NAV = [
-    ("Overview", "/"), ("Token usage", "/usage"), ("Telegram", "/telegram"),
-    ("Detailed history", "/detailed"),
-    ("Committee", "/committee"), ("Watchlist", "/watchlist"),
-    ("Alpha Hunter", "/alpha"), ("Expectancy", "/expectancy"),
-    ("Indicators", "/indicators"),
-    ("Portfolio", "/portfolio"), ("Subscribers", "/subscribers"),
-    ("Memory", "/memory"), ("Playbooks", "/playbooks"),
-    ("Econ events", "/econ"), ("Sanitizer", "/sanitizer"),
-    ("Skills", "/skills"),
-    ("Configure", "/configure"),
+    ("", [
+        ("🏠", "Overview", "/"),
+    ]),
+    ("Committee", [
+        ("🏛", "Committee", "/committee"),
+        ("📈", "Expectancy", "/expectancy"),
+        ("📓", "Playbooks", "/playbooks"),
+    ]),
+    ("Signals", [
+        ("🎯", "Alpha Hunter", "/alpha"),
+        ("⭐", "Watchlist", "/watchlist"),
+        ("📊", "Indicators", "/indicators"),
+    ]),
+    ("Markets", [
+        ("💼", "Portfolio", "/portfolio"),
+        ("🗓", "Econ events", "/econ"),
+    ]),
+    ("Messaging", [
+        ("✈", "Telegram", "/telegram"),
+        ("👥", "Subscribers", "/subscribers"),
+        ("📜", "Detailed history", "/detailed"),
+    ]),
+    ("Agent", [
+        ("🧠", "Memory", "/memory"),
+        ("🧩", "Skills", "/skills"),
+        ("🧪", "Sanitizer", "/sanitizer"),
+    ]),
+    ("System", [
+        ("🪙", "Token usage", "/usage"),
+        ("⚙", "Configure", "/configure"),
+    ]),
 ]
 
 
@@ -221,22 +287,54 @@ _NAV = [
 # in localStorage. The head script applies the stored choice before first paint (no
 # flash); the body script wires the button and keeps its icon in sync. No-JS → light.
 _THEME_HEAD = (
-    "<script>try{document.documentElement.dataset.theme="
-    "localStorage.getItem('cio-theme')||'light';}catch(e){}</script>"
+    "<script>try{var d=document.documentElement;"
+    "d.dataset.theme=localStorage.getItem('cio-theme')||'light';"
+    "d.dataset.nav=localStorage.getItem('cio-nav')||"
+    "(innerWidth<=860?'collapsed':'expanded');}catch(e){}</script>"
 )
 _THEME_JS = """<script>
 (function(){
+  var root=document.documentElement;
+  // theme toggle
   var btn=document.getElementById('themebtn');
-  if(!btn) return;
-  function cur(){return document.documentElement.dataset.theme==='dark'?'dark':'light';}
-  function paint(){btn.textContent=cur()==='dark'?'\\u2600':'\\u263E';
-    btn.title='Switch to '+(cur()==='dark'?'light':'dark')+' theme';}
-  paint();
-  btn.addEventListener('click',function(){
-    var next=cur()==='dark'?'light':'dark';
-    document.documentElement.dataset.theme=next;
-    try{localStorage.setItem('cio-theme',next);}catch(e){}
+  if(btn){
+    var cur=function(){return root.dataset.theme==='dark'?'dark':'light';};
+    var paint=function(){btn.textContent=cur()==='dark'?'\\u2600':'\\u263E';
+      btn.title='Switch to '+(cur()==='dark'?'light':'dark')+' theme';};
     paint();
+    btn.addEventListener('click',function(){
+      var next=cur()==='dark'?'light':'dark';
+      root.dataset.theme=next;
+      try{localStorage.setItem('cio-theme',next);}catch(e){}
+      paint();
+    });
+  }
+  // sidebar collapse/expand
+  var nt=document.getElementById('navtoggle');
+  var navState=function(){return root.dataset.nav==='collapsed'?'collapsed':'expanded';};
+  var navPaint=function(){if(!nt)return; var c=navState()==='collapsed';
+    nt.textContent=c?'\\u00BB':'\\u00AB';
+    nt.title=(c?'Expand':'Collapse')+' sidebar';
+    nt.setAttribute('aria-label',nt.title);};
+  navPaint();
+  if(nt)nt.addEventListener('click',function(){
+    var next=navState()==='collapsed'?'expanded':'collapsed';
+    root.dataset.nav=next;
+    try{localStorage.setItem('cio-nav',next);}catch(e){}
+    navPaint();
+  });
+  // search filter — hides non-matching links and empty category groups
+  var s=document.getElementById('navsearch');
+  if(s)s.addEventListener('input',function(){
+    var q=s.value.trim().toLowerCase();
+    root.querySelectorAll('.sidebar .group').forEach(function(g){
+      var any=false;
+      g.querySelectorAll('a').forEach(function(a){
+        var hit=a.textContent.toLowerCase().indexOf(q)>=0;
+        a.style.display=hit?'':'none'; if(hit)any=true;
+      });
+      g.style.display=any?'':'none';
+    });
   });
 })();
 </script>"""
@@ -274,24 +372,39 @@ def render_indicators_form(level: int, error: str = "",
 
 def _page(title: str, body: str, level: int) -> str:
     active = "Committee" if title == "Run" else title
-    nav = "".join(
-        f"<a href='{esc(href)}' class='{'active' if label == active else ''}'>"
-        f"{esc(label)}</a>"
-        for label, href in _NAV
-    )
+    groups = []
+    for category, items in _NAV:
+        links = "".join(
+            f"<a href='{esc(href)}' title='{esc(label)}' "
+            f"class='{'active' if label == active else ''}'>"
+            f"<span class='ico'>{icon}</span>"
+            f"<span class='label'>{esc(label)}</span></a>"
+            for icon, label, href in items
+        )
+        head = f"<div class='grouplabel'>{esc(category)}</div>" if category else ""
+        groups.append(f"<div class='group'>{head}{links}</div>")
+    nav = "".join(groups)
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>{esc(title)} · CIO dev dashboard</title>"
         + _THEME_HEAD
         + f"<style>{_CSS}</style></head><body>"
-        "<header>"
-        "<span class='brand'><span class='dot'></span>CIO</span>"
+        "<nav class='sidebar'>"
+        "<div class='sidehead'>"
+        "<span class='brand'><span class='dot'></span>"
+        "<span class='brandtext'>CIO</span></span>"
+        "<button id='navtoggle' class='navtoggle' type='button'>«</button>"
+        "</div>"
+        "<input id='navsearch' class='search' type='search' placeholder='Search…' "
+        "aria-label='Filter navigation' autocomplete='off'>"
         + nav
-        + "<button id='themebtn' class='themebtn' type='button' "
+        + "<div class='foot'>"
+          "<button id='themebtn' class='themebtn' type='button' "
           "aria-label='Toggle theme' title='Toggle theme'>☾</button>"
         + f"<span class='lvl'>capture level {esc(level)}</span>"
-        "</header><main>" + body + "</main>" + _THEME_JS + "</body></html>"
+        "</div></nav>"
+        "<main>" + body + "</main>" + _THEME_JS + "</body></html>"
     )
 
 
