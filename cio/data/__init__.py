@@ -6,9 +6,10 @@ return empty results without any network call, so the rest of CIOAgent — and t
 whole test suite — behaves exactly as before. Set the env values (see
 .env.example) to switch each source on.
 """
-from . import edgar, finnhub, clinicaltrials, ibkr, gdelt
+from . import edgar, finnhub, clinicaltrials, ibkr, gdelt, fred
 from .edgar import recent_filings
 from .gdelt import headlines as gdelt_headlines, tone_volume as gdelt_tone_volume
+from .fred import yield_curve as fred_yield_curve, regime_label as fred_regime_label
 from .finnhub import (
     analyst_recs,
     company_news,
@@ -25,9 +26,12 @@ __all__ = [
     "clinicaltrials",
     "ibkr",
     "gdelt",
+    "fred",
     "recent_filings",
     "gdelt_headlines",
     "gdelt_tone_volume",
+    "fred_yield_curve",
+    "fred_regime_label",
     "analyst_recs",
     "company_news",
     "earnings_calendar",

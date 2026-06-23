@@ -100,6 +100,85 @@ def _exposure_table(assessments: list[dict]) -> str:
     return "\n".join(out)
 
 
+def _risk_bias(counts: dict[str, int], regime: dict | None) -> str:
+    """Deterministic risk-on/off read from watchlist breadth + the FRED regime.
+
+    Port of worldmonitor's rule-summary bias line (no LLM). Breadth sets the base
+    lean; a 'risk-off' macro regime can only DARKEN it (a defensive backdrop never
+    reads as risk-on even on green breadth), and 'risk-on' macro can lift a mixed
+    tape. Regime is the optional cio.data.fred snapshot; None = breadth only."""
+    bull = counts.get("bullish", 0)
+    bear = counts.get("bearish", 0)
+    label = regime.get("label") if isinstance(regime, dict) else None
+    if bull > bear * 2:
+        base = "risk-on"
+    elif bear > bull:
+        base = "risk-off"
+    else:
+        base = "mixed"
+    if label == "risk-off" and base == "risk-on":
+        return "mixed (macro caution overrides breadth)"
+    if label == "risk-off":
+        return "risk-off"
+    if label == "risk-on" and base == "mixed":
+        return "leaning risk-on"
+    return base
+
+
+def build_market_brief(assessments: list[dict], regime: dict | None = None,
+                       headline_count: int | None = None) -> str:
+    """Deterministic daily market brief block (zero LLM).
+
+    Ported from worldmonitor's buildRuleSummary: a rules-only snapshot of breadth +
+    macro regime + news flow. Reuses the WMA assessments' overall_status (no extra
+    TA fetch). *regime* is an optional {label, spread_2s10s, inverted, hy_spread}
+    snapshot (see cio.data.fred); the regime line renders only when present (i.e.
+    only when FRED_API_KEY is set). Plain markdown; never raises."""
+    c = _counts(assessments)
+    bias = _risk_bias(c, regime)
+    lines = [
+        f"**Bias:** {bias}  ",
+        f"**Breadth:** leaders {c['bullish']}  |  neutral {c['neutral']}  |  "
+        f"defensive {c['bearish']}  ",
+    ]
+    if isinstance(regime, dict) and regime:
+        bits = []
+        if regime.get("label"):
+            bits.append(f"regime {regime['label']}")
+        if regime.get("inverted") is not None:
+            curve = "INVERTED" if regime.get("inverted") else "normal"
+            spread = regime.get("spread_2s10s")
+            bits.append(f"yield curve {curve}"
+                        + (f" (2s10s {spread:+.0f}bps)" if spread is not None else ""))
+        if regime.get("hy_spread") is not None:
+            bits.append(f"HY OAS {regime['hy_spread']:.0f}bps")
+        if bits:
+            lines.append("**Macro:** " + "  |  ".join(bits) + "  ")
+    if headline_count:
+        lines.append(f"**News flow:** {headline_count} watchlist headlines in the last 24h  ")
+    return "\n".join(lines)
+
+
+def _regime_snapshot() -> dict | None:
+    """Best-effort FRED regime snapshot for the brief. None when FRED is off (no
+    key) or on any error — the brief then renders breadth-only. Never raises."""
+    try:
+        from ..data import fred
+        yc = fred.yield_curve()
+        label = fred.regime_label()
+        hy = fred.hy_spread()
+        if not yc and label is None and hy is None:
+            return None
+        snap = dict(yc)
+        if label is not None:
+            snap["label"] = label
+        if hy is not None:
+            snap["hy_spread"] = hy
+        return snap or None
+    except Exception:
+        return None
+
+
 def briefing_summary(assessments: list[dict], macro: dict | None = None) -> str:
     """One short plain-text block for Telegram (no Markdown formatting chars)."""
     if not assessments:
@@ -196,6 +275,10 @@ def build_briefing(assessments: list[dict], as_of: str = "",
     parts.append(f"**Watchlist:** 🟢 bullish {c['bullish']}  |  "
                  f"⚪ neutral {c['neutral']}  |  🔴 bearish {c['bearish']}  ")
     parts.append(f"**Highest priority:** {hp['ticker'] if hp else '—'}\n")
+
+    # ── Market Brief (deterministic: breadth + macro regime, zero LLM) ──────
+    parts.append("## Market Brief\n")
+    parts.append(build_market_brief(assessments, regime=_regime_snapshot()) + "\n")
 
     # ── Global Market Intelligence (must appear before stock analysis) ──────
     if macro:

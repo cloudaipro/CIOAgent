@@ -12,9 +12,10 @@ Public API:
   global_macro_snapshot()       -> dict           (async, one call per run)
   build_briefing(assessments)   -> str            (sync markdown)
   briefing_summary(assessments) -> str            (sync short text)
+  build_market_brief(assessments) -> str          (sync; deterministic breadth+regime)
 """
 from .agent import monitor_symbol, monitor_watchlist, global_macro_snapshot, as_of_now
-from .report import build_briefing, briefing_summary
+from .report import build_briefing, briefing_summary, build_market_brief
 
 __all__ = [
     "monitor_symbol",
@@ -22,5 +23,6 @@ __all__ = [
     "global_macro_snapshot",
     "build_briefing",
     "briefing_summary",
+    "build_market_brief",
     "as_of_now",
 ]

@@ -276,6 +276,64 @@ def test_gdelt_tone_volume_weighted_mean(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# FRED (F8) — yield curve / regime, dormant until FRED_API_KEY set
+# ---------------------------------------------------------------------------
+
+def _fred_obs(value):
+    return {"observations": [{"date": "2026-06-22", "value": str(value)}]}
+
+
+def test_fred_disabled_without_key(monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("FRED must not hit the network without a key")
+
+    monkeypatch.setattr("cio.data.fred.get_json", _boom)
+    from cio.data import fred
+    assert fred.yield_curve() == {}
+    assert fred.hy_spread() is None
+    assert fred.regime_label() is None
+
+
+def test_fred_yield_curve_and_inversion(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "k")
+    from cio.data import fred
+
+    series = {"DGS2": 4.80, "DGS10": 4.20, "DGS30": 4.40}
+
+    def _fake(url, *, params=None, **k):
+        return _fred_obs(series[params["series_id"]])
+
+    monkeypatch.setattr("cio.data.fred.get_json", _fake)
+    yc = fred.yield_curve()
+    assert yc["rate_2y"] == 4.80 and yc["rate_10y"] == 4.20
+    assert yc["spread_2s10s"] == -60.0          # (4.20 - 4.80) * 100
+    assert yc["inverted"] is True
+
+
+def test_fred_skips_missing_dot_value(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "k")
+    from cio.data import fred
+    # Newest obs is a holiday '.'; must fall back to the prior real value.
+    payload = {"observations": [
+        {"date": "2026-06-22", "value": "."},
+        {"date": "2026-06-21", "value": "4.10"},
+    ]}
+    monkeypatch.setattr("cio.data.fred.get_json", lambda *a, **k: payload)
+    assert fred._latest("DGS10") == 4.10
+
+
+def test_fred_regime_label_risk_off(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "k")
+    from cio.data import fred
+    # Inverted curve + wide HY (>=500bps) -> risk-off.
+    monkeypatch.setattr(fred, "yield_curve", lambda: {"inverted": True})
+    monkeypatch.setattr(fred, "hy_spread", lambda: 550.0)
+    assert fred.regime_label() == "risk-off"
+
+
+# ---------------------------------------------------------------------------
 # bundle.format_bundle — new FILINGS / ANALYST / EARNINGS lines
 # ---------------------------------------------------------------------------
 
