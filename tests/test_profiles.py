@@ -200,7 +200,7 @@ def test_gather_bundle_uses_profile(monkeypatch):
                     "detail": {}, "composite": "bull"}
 
     monkeypatch.setattr(b, "_stock", FakeStock)
-    monkeypatch.setattr(b, "_external", lambda sym, etf: ([], None, None))
+    monkeypatch.setattr(b, "_external", lambda sym, etf: ([], None, None, None))
 
     out = b.gather_bundle("AAPL", profile="monitor")
     assert calls["profile"] == "monitor"

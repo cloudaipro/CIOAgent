@@ -307,7 +307,11 @@ def test_dashboard_form_and_nav():
     from cio.dashboard import views
     html = views.render_indicators_form(2)
     assert "指標視覺化" in html and "/indicators" in html
-    assert "/indicators" in "".join(href for _, href in views._NAV)
+    # _NAV is hierarchical: (category, [(icon, label, href), ...]). Walk both levels.
+    all_hrefs = "".join(
+        href for _cat, items in views._NAV for _icon, _label, href in items
+    )
+    assert "/indicators" in all_hrefs
 
 
 def test_dashboard_form_error():

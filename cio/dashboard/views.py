@@ -278,6 +278,7 @@ _NAV = [
     ]),
     ("System", [
         ("🪙", "Token usage", "/usage"),
+        ("🩺", "Data Health", "/health"),
         ("⚙", "Configure", "/configure"),
     ]),
 ]
@@ -368,6 +369,68 @@ def render_indicators_form(level: int, error: str = "",
         "</form>"
     )
     return _page("Indicators", body, level)
+
+
+_FRESH_COLORS = {
+    "fresh": "#1a7f37", "stale": "#9a6700", "very_stale": "#bc4c00",
+    "error": "#d92b2b", "no_data": "#57606a",
+}
+
+
+def _age_str(secs) -> str:
+    if secs is None:
+        return "—"
+    secs = int(secs)
+    if secs < 90:
+        return f"{secs}s ago"
+    if secs < 5400:
+        return f"{secs // 60}m ago"
+    if secs < 36 * 3600:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def render_health(summary: dict, level: int) -> str:
+    """Data Health — per-source freshness heartbeats + a worst-required rollup.
+
+    Ported from worldmonitor's data-freshness tracker. Answers "is each source's
+    data actually live?" — distinct from a quote's bar-freshness."""
+    overall = summary.get("overall", "no_data")
+    oc = _FRESH_COLORS.get(overall, "#57606a")
+    rows = []
+    for r in summary.get("sources", []):
+        st = r.get("status", "no_data")
+        c = _FRESH_COLORS.get(st, "#57606a")
+        req = "✔" if r.get("required") else ""
+        err = esc(str(r["last_error"])) if r.get("last_error") else ""
+        cnt = r.get("count")
+        rows.append(
+            "<tr>"
+            f"<td>{esc(str(r.get('name', r.get('id', ''))))}</td>"
+            f"<td style='text-align:center'>{req}</td>"
+            f"<td><span style='color:{c};font-weight:600'>{esc(st)}</span></td>"
+            f"<td>{esc(_age_str(r.get('age_seconds')))}</td>"
+            f"<td style='text-align:right'>{cnt if cnt is not None else '—'}</td>"
+            f"<td style='color:#d92b2b'>{err}</td>"
+            "</tr>"
+        )
+    body = (
+        "<h2>Data Health</h2>"
+        "<p>When each external source last returned data — the source heartbeat the "
+        "committee bundle leans on (distinct from a quote's bar-freshness). A "
+        "<b>required</b> source going stale or dark reddens the overall status, so a "
+        "panel never shows a confident read over missing inputs.</p>"
+        f"<p>Overall (required sources): "
+        f"<span style='color:{oc};font-weight:700'>{esc(overall)}</span></p>"
+        "<table><tr><th>Source</th><th>Req</th><th>Status</th><th>Last data</th>"
+        "<th>Count</th><th>Error</th></tr>"
+        + "".join(rows) +
+        "</table>"
+        "<p class='hint'>fresh &lt;15m · stale &lt;2h · very_stale ≥2h · "
+        "no_data never seen · error last call failed. Sources are opt-in: an unset "
+        "key reads no_data — honest, not broken.</p>"
+    )
+    return _page("Data Health", body, level)
 
 
 def _page(title: str, body: str, level: int) -> str:

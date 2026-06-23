@@ -65,6 +65,31 @@ def test_known_low_trust_listed():
     assert sp.classify("reddit.com") == Tier.LOW_TRUST
 
 
+def test_expanded_finance_press_is_reputable():
+    # Finance/business press added 2026-06 (outlet universe cross-checked against
+    # worldmonitor, tiers assigned by THIS policy). Each is Tier 2: corroborates a
+    # material fact with one more independent T2, never backs it alone.
+    for host in ("marketwatch.com", "nikkei.com", "axios.com", "economist.com",
+                 "fortune.com", "morningstar.com", "theinformation.com",
+                 "businessinsider.com", "investors.com", "www.marketwatch.com"):
+        assert sp.classify(host) == Tier.REPUTABLE, host
+
+
+def test_expanded_retail_aggregators_are_low_trust():
+    for host in ("benzinga.com", "marketbeat.com", "investorplace.com",
+                 "tipranks.com", "thestreet.com", "finbold.com",
+                 "simplywall.st", "wallstreetzen.com"):
+        assert sp.classify(host) == Tier.LOW_TRUST, host
+
+
+def test_finance_evidence_axis_not_worldmonitor_axis():
+    # Regression guard for the F1 decision: worldmonitor/shared/source-tiers.json
+    # ranks SEC=3 and Yahoo Finance=4 on its geopolitical-intel axis. Importing
+    # those numbers would demote the primary financial source. Our axis must hold.
+    assert sp.classify("data.sec.gov") == Tier.PRIMARY          # NOT low-trust
+    assert sp.classify("finance.yahoo.com") == Tier.REPUTABLE   # NOT tier-4/low
+
+
 # --- is_verified(): corroboration rule -------------------------------------
 
 def test_one_primary_verifies():

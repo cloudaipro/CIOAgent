@@ -171,6 +171,213 @@ def test_finnhub_analyst_recs_happy_path(monkeypatch):
     assert rec["strong_buy"] == 12
 
 
+# --- insider transactions (F6) ---------------------------------------------
+
+FINNHUB_INSIDER = {
+    "symbol": "AAPL",
+    "data": [
+        {"name": "COOK TIMOTHY", "transactionCode": "P", "change": 5000,
+         "transactionDate": "2026-06-01", "transactionPrice": 200.0},
+        {"name": "MAESTRI LUCA", "transactionCode": "P", "change": 3000,
+         "transactionDate": "2026-06-02", "transactionPrice": 201.0},
+        {"name": "LEVINSON ARTHUR", "transactionCode": "P", "change": 1000,
+         "transactionDate": "2026-06-02", "transactionPrice": 201.5},
+        {"name": "COOK TIMOTHY", "transactionCode": "S", "change": -2000,
+         "transactionDate": "2026-05-15", "transactionPrice": 199.0},
+        {"name": "GRANT GUY", "transactionCode": "A", "change": 10000,
+         "transactionDate": "2026-05-10", "transactionPrice": 0.0},
+    ],
+}
+
+
+def test_finnhub_insider_disabled_without_key(monkeypatch):
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("insider must not hit the network without a key")
+
+    monkeypatch.setattr("cio.data.finnhub.get_json", _boom)
+    assert finnhub.insider_transactions("AAPL") == []
+    assert finnhub.insider_net("AAPL") is None
+
+
+def test_finnhub_insider_parse_classifies_only_open_market_buys(monkeypatch):
+    monkeypatch.setenv("FINNHUB_API_KEY", "test-key")
+    monkeypatch.setattr("cio.data.finnhub.get_json", lambda *a, **k: FINNHUB_INSIDER)
+    rows = finnhub.insider_transactions("AAPL")
+    # Only the three 'P' purchases are buys; the 'A' grant and 'S' sale are not.
+    assert sum(1 for r in rows if r["is_buy"]) == 3
+    grant = next(r for r in rows if r["transaction_code"] == "A")
+    assert grant["is_buy"] is False
+
+
+def test_finnhub_insider_net_detects_cluster_buy(monkeypatch):
+    monkeypatch.setenv("FINNHUB_API_KEY", "test-key")
+    monkeypatch.setattr("cio.data.finnhub.get_json", lambda *a, **k: FINNHUB_INSIDER)
+    net = finnhub.insider_net("AAPL")
+    assert net["buy_count"] == 3
+    assert net["sell_count"] == 1
+    assert net["cluster_buy"] is True                      # 3 distinct buyers
+    assert net["net_shares"] == 5000 + 3000 + 1000 - 2000 + 10000
+
+
+# ---------------------------------------------------------------------------
+# GDELT (F3) — keyless news, enabled by default
+# ---------------------------------------------------------------------------
+
+GDELT_ARTLIST = {"articles": [
+    {"title": "Apple hits record", "url": "http://a", "domain": "reuters.com",
+     "seendate": "20260622T120000Z"},
+    {"title": "Apple chip news", "url": "http://b", "domain": "cnbc.com",
+     "seendate": "20260622T130000Z"},
+]}
+GDELT_TONECHART = {"tonechart": [
+    {"bin": -2, "count": 3}, {"bin": 0, "count": 5}, {"bin": 4, "count": 2},
+]}
+
+
+def test_gdelt_disabled_makes_no_call(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "0")
+
+    def _boom(*a, **k):
+        raise AssertionError("disabled GDELT must not hit the network")
+
+    monkeypatch.setattr("cio.data.gdelt.get_json", _boom)
+    from cio.data import gdelt
+    assert gdelt.headlines("Apple") == []
+    assert gdelt.tone_volume("Apple") == {"volume": 0, "avg_tone": 0.0}
+
+
+def test_gdelt_empty_query_makes_no_call(monkeypatch):
+    from cio.data import gdelt
+    monkeypatch.setattr("cio.data.gdelt.get_json",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no query -> no call")))
+    assert gdelt.headlines("") == []
+    assert gdelt.headlines("   ") == []
+    assert gdelt.tone_volume("") == {"volume": 0, "avg_tone": 0.0}
+
+
+def test_gdelt_headlines_parse(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    from cio.data import gdelt
+    monkeypatch.setattr("cio.data.gdelt.get_json", lambda *a, **k: GDELT_ARTLIST)
+    out = gdelt.headlines("Apple", limit=5)
+    assert [h["title"] for h in out] == ["Apple hits record", "Apple chip news"]
+    assert out[0]["domain"] == "reuters.com"
+
+
+def test_gdelt_tone_volume_weighted_mean(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    from cio.data import gdelt
+    monkeypatch.setattr("cio.data.gdelt.get_json", lambda *a, **k: GDELT_TONECHART)
+    tv = gdelt.tone_volume("Apple")
+    assert tv["volume"] == 10                       # 3 + 5 + 2
+    assert tv["avg_tone"] == 0.2                    # (-2*3 + 0*5 + 4*2) / 10
+
+
+def _capture_query(monkeypatch, ret):
+    """Patch gdelt.get_json to record the query param it was called with."""
+    seen = {}
+
+    def _fake(url, *, params=None, **k):
+        seen["query"] = (params or {}).get("query")
+        return ret
+
+    monkeypatch.setattr("cio.data.gdelt.get_json", _fake)
+    return seen
+
+
+def test_gdelt_english_filter_default(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    monkeypatch.delenv("CIO_GDELT_LANG", raising=False)
+    from cio.data import gdelt
+    seen = _capture_query(monkeypatch, GDELT_ARTLIST)
+    gdelt.headlines("Apple Inc")
+    assert seen["query"] == "Apple Inc sourcelang:eng"   # English filter appended
+
+
+def test_gdelt_lang_override_and_optout(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    from cio.data import gdelt
+    # override to another language
+    monkeypatch.setenv("CIO_GDELT_LANG", "fra")
+    seen = _capture_query(monkeypatch, GDELT_ARTLIST)
+    gdelt.headlines("Apple")
+    assert seen["query"] == "Apple sourcelang:fra"
+    # empty -> opt back into all languages (no filter)
+    monkeypatch.setenv("CIO_GDELT_LANG", "")
+    seen = _capture_query(monkeypatch, GDELT_ARTLIST)
+    gdelt.headlines("Apple")
+    assert seen["query"] == "Apple"
+
+
+def test_gdelt_does_not_double_apply_lang(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    monkeypatch.delenv("CIO_GDELT_LANG", raising=False)
+    from cio.data import gdelt
+    seen = _capture_query(monkeypatch, GDELT_TONECHART)
+    gdelt.tone_volume("Apple sourcelang:spa")       # caller already set a language
+    assert seen["query"] == "Apple sourcelang:spa"  # left as-is, not double-filtered
+
+
+# ---------------------------------------------------------------------------
+# FRED (F8) — yield curve / regime, dormant until FRED_API_KEY set
+# ---------------------------------------------------------------------------
+
+def _fred_obs(value):
+    return {"observations": [{"date": "2026-06-22", "value": str(value)}]}
+
+
+def test_fred_disabled_without_key(monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("FRED must not hit the network without a key")
+
+    monkeypatch.setattr("cio.data.fred.get_json", _boom)
+    from cio.data import fred
+    assert fred.yield_curve() == {}
+    assert fred.hy_spread() is None
+    assert fred.regime_label() is None
+
+
+def test_fred_yield_curve_and_inversion(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "k")
+    from cio.data import fred
+
+    series = {"DGS2": 4.80, "DGS10": 4.20, "DGS30": 4.40}
+
+    def _fake(url, *, params=None, **k):
+        return _fred_obs(series[params["series_id"]])
+
+    monkeypatch.setattr("cio.data.fred.get_json", _fake)
+    yc = fred.yield_curve()
+    assert yc["rate_2y"] == 4.80 and yc["rate_10y"] == 4.20
+    assert yc["spread_2s10s"] == -60.0          # (4.20 - 4.80) * 100
+    assert yc["inverted"] is True
+
+
+def test_fred_skips_missing_dot_value(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "k")
+    from cio.data import fred
+    # Newest obs is a holiday '.'; must fall back to the prior real value.
+    payload = {"observations": [
+        {"date": "2026-06-22", "value": "."},
+        {"date": "2026-06-21", "value": "4.10"},
+    ]}
+    monkeypatch.setattr("cio.data.fred.get_json", lambda *a, **k: payload)
+    assert fred._latest("DGS10") == 4.10
+
+
+def test_fred_regime_label_risk_off(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "k")
+    from cio.data import fred
+    # Inverted curve + wide HY (>=500bps) -> risk-off.
+    monkeypatch.setattr(fred, "yield_curve", lambda: {"inverted": True})
+    monkeypatch.setattr(fred, "hy_spread", lambda: 550.0)
+    assert fred.regime_label() == "risk-off"
+
+
 # ---------------------------------------------------------------------------
 # bundle.format_bundle — new FILINGS / ANALYST / EARNINGS lines
 # ---------------------------------------------------------------------------
@@ -182,7 +389,7 @@ def _bundle(**extra):
         "fundamentals": {"name": "Apple"},
         "ta_signals": {"rsi": "bull"}, "is_etf": False,
         "as_of": "2026-06-04T00:00:00",
-        "filings": [], "analyst": None, "earnings": None,
+        "filings": [], "analyst": None, "earnings": None, "insider": None,
     }
     base.update(extra)
     return base
@@ -196,11 +403,14 @@ def test_format_bundle_renders_new_blocks():
         analyst={"period": "2026-05-01", "strong_buy": 12, "buy": 20, "hold": 5,
                  "sell": 1, "strong_sell": 0},
         earnings={"date": "2026-07-31", "eps_estimate": 1.4, "eps_actual": None},
+        insider={"buy_count": 4, "sell_count": 1, "net_shares": 50000,
+                 "cluster_buy": True},
     )
     text = format_bundle(b)
     assert "FILINGS: 8-K(2026-06-03)" in text
     assert "ANALYST: strong_buy=12" in text
     assert "EARNINGS: next=2026-07-31" in text
+    assert "INSIDER: buys=4" in text and "CLUSTER-BUY" in text
 
 
 def test_format_bundle_na_when_sources_absent():
@@ -209,6 +419,7 @@ def test_format_bundle_na_when_sources_absent():
     assert "FILINGS: N/A (no source)" in text
     assert "ANALYST: N/A (no source)" in text
     assert "EARNINGS: N/A (no source)" in text
+    assert "INSIDER: N/A (no source)" in text
 
 
 def test_gather_bundle_external_disabled_by_default(monkeypatch):
@@ -219,8 +430,8 @@ def test_gather_bundle_external_disabled_by_default(monkeypatch):
     monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
     monkeypatch.setattr("cio.data._http.get_json",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("no network")))
-    filings, analyst, earnings = bundle_mod._external("AAPL", is_etf=False)
-    assert filings == [] and analyst is None and earnings is None
+    filings, analyst, earnings, insider = bundle_mod._external("AAPL", is_etf=False)
+    assert filings == [] and analyst is None and earnings is None and insider is None
 
 
 # ---------------------------------------------------------------------------

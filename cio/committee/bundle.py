@@ -7,6 +7,7 @@ Never raises; all fields default to None when data is missing.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from typing import Any
 
@@ -35,17 +36,18 @@ def _s():
 # was permanently "neutral".
 
 
-def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any]:
+def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any, Any]:
     """Opt-in EDGAR + Finnhub extras for the bundle.
 
-    Returns (filings, analyst, earnings). Both sources are config-gated and
-    offline-safe (see cio.data): unset CIO_SEC_UA / FINNHUB_API_KEY -> empty,
-    no network. Analyst/earnings are skipped for ETFs (not meaningful). This
-    never raises, so a flaky source never breaks bundle gathering.
+    Returns (filings, analyst, earnings, insider). All sources are config-gated
+    and offline-safe (see cio.data): unset CIO_SEC_UA / FINNHUB_API_KEY -> empty,
+    no network. Analyst/earnings/insider are skipped for ETFs (not meaningful).
+    This never raises, so a flaky source never breaks bundle gathering.
     """
     filings: list = []
     analyst = None
     earnings = None
+    insider = None
     try:
         from .. import data
         edgar_on = bool(data.edgar._user_agent())
@@ -60,6 +62,8 @@ def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any]:
                         symbol, finnhub_on)
             _evlog.info("tool=earnings_info symbol=%s configured=%s skipped=etf via=committee",
                         symbol, finnhub_on)
+            _evlog.info("tool=insider_tx symbol=%s configured=%s skipped=etf via=committee",
+                        symbol, finnhub_on)
         else:
             analyst = data.analyst_recs(symbol)
             _evlog.info("tool=analyst_ratings symbol=%s configured=%s source=Finnhub found=%s via=committee",
@@ -67,9 +71,36 @@ def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any]:
             earnings = data.earnings_calendar(symbol)
             _evlog.info("tool=earnings_info symbol=%s configured=%s source=Finnhub found=%s via=committee",
                         symbol, finnhub_on, earnings is not None)
+            insider = data.insider_net(symbol)
+            _evlog.info("tool=insider_tx symbol=%s configured=%s source=Finnhub found=%s via=committee",
+                        symbol, finnhub_on, insider is not None)
     except Exception as e:
         log.debug("external data fetch failed for %s: %s", symbol, e)
-    return filings, analyst, earnings
+    return filings, analyst, earnings, insider
+
+
+def _convergence_on() -> bool:
+    return (os.getenv("CIO_CONVERGENCE") or "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _convergence(symbol: str, is_etf: bool, ta_composite: str, insider):
+    """F10 cross-source convergence for the bundle. Reuses the TA composite +
+    insider already gathered (analyst trend is a cache hit; earnings-surprise +
+    news-spike are fetched inside, each self-gating). ETFs skip it (per-name
+    signals don't apply). Off with CIO_CONVERGENCE=0. Never raises."""
+    if is_etf or not _convergence_on():
+        return None
+    try:
+        from .. import convergence as conv_mod
+        result = conv_mod.convergence(symbol, ta_composite=ta_composite, insider=insider)
+        _evlog.info("tool=convergence symbol=%s label=%s score=%d conviction=%s active=%d via=committee",
+                    symbol, result.get("label"), result.get("score", 0),
+                    result.get("conviction"), result.get("active_count", 0))
+        return result
+    except Exception as e:
+        log.debug("convergence failed for %s: %s", symbol, e)
+        return None
 
 
 def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
@@ -132,6 +163,8 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
             "filings": [],
             "analyst": None,
             "earnings": None,
+            "insider": None,
+            "convergence": None,
         }
 
     # TA signals — situation profile, best-effort (profile_signals never raises
@@ -144,7 +177,8 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
     except Exception as e:
         log.debug("strategy profile %s failed for %s: %s", profile, resolved, e)
 
-    filings, analyst, earnings = _external(resolved, is_etf)
+    filings, analyst, earnings, insider = _external(resolved, is_etf)
+    convergence = _convergence(resolved, is_etf, ta_composite, insider)
 
     return {
         "symbol": symbol,
@@ -159,6 +193,8 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
         "filings": filings,
         "analyst": analyst,
         "earnings": earnings,
+        "insider": insider,
+        "convergence": convergence,
     }
 
 
@@ -255,6 +291,26 @@ def format_bundle(bundle: dict) -> str:
         )
     else:
         lines.append("EARNINGS: N/A (no source)")
+
+    # Finnhub insider transactions — net buy/sell pressure + conviction cluster (opt-in).
+    ins = bundle.get("insider")
+    if ins:
+        cluster = "  CLUSTER-BUY" if ins.get("cluster_buy") else ""
+        lines.append(
+            f"INSIDER: buys={_fmt(ins.get('buy_count'))}  sells={_fmt(ins.get('sell_count'))}  "
+            f"net_shares={_fmt(ins.get('net_shares'))}{cluster}"
+        )
+    else:
+        lines.append("INSIDER: N/A (no source)")
+
+    # F10 cross-source convergence — deterministic tally of where the independent
+    # streams (TA / analyst trend / earnings / insider / news) agree.
+    conv = bundle.get("convergence")
+    if conv and conv.get("active_count"):
+        from .. import convergence as conv_mod
+        lines.append(conv_mod.format_line(conv))
+    else:
+        lines.append("CONVERGENCE: N/A (no active signals)")
 
     lines.append(f"IS_ETF: {bundle.get('is_etf', False)}")
 

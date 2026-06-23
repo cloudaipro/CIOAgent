@@ -39,6 +39,18 @@ def _token() -> str | None:
     return t or None
 
 
+def _record_fresh(n: int) -> None:
+    """Heartbeat the data-freshness monitor when a Finnhub call yields data.
+    Best-effort — a freshness-store hiccup must never affect a data fetch."""
+    if n <= 0:
+        return
+    try:
+        from . import freshness
+        freshness.record("finnhub", n)
+    except Exception:
+        pass
+
+
 def _institutional_enabled() -> bool:
     """Institutional ownership is a PREMIUM Finnhub endpoint. Off by default so the
     free tier never hammers it with 403s (one wasted ~1s rate-limited call + a log
@@ -80,7 +92,9 @@ def company_news(symbol: str, days: int = 7, limit: int = 8) -> list[dict]:
         data = get_json(f"{_BASE}/company-news", params=params, limiter=_limiter)
         cached = data if isinstance(data, list) else []
         _cache.write("finnhub_news", f"{sym}:{days}", cached)
-    return _parse_news(cached, limit)
+    out = _parse_news(cached, limit)
+    _record_fresh(len(out))
+    return out
 
 
 # --- analyst recommendation trends -----------------------------------------
@@ -119,7 +133,9 @@ def analyst_recs(symbol: str):
                         params={"symbol": sym, "token": tok}, limiter=_limiter)
         cached = data if isinstance(data, list) else []
         _cache.write("finnhub_recs", sym, cached)
-    return _latest_recs(cached)
+    rec = _latest_recs(cached)
+    _record_fresh(1 if rec else 0)
+    return rec
 
 
 def analyst_recs_history(symbol: str, periods: int = 2) -> list[dict]:
@@ -196,6 +212,98 @@ def institutional_ownership_pct(symbol: str) -> float | None:
         cached = data if isinstance(data, dict) else {}
         _cache.write("finnhub_ownership", sym, cached)
     return _institutional_pct(cached)
+
+
+# --- insider transactions --------------------------------------------------
+_INSIDER_TTL = 24 * 3600
+
+
+def _parse_insider_rows(rows, limit: int) -> list[dict]:
+    """Finnhub /stock/insider-transactions rows -> our snake_case shape.
+
+    is_buy flags an open-market PURCHASE (transactionCode 'P') with a positive
+    share change — the conviction signal. Grants ('A'), option exercises ('M'),
+    gifts etc. inflate `change` but are NOT discretionary buys, so they are not
+    counted as buys."""
+    out: list[dict] = []
+    for r in (rows or []):
+        if not isinstance(r, dict):
+            continue
+        code = (r.get("transactionCode") or "").strip().upper()
+        change = r.get("change")
+        num_change = change if isinstance(change, (int, float)) else None
+        out.append({
+            "name": (r.get("name") or "").strip(),
+            "change": num_change,
+            "transaction_date": r.get("transactionDate") or r.get("filingDate"),
+            "transaction_code": code,
+            "transaction_price": r.get("transactionPrice"),
+            "is_buy": code == "P" and num_change is not None and num_change > 0,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def insider_transactions(symbol: str, months: int = 3, limit: int = 40) -> list[dict]:
+    """Recent insider transactions for *symbol*, newest-first. [] when disabled.
+
+    Source: Finnhub /stock/insider-transactions (free tier). Each row:
+    {name, change, transaction_date, transaction_code, transaction_price, is_buy}.
+    Returns [] both when disabled (no key) and when there is simply no data — the
+    aggregate helper insider_net() is the one that distinguishes the two (None vs
+    zeros), matching how callers actually branch."""
+    tok = _token()
+    if not tok:
+        return []
+    sym = symbol.strip().upper()
+    cached = _cache.read("finnhub_insider", f"{sym}:{months}", _INSIDER_TTL)
+    if cached is None:
+        today = date.today()
+        params = {"symbol": sym,
+                  "from": str(today - timedelta(days=int(max(1, months)) * 31)),
+                  "to": str(today), "token": tok}
+        data = get_json(f"{_BASE}/stock/insider-transactions", params=params,
+                        limiter=_limiter)
+        rows = data.get("data") if isinstance(data, dict) else None
+        cached = rows if isinstance(rows, list) else []
+        _cache.write("finnhub_insider", f"{sym}:{months}", cached)
+    out = _parse_insider_rows(cached, limit)
+    _record_fresh(len(out))
+    return out
+
+
+def insider_net(symbol: str, months: int = 3, cluster_min: int = 3) -> dict | None:
+    """Aggregate insider buy/sell pressure for *symbol*. None when disabled.
+
+    {buy_count, sell_count, net_shares, cluster_buy}. cluster_buy is True when at
+    least *cluster_min* DISTINCT insiders made open-market purchases in the window
+    — the classic conviction cluster the Alpha funnel and committee care about.
+    Returns a zero-filled dict (not None) when enabled but no data, so callers can
+    tell 'disabled' from 'quiet'."""
+    if not _token():
+        return None
+    rows = insider_transactions(symbol, months=months, limit=200)
+    buyers: set[str] = set()
+    buy_count = sell_count = 0
+    net = 0.0
+    for r in rows:
+        change = r.get("change")
+        if not isinstance(change, (int, float)):
+            continue
+        net += change
+        if r.get("is_buy"):
+            buy_count += 1
+            if r.get("name"):
+                buyers.add(r["name"])
+        elif r.get("transaction_code") == "S" and change < 0:
+            sell_count += 1
+    return {
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "net_shares": int(net),
+        "cluster_buy": len(buyers) >= max(1, cluster_min),
+    }
 
 
 # --- earnings calendar -----------------------------------------------------

@@ -281,3 +281,61 @@ def test_wma_chain_resolves_three_links():
     assert all(link["service"] in ("openai", "claude", "nim") and link["model"]
                for link in chain)
     load_config.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# F7 — deterministic market brief (zero LLM)
+# ---------------------------------------------------------------------------
+
+def _assess(status):
+    return {"ticker": "X", "overall_status": status, "event_importance": "low"}
+
+
+def test_market_brief_breadth_counts():
+    from cio.watchlist_monitor import build_market_brief
+    a = [_assess("bullish"), _assess("bullish"), _assess("neutral"), _assess("bearish")]
+    out = build_market_brief(a)
+    assert "leaders 2" in out and "neutral 1" in out and "defensive 1" in out
+
+
+def test_market_brief_bias_risk_on_off():
+    from cio.watchlist_monitor.report import _risk_bias
+    assert _risk_bias({"bullish": 5, "neutral": 1, "bearish": 1}, None) == "risk-on"
+    assert _risk_bias({"bullish": 1, "neutral": 1, "bearish": 4}, None) == "risk-off"
+    assert _risk_bias({"bullish": 2, "neutral": 1, "bearish": 2}, None) == "mixed"
+
+
+def test_market_brief_regime_overrides_breadth():
+    from cio.watchlist_monitor.report import _risk_bias
+    # Green breadth but risk-off macro -> cannot read risk-on.
+    out = _risk_bias({"bullish": 5, "bearish": 0}, {"label": "risk-off"})
+    assert "risk-on" not in out and "macro caution" in out
+
+
+def test_market_brief_regime_line_present_only_with_regime():
+    from cio.watchlist_monitor import build_market_brief
+    a = [_assess("neutral")]
+    assert "Macro:" not in build_market_brief(a, regime=None)
+    regime = {"label": "caution", "inverted": True, "spread_2s10s": -45.0,
+              "hy_spread": 420.0}
+    out = build_market_brief(a, regime=regime)
+    assert "Macro:" in out and "INVERTED" in out and "HY OAS 420bps" in out
+
+
+def test_market_brief_makes_no_llm_call(monkeypatch):
+    # The brief is pure rules — it must never construct an Anthropic/OpenAI client.
+    import cio.committee.engine as engine
+
+    async def _boom(*a, **k):
+        raise AssertionError("market brief must not call the LLM")
+
+    monkeypatch.setattr(engine, "ask_role", _boom)
+    from cio.watchlist_monitor import build_market_brief
+    out = build_market_brief([_assess("bullish"), _assess("bearish")])
+    assert "Bias:" in out
+
+
+def test_regime_snapshot_none_when_fred_disabled(monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    from cio.watchlist_monitor.report import _regime_snapshot
+    assert _regime_snapshot() is None

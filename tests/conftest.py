@@ -18,9 +18,23 @@ if _REPO_ROOT not in sys.path:
 # (test_convlog overrides this per-test via monkeypatch.)
 os.environ["CIO_DETAILED_LOG"] = "0"
 
+# GDELT is the one external source ENABLED BY DEFAULT (it is keyless), so without
+# this the convergence/spike paths reached via gather_bundle would make live GDELT
+# calls during tests. Force it OFF for the suite; the GDELT-specific tests opt back
+# in with monkeypatch.setenv("CIO_GDELT_ENABLED", "1"). Keeps the suite offline.
+os.environ["CIO_GDELT_ENABLED"] = "0"
+
 import numpy as np
 import pandas as pd
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_freshness(monkeypatch, tmp_path):
+    """Point the data-freshness heartbeat store at a temp file so source fetchers
+    exercised in tests (the finnhub/edgar/yfinance freshness hooks) never write the
+    repo's real data/source_freshness.json."""
+    monkeypatch.setenv("CIO_FRESHNESS_FILE", str(tmp_path / "source_freshness.json"))
 
 
 @pytest.fixture(autouse=True)

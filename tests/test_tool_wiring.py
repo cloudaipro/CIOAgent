@@ -162,12 +162,16 @@ def test_committee_bundle_logs_evidence(monkeypatch, caplog):
     monkeypatch.setattr(data, "recent_filings", lambda sym, limit=4: [{"form": "8-K"}])
     monkeypatch.setattr(data, "analyst_recs", lambda sym: {"buy": 5})
     monkeypatch.setattr(data, "earnings_calendar", lambda sym: {"date": "2026-07-01"})
+    monkeypatch.setattr(data, "insider_net",
+                        lambda sym: {"buy_count": 2, "sell_count": 0,
+                                     "net_shares": 100, "cluster_buy": False})
     with caplog.at_level(logging.INFO, logger="cio.evidence"):
         bundle._external("NBIX", is_etf=False)
     msgs = [r.getMessage() for r in caplog.records if r.name == "cio.evidence"]
     assert any("tool=sec_filings" in m and "via=committee" in m for m in msgs)
     assert any("tool=analyst_ratings" in m and "found=True" in m for m in msgs)
     assert any("tool=earnings_info" in m and "via=committee" in m for m in msgs)
+    assert any("tool=insider_tx" in m and "found=True" in m for m in msgs)
 
 
 def test_committee_bundle_logs_etf_skips(monkeypatch, caplog):

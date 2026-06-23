@@ -35,10 +35,27 @@ TIER_2_REPUTABLE = {
     # PR-wire: company-authored but wire-distributed -> Tier 2 (owner decision).
     # A wire release alone can't back a material fact; needs the matching primary.
     "prnewswire.com", "businesswire.com", "globenewswire.com",
+    # Mainstream finance/business press (added 2026-06; outlet universe
+    # cross-checked against worldmonitor/shared/source-tiers.json). Tiers here are
+    # assigned by THIS policy's finance-evidence axis, NOT worldmonitor's numbers:
+    # worldmonitor ranks reliability for *geopolitical* intel (it scores SEC=3,
+    # Yahoo Finance=4) — the wrong axis for authority over a material financial
+    # fact, where sec.gov is the Tier-1 primary. Editorial finance desks -> Tier 2:
+    # corroborate a material fact with one more independent T2, never back it alone.
+    "marketwatch.com", "nikkei.com", "axios.com", "economist.com",
+    "fortune.com", "morningstar.com", "theinformation.com",
+    "businessinsider.com", "investors.com",
 }
 TIER_3_LOW_TRUST = {
     "monexa.ai", "fool.com", "zacks.com",
     "reddit.com", "stocktwits.com", "seekingalpha.com",
+    # Retail-tip / ratings-aggregator sites: leads only, can NEVER back a stated
+    # fact. Unknown hosts already fail-closed to Tier 3 (DEFAULT_TIER), so listing
+    # these is belt-and-suspenders — but naming the high-traffic offenders keeps
+    # intent explicit and survives any future change to the default. Same class as
+    # fool/zacks above.
+    "benzinga.com", "marketbeat.com", "investorplace.com", "tipranks.com",
+    "thestreet.com", "finbold.com", "simplywall.st", "wallstreetzen.com",
 }
 
 # Owner decision: unknown/unlisted domain FAILS CLOSED to Tier 3. This is what

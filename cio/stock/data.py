@@ -212,6 +212,11 @@ def load_or_download_stock_data(symbol, start, end):
             else:
                 new_data.to_csv(stk_file)
         log.debug("Downloaded and cached %s -> %s", symbol, stk_file)
+        try:
+            from cio.data import freshness
+            freshness.record("yfinance", len(new_data))
+        except Exception:
+            pass
         return vol_as_int(new_data[start:end].dropna())
     except Exception as e:
         log.error("Error downloading data for %s: %s", symbol, e)
