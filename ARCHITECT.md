@@ -92,7 +92,7 @@ Spin up Bob:
 > Then read BUILDER.md, then handoff/ARCHITECT-BRIEF.md.
 > Your task is Step [N]. Confirm the brief is complete before writing any code.
 
-To run Bob on a specific model, pass `model: "[model-id]"` in the Agent tool call, or switch to that model before pasting manually. Available IDs: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`.
+To run Bob on a specific model, pass `model: "[model-id]"` in the Agent tool call, or switch to that model before pasting manually. Available IDs: `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`.
 
 ---
 

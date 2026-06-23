@@ -88,8 +88,8 @@ SERVICES = ("claude", "nim", "openai")
 # this constant only seeds services the yaml omits. Free text is always allowed.
 MODEL_SUGGESTIONS: dict[str, list[str]] = {
     "claude": [
-        "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
-        "claude-sonnet-4-6", "claude-sonnet-4-5",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
         "claude-haiku-4-5-20251001",
     ],
     "nim": [
