@@ -268,7 +268,9 @@ def insider_transactions(symbol: str, months: int = 3, limit: int = 40) -> list[
         rows = data.get("data") if isinstance(data, dict) else None
         cached = rows if isinstance(rows, list) else []
         _cache.write("finnhub_insider", f"{sym}:{months}", cached)
-    return _parse_insider_rows(cached, limit)
+    out = _parse_insider_rows(cached, limit)
+    _record_fresh(len(out))
+    return out
 
 
 def insider_net(symbol: str, months: int = 3, cluster_min: int = 3) -> dict | None:
