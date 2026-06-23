@@ -222,6 +222,60 @@ def test_finnhub_insider_net_detects_cluster_buy(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# GDELT (F3) — keyless news, enabled by default
+# ---------------------------------------------------------------------------
+
+GDELT_ARTLIST = {"articles": [
+    {"title": "Apple hits record", "url": "http://a", "domain": "reuters.com",
+     "seendate": "20260622T120000Z"},
+    {"title": "Apple chip news", "url": "http://b", "domain": "cnbc.com",
+     "seendate": "20260622T130000Z"},
+]}
+GDELT_TONECHART = {"tonechart": [
+    {"bin": -2, "count": 3}, {"bin": 0, "count": 5}, {"bin": 4, "count": 2},
+]}
+
+
+def test_gdelt_disabled_makes_no_call(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "0")
+
+    def _boom(*a, **k):
+        raise AssertionError("disabled GDELT must not hit the network")
+
+    monkeypatch.setattr("cio.data.gdelt.get_json", _boom)
+    from cio.data import gdelt
+    assert gdelt.headlines("Apple") == []
+    assert gdelt.tone_volume("Apple") == {"volume": 0, "avg_tone": 0.0}
+
+
+def test_gdelt_empty_query_makes_no_call(monkeypatch):
+    from cio.data import gdelt
+    monkeypatch.setattr("cio.data.gdelt.get_json",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no query -> no call")))
+    assert gdelt.headlines("") == []
+    assert gdelt.headlines("   ") == []
+    assert gdelt.tone_volume("") == {"volume": 0, "avg_tone": 0.0}
+
+
+def test_gdelt_headlines_parse(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    from cio.data import gdelt
+    monkeypatch.setattr("cio.data.gdelt.get_json", lambda *a, **k: GDELT_ARTLIST)
+    out = gdelt.headlines("Apple", limit=5)
+    assert [h["title"] for h in out] == ["Apple hits record", "Apple chip news"]
+    assert out[0]["domain"] == "reuters.com"
+
+
+def test_gdelt_tone_volume_weighted_mean(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    from cio.data import gdelt
+    monkeypatch.setattr("cio.data.gdelt.get_json", lambda *a, **k: GDELT_TONECHART)
+    tv = gdelt.tone_volume("Apple")
+    assert tv["volume"] == 10                       # 3 + 5 + 2
+    assert tv["avg_tone"] == 0.2                    # (-2*3 + 0*5 + 4*2) / 10
+
+
+# ---------------------------------------------------------------------------
 # bundle.format_bundle — new FILINGS / ANALYST / EARNINGS lines
 # ---------------------------------------------------------------------------
 

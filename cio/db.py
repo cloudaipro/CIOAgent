@@ -225,6 +225,14 @@ CREATE TABLE IF NOT EXISTS econ_events (
     UNIQUE (event_date, name)
 );
 
+-- Alert dedup/cooldown (F9): one row per dispatched alert key, last-fired epoch.
+-- Keeps the news-spike alerter (and any future alert path) from re-firing the
+-- same catalyst on every scheduler tick. Survives restarts (cio.alerts).
+CREATE TABLE IF NOT EXISTS alert_cooldown (
+    key       TEXT PRIMARY KEY,                        -- hash of headline+source+host
+    fired_at  REAL NOT NULL                            -- epoch seconds of last dispatch
+);
+
 -- FTS5 keyword layer (external-content, kept in sync by triggers).
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(value, content='mem_notes', content_rowid='id');
 CREATE TRIGGER IF NOT EXISTS mem_notes_ai AFTER INSERT ON mem_notes BEGIN

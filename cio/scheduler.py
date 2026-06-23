@@ -10,6 +10,7 @@ the conversational agent is reserved for interactive turns.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import date, datetime, timedelta
@@ -234,6 +235,44 @@ async def econ_event_alert(bot) -> None:
         log.exception("econ_event_alert job failed")
 
 
+async def news_spike_alert(bot) -> None:
+    """Alert subscribed chats on an UNSCHEDULED news spike for a watchlist name.
+
+    Complements econ_event_alert (dated catalysts): scans the active watchlist via
+    cio.watchlist_monitor.spike (GDELT volume vs 7-day baseline, multi-source gate),
+    deduped per catalyst by cio.alerts so the same surge isn't re-sent on every tick.
+    Zero LLM. Off by default (CIO_SPIKE_EVERY_MIN unset). Never raises into the
+    scheduler."""
+    try:
+        from .watchlist_monitor import spike as spike_mod
+        from . import alerts as alert_dedup
+        symbols = spike_mod.active_symbols()
+        if not symbols:
+            return
+        # Network-bound (GDELT / Finnhub) — run off the event loop.
+        spikes = await asyncio.to_thread(spike_mod.scan, symbols)
+        fresh = []
+        for sp in spikes:
+            top = (sp.get("top_headlines") or [{}])[0]
+            head = top.get("title") or f"{sp['symbol']} news spike"
+            if alert_dedup.claim(head, top.get("source", ""), top.get("url", ""),
+                                 cooldown_s=spike_mod.cooldown_s()):
+                fresh.append(sp)
+        if not fresh:
+            return
+        chats = memory.subscribed_chats()
+        if not chats:
+            return
+        text = spike_mod.format_spike_alert(fresh)
+        for chat_id in chats:
+            try:
+                await bot.send_message(chat_id=chat_id, text=text)
+            except Exception:  # one bad chat must not block the rest
+                log.exception("spike alert send failed for chat %s", chat_id)
+    except Exception:
+        log.exception("news_spike_alert job failed")
+
+
 async def memory_maintenance() -> None:
     """Daily memory upkeep for BOTH memory DBs: backup FIRST (maintenance deletes
     by design — TTL purge, turn pruning — so every night gets a restore point
@@ -372,5 +411,20 @@ def start(bot) -> AsyncIOScheduler:
                       args=[bot], id="econ_alert_boot", replace_existing=True)
     else:
         log.info("econ-event alert disabled (CIO_ECON_ALERT_HOUR=off)")
+
+    # ----- news-spike alert ---------------------------------------------------
+    # Intraday scan for UNSCHEDULED news surges on watchlist names (GDELT volume vs
+    # 7-day baseline). OFF by default: set CIO_SPIKE_EVERY_MIN=<minutes> (>=5) to run
+    # it on an interval (e.g. 30). cio.alerts dedups so a surge alerts once, not every
+    # tick. GDELT is keyless, so this needs no API key (Finnhub enriches if set).
+    spike_every = os.getenv("CIO_SPIKE_EVERY_MIN", "off")
+    if spike_every.lower() != "off":
+        spike_min = max(5, int(spike_every))
+        sched.add_job(news_spike_alert, "interval", minutes=spike_min, args=[bot],
+                      id="news_spike_alert", replace_existing=True,
+                      coalesce=True, misfire_grace_time=300)
+        log.info("news-spike alert scheduled every %d min", spike_min)
+    else:
+        log.info("news-spike alert disabled (CIO_SPIKE_EVERY_MIN=off)")
 
     return sched
