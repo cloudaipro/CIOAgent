@@ -275,6 +275,51 @@ def test_gdelt_tone_volume_weighted_mean(monkeypatch):
     assert tv["avg_tone"] == 0.2                    # (-2*3 + 0*5 + 4*2) / 10
 
 
+def _capture_query(monkeypatch, ret):
+    """Patch gdelt.get_json to record the query param it was called with."""
+    seen = {}
+
+    def _fake(url, *, params=None, **k):
+        seen["query"] = (params or {}).get("query")
+        return ret
+
+    monkeypatch.setattr("cio.data.gdelt.get_json", _fake)
+    return seen
+
+
+def test_gdelt_english_filter_default(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    monkeypatch.delenv("CIO_GDELT_LANG", raising=False)
+    from cio.data import gdelt
+    seen = _capture_query(monkeypatch, GDELT_ARTLIST)
+    gdelt.headlines("Apple Inc")
+    assert seen["query"] == "Apple Inc sourcelang:eng"   # English filter appended
+
+
+def test_gdelt_lang_override_and_optout(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    from cio.data import gdelt
+    # override to another language
+    monkeypatch.setenv("CIO_GDELT_LANG", "fra")
+    seen = _capture_query(monkeypatch, GDELT_ARTLIST)
+    gdelt.headlines("Apple")
+    assert seen["query"] == "Apple sourcelang:fra"
+    # empty -> opt back into all languages (no filter)
+    monkeypatch.setenv("CIO_GDELT_LANG", "")
+    seen = _capture_query(monkeypatch, GDELT_ARTLIST)
+    gdelt.headlines("Apple")
+    assert seen["query"] == "Apple"
+
+
+def test_gdelt_does_not_double_apply_lang(monkeypatch):
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    monkeypatch.delenv("CIO_GDELT_LANG", raising=False)
+    from cio.data import gdelt
+    seen = _capture_query(monkeypatch, GDELT_TONECHART)
+    gdelt.tone_volume("Apple sourcelang:spa")       # caller already set a language
+    assert seen["query"] == "Apple sourcelang:spa"  # left as-is, not double-filtered
+
+
 # ---------------------------------------------------------------------------
 # FRED (F8) — yield curve / regime, dormant until FRED_API_KEY set
 # ---------------------------------------------------------------------------

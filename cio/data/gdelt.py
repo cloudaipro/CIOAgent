@@ -35,6 +35,21 @@ def _enabled() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+def _with_lang(query: str) -> str:
+    """Append a GDELT `sourcelang:` filter so we only get coverage in one language.
+
+    GDELT is global/multilingual — a bare ticker/name query returns headlines in
+    every language, which is noise for an English-reading operator AND skews the
+    spike volume baseline with foreign-language coverage. Default `eng` (verified
+    live: GDELT's English code). CIO_GDELT_LANG overrides; set it empty to opt back
+    into all languages. Applied to BOTH headlines and tone_volume so the displayed
+    stories and the spike volume count use the same language scope."""
+    lang = (os.getenv("CIO_GDELT_LANG", "eng") or "").strip()
+    if lang and "sourcelang:" not in query:
+        return f"{query} sourcelang:{lang}"
+    return query
+
+
 def _record_fresh(n: int) -> None:
     if n <= 0:
         return
@@ -74,6 +89,7 @@ def headlines(query: str, hours: int = 24, limit: int = 20) -> list[dict]:
     q = (query or "").strip()
     if not q:
         return []
+    q = _with_lang(q)              # English-only by default; cache key varies with it
     n = min(250, max(1, int(limit)))
     h = max(1, int(hours))
     key = f"{q}:{h}:{n}"
@@ -102,6 +118,7 @@ def tone_volume(query: str, hours: int = 24) -> dict:
     q = (query or "").strip()
     if not q:
         return zero
+    q = _with_lang(q)              # same language scope as headlines() -> consistent volume
     h = max(1, int(hours))
     cached = _cache.read("gdelt_tone", f"{q}:{h}", _TONE_TTL)
     if cached is None:
