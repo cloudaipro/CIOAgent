@@ -228,12 +228,7 @@ VERSION
 scripts/hourly_log_report.env
 
 # CIO Agent runtime data (local db files + backups; never committed)
-data/cfo.db
-data/*.db
-data/*.db.bak
-data/backups/
-data/charts/
-data/uploads/
+data/
 # operator's local logging toggle (runtime state, never committed)
 data/dashboard_settings.json
 # self-authored harness skill governance store (runtime state)
@@ -264,3 +259,4 @@ hermes-agent-main/
 openclaw-main/
 .claude/scheduled_tasks.lock
 python-telegram-bot-master/
+.serena/
