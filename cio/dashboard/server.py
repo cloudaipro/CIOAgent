@@ -59,7 +59,7 @@ def _runtime_info() -> dict:
         return {}
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8787
+DEFAULT_PORT = 9898
 
 
 class _Handler(BaseHTTPRequestHandler):
