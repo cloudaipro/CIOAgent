@@ -161,6 +161,9 @@ class _Handler(BaseHTTPRequestHandler):
                     flash_err=query.get("err", ["0"])[0] == "1")
             elif path == "/usage":
                 html = views.render_usage(usage.recent(days=30), level)
+            elif path == "/health":
+                from ..data import freshness as _freshness
+                html = views.render_health(_freshness.summary(), level)
             elif path == "/telegram":
                 sel_day = query.get("day", [None])[0]
                 turns = (memory.conv_history_on_day(sel_day) if sel_day

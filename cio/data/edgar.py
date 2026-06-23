@@ -144,4 +144,11 @@ def recent_filings(symbol: str, forms=_DEFAULT_FORMS, limit: int = 5) -> list[di
         if not isinstance(data, dict):
             return []
         _cache.write("edgar_sub", str(cik), data)
-    return _parse_submissions(data, forms, limit)
+    out = _parse_submissions(data, forms, limit)
+    if out:
+        try:
+            from . import freshness
+            freshness.record("edgar", len(out))
+        except Exception:
+            pass
+    return out

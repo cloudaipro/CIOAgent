@@ -24,6 +24,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _isolate_freshness(monkeypatch, tmp_path):
+    """Point the data-freshness heartbeat store at a temp file so source fetchers
+    exercised in tests (the finnhub/edgar/yfinance freshness hooks) never write the
+    repo's real data/source_freshness.json."""
+    monkeypatch.setenv("CIO_FRESHNESS_FILE", str(tmp_path / "source_freshness.json"))
+
+
+@pytest.fixture(autouse=True)
 def _clear_limit_latch():
     """engine._LIMIT_LATCH is module-global; any test that drives a real
     backend through a limit notice would otherwise latch the service for

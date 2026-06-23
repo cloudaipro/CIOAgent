@@ -8,7 +8,14 @@ whole test suite — behaves exactly as before. Set the env values (see
 """
 from . import edgar, finnhub, clinicaltrials, ibkr
 from .edgar import recent_filings
-from .finnhub import analyst_recs, company_news, earnings_calendar, company_profile
+from .finnhub import (
+    analyst_recs,
+    company_news,
+    earnings_calendar,
+    company_profile,
+    insider_transactions,
+    insider_net,
+)
 from .clinicaltrials import search_trials
 
 __all__ = [
@@ -21,5 +28,7 @@ __all__ = [
     "company_news",
     "earnings_calendar",
     "company_profile",
+    "insider_transactions",
+    "insider_net",
     "search_trials",
 ]
