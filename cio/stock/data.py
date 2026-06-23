@@ -345,10 +345,99 @@ def fundamentals(symbol: str) -> dict:
     return result
 
 
-def latest_quote(symbol, lookback_days=10):
+# Sentinel: distinguishes "no IBKR quote supplied, fetch one" (default) from
+# "batch already fetched, here it is (maybe None)" so the batched watchlist path
+# never triggers a second per-symbol IBKR connect.
+_UNSET = object()
+
+
+def _adapt_ibkr_quote(q):
+    """A single IBKR ``quote()`` entry -> overlay ``{"price", "source", "delayed"}``
+    or None. Only a REAL extended/live print (last trade or live bid/ask midpoint)
+    is a valid overlay; ``price_source == "close"`` means IBKR had no live tick and
+    fell back to the prior close — NOT an after-hours price, so decline and let the
+    caller fall through to yfinance, then an honest settled/stale close."""
+    if not q or q.get("price") is None or q.get("price_source") == "close":
+        return None
+    return {"price": float(q["price"]), "source": "ibkr", "delayed": bool(q.get("delayed"))}
+
+
+def _ibkr_extended_price(symbol):
+    """Extended-hours/last price for *symbol* from IBKR (single fetch), or None.
+    Lazy import + env-gated by ``ibkr.enabled()`` so the dependency stays optional
+    and CI offline. Never raises."""
+    try:
+        from ..data import ibkr
+        if not ibkr.enabled():
+            return None
+        q = ibkr.quote(symbol).get(symbol.strip().upper())
+    except Exception:
+        return None
+    return _adapt_ibkr_quote(q)
+
+
+def batch_ibkr_quotes(symbols):
+    """One batched IBKR extended-hours fetch for *symbols* (single socket), keyed
+    UPPERCASE. ``{}`` unless it is currently pre/after-market AND IBKR is enabled —
+    so a regular-session or closed refresh pays no socket. Callers pass each
+    symbol's entry into ``latest_quote(ibkr_quote=...)`` to avoid N per-symbol
+    connects. Never raises."""
+    try:
+        now_et = datetime.now(_EASTERN)
+        if nasdaq_trading_status(now_et) not in (1, 3):
+            return {}
+        from ..data import ibkr
+        if not ibkr.enabled():
+            return {}
+        return ibkr.quote(list(symbols)) or {}
+    except Exception:
+        return {}
+
+
+def extended_hours_price(symbol, status_code, ibkr_quote=_UNSET):
+    """Live pre/after-market price for *symbol*, IBKR-preferred, yfinance fallback.
+
+    The cached daily history bar only carries the REGULAR-session close, so during
+    pre-market (status 1) and after-hours (status 3) callers must overlay the live
+    extended-hours print — otherwise the 4pm close is silently reported as "now"
+    (the bug: MU showed its $1211 session close while it was actually $1170 AH).
+
+    Source order: (1) IBKR TWS API last/extended print — a real AH trade when the
+    account has a real-time sub, else delayed ~15-20min (flagged ``delayed``);
+    (2) yfinance ``.info`` pre/postMarketPrice (often None/laggy in extended hours).
+
+    ``ibkr_quote``: when a batch already fetched this symbol's IBKR entry, pass it
+    (the dict, or None if the batch had nothing) to reuse it instead of opening a
+    second socket. Left unset, a single IBKR fetch is made per call.
+
+    Returns ``{"price": float, "source": "ibkr"|"yfinance", "delayed": bool}`` or
+    ``None`` when no source has a price. The change-vs-regular-close % is computed by
+    the caller against the day's bar close, so it is consistent across sources.
+    Never raises; failures degrade to ``None`` (caller falls back to the close).
+    """
+    field = {1: "preMarket", 3: "postMarket"}.get(status_code)
+    if not field:
+        return None
+    ib = _ibkr_extended_price(symbol) if ibkr_quote is _UNSET else _adapt_ibkr_quote(ibkr_quote)
+    if ib is not None:
+        return ib
+    try:
+        info = yfin.Ticker(symbol).info or {}
+        price = float(info.get(field + "Price"))
+    except Exception:
+        return None
+    return {"price": price, "source": "yfinance", "delayed": False}
+
+
+def latest_quote(symbol, lookback_days=10, *, ibkr_quote=_UNSET):
     """
     Latest price / volume / OHLC for a symbol (requirement 1), via the cached fetch.
     Returns a dict or None if no data could be fetched.
+
+    ``ibkr_quote``: an already-fetched IBKR entry for this symbol (from
+    ``batch_ibkr_quotes``) to reuse in the extended-hours overlay — passed by the
+    batched watchlist path so it never opens a per-symbol socket. Unset = the
+    single-symbol path (e.g. the stock_quote tool), which fetches on its own.
     """
     end = datetime.now()
     start = end - timedelta(days=max(lookback_days, 5) + 5)
@@ -356,27 +445,53 @@ def latest_quote(symbol, lookback_days=10):
     if df is None or df.empty:
         return None
     row = df.iloc[-1]
-    close = float(row["Close"])
-    # Day change vs the previous trading session's close (None if only one row).
+    close = float(row["Close"])          # REGULAR-session close of the latest bar
     prev_close = float(df.iloc[-2]["Close"]) if len(df) >= 2 else None
-    change = (close - prev_close) if prev_close is not None else None
-    change_pct = (change / prev_close * 100) if prev_close not in (None, 0) else None
 
-    # Freshness signal so callers (the LLM agent) can tell a *live intraday* quote
-    # from a *settled prior-session close*. The bar itself is always the latest real
-    # price for the current market state; what matters is how it should be labelled.
     now_et = datetime.now(_EASTERN)
     status_code = nasdaq_trading_status(now_et)
     market_status = {0: "closed", 1: "premarket", 2: "open", 3: "afterhours"}[status_code]
     session_date = closest_trading_day(now_et.replace(tzinfo=None), method="prev").date()
     bar_date = df.index[-1].date()
-    is_live = status_code in (2, 3) and bar_date == session_date
-    if is_live:
-        quote_kind = "live_intraday"
+
+    # The daily bar's Close is the regular-session price; yfinance does not roll it
+    # forward in pre/after-market. Overlay the live extended-hours print so an
+    # afterhours quote reports the actual AH price, not the stale 4pm close.
+    regular_close = close
+    price = close
+    ext_price = ext_change_pct = None
+    ext_source = None
+    ext_delayed = False
+    if status_code in (1, 3) and bar_date == session_date:
+        ext = extended_hours_price(symbol, status_code, ibkr_quote=ibkr_quote)
+        if ext is not None:
+            ext_price = ext["price"]
+            ext_source = ext.get("source")
+            ext_delayed = bool(ext.get("delayed"))
+            price = ext_price
+            # Move vs the regular-session close, computed uniformly here (not in the
+            # source) so it means the same thing for IBKR and yfinance prices.
+            if regular_close:
+                ext_change_pct = round((ext_price - regular_close) / regular_close * 100, 2)
+
+    # Freshness label so the LLM agent can tell a live quote from a settled close.
+    # Live only when: regular session open, OR pre/after-market WITH an actual
+    # extended-hours price. Without that price an afterhours bar is the settled
+    # close — labelling it live_intraday was the bug (reported 4pm close as "now").
+    if status_code == 2 and bar_date == session_date:
+        is_live, quote_kind = True, "live_intraday"
+    elif status_code == 3 and ext_price is not None:
+        is_live, quote_kind = True, "live_postmarket"
+    elif status_code == 1 and ext_price is not None:
+        is_live, quote_kind = True, "live_premarket"
     elif bar_date == session_date:
-        quote_kind = "settled_close"
+        is_live, quote_kind = False, "settled_close"
     else:
-        quote_kind = "stale_close"
+        is_live, quote_kind = False, "stale_close"
+
+    # change / change_pct track `price` (the reported number) vs the prior session.
+    change = (price - prev_close) if prev_close is not None else None
+    change_pct = (change / prev_close * 100) if prev_close not in (None, 0) else None
     return {
         "symbol": symbol,
         "date": df.index[-1].strftime("%Y-%m-%d"),
@@ -384,7 +499,12 @@ def latest_quote(symbol, lookback_days=10):
         "high": float(row["High"]),
         "low": float(row["Low"]),
         "close": close,
-        "price": close,
+        "price": price,
+        "regular_close": regular_close,
+        "extended_hours_price": ext_price,
+        "extended_hours_change_pct": ext_change_pct,
+        "quote_source": ext_source,
+        "extended_hours_delayed": ext_delayed,
         "prev_close": prev_close,
         "change": change,
         "change_pct": change_pct,

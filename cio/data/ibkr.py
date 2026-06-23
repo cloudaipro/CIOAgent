@@ -35,6 +35,17 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = 10.0
 _DEFAULT_CLIENT_ID = 17
+# Market-data type for quote(): 1=real-time (needs a live US-equity subscription),
+# 2=frozen, 3=delayed ~15-20min (free), 4=delayed-frozen. Default 3 so the call
+# always returns *something* for an account without a real-time sub; the Ticker
+# reports the type IBKR actually served, so a delayed quote is labelled delayed.
+_DEFAULT_MKTDATA_TYPE = 3
+# quote() polls the streaming tickers until a live field arrives or this many
+# seconds elapse (then it falls back to whatever did arrive, e.g. prior close).
+# reqMktData streams, so we own the wait — no open-ended block. Tunable via
+# CIO_IBKR_QUOTE_TIMEOUT for slow/feed-starved sessions.
+_QUOTE_TIMEOUT = 6.0
+_QUOTE_POLL = 0.25
 
 
 def tws_endpoint() -> tuple[str, int] | None:
@@ -369,6 +380,159 @@ def snapshot() -> dict | None:
         log.warning("ibkr snapshot failed: %s", e)
         return None
     finally:
+        try:
+            if ib is not None and ib.isConnected():
+                ib.disconnect()
+        except Exception:
+            pass
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+# --- market-data quotes (read-only; extended-hours last price) ---------------
+def _mktdata_type() -> int:
+    raw = (os.getenv("CIO_IBKR_MKTDATA_TYPE") or "").strip()
+    return int(raw) if raw in ("1", "2", "3", "4") else _DEFAULT_MKTDATA_TYPE
+
+
+def _quote_timeout() -> float:
+    raw = (os.getenv("CIO_IBKR_QUOTE_TIMEOUT") or "").strip()
+    try:
+        v = float(raw)
+        return v if v > 0 else _QUOTE_TIMEOUT
+    except ValueError:
+        return _QUOTE_TIMEOUT
+
+
+def _ticker_ready(tk) -> bool:
+    """True once a tradable field (last, or both bid & ask) has arrived, so the
+    poll can stop early instead of waiting the full timeout. Prior close alone is
+    NOT ready — we wait for a live/extended print up to the deadline, then fall
+    back to the close in ``_normalize_tickers``."""
+    if _fnum(getattr(tk, "last", None), price=True) is not None:
+        return True
+    return (_fnum(getattr(tk, "bid", None), price=True) is not None
+            and _fnum(getattr(tk, "ask", None), price=True) is not None)
+
+
+def _fnum(x, *, price=False):
+    """float(x) or None for None / NaN / non-numeric. IBKR signals 'no data' with
+    NaN *and* the sentinel -1 on price/size fields, so with ``price=True`` any
+    value <= 0 is also treated as missing (must never leak in as a real price)."""
+    import math
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f):
+        return None
+    if price and f <= 0:
+        return None
+    return f
+
+
+def _normalize_tickers(tickers, default_mdt: int) -> dict:
+    """ib_async Ticker list -> {SYM: {price, price_source, bid, ask, prev_close,
+    market_data_type, delayed, halted}}. Pure (no I/O), unit-testable without a TWS.
+
+    `price` resolves last trade -> bid/ask midpoint -> prior close, and
+    `price_source` ('last'|'midpoint'|'close') records which, so callers can tell a
+    REAL extended-hours/live print from a mere prior-close fallback (IBKR returns
+    only the close, last/bid/ask = -1, when no live tick is on the line — e.g.
+    market closed or a delayed feed with nothing streaming). Symbols with no usable
+    price at all are omitted.
+    """
+    out: dict = {}
+    for tk in tickers or []:
+        sym = (getattr(getattr(tk, "contract", None), "symbol", "") or "").strip().upper()
+        if not sym:
+            continue
+        last = _fnum(getattr(tk, "last", None), price=True)
+        bid = _fnum(getattr(tk, "bid", None), price=True)
+        ask = _fnum(getattr(tk, "ask", None), price=True)
+        prev_close = _fnum(getattr(tk, "close", None), price=True)
+        if last is not None:
+            price, price_source = last, "last"
+        elif bid is not None and ask is not None:
+            price, price_source = (bid + ask) / 2, "midpoint"
+        elif prev_close is not None:
+            price, price_source = prev_close, "close"
+        else:
+            continue
+        mdt = int(_fnum(getattr(tk, "marketDataType", None)) or default_mdt)
+        out[sym] = {
+            "price": price,
+            "price_source": price_source,
+            "bid": bid,
+            "ask": ask,
+            "prev_close": prev_close,
+            "market_data_type": mdt,
+            "delayed": mdt in (3, 4),
+            "halted": bool(_fnum(getattr(tk, "halted", 0))),
+        }
+    return out
+
+
+def quote(symbols) -> dict:
+    """Last / extended-hours price for one or more US-equity symbols via the TWS
+    API (read-only market-data request — never places an order).
+
+    `symbols`: a symbol string or an iterable of them. Index symbols (leading
+    '^', e.g. ^IXIC) are skipped: TWS needs a separate index data line and
+    yfinance covers the benchmark.
+
+    Returns ``{SYM: {...}}`` (see ``_normalize_tickers``) for symbols that
+    resolved; unresolved ones are omitted. ``{}`` when IBKR is disabled,
+    unreachable, ib_async is not installed, or nothing came back. Never raises.
+
+    Connects, reads, disconnects per call (same rationale as ``snapshot``), in a
+    fresh event loop so dashboard worker threads can call it. ``market_data_type``
+    on each quote reflects what IBKR actually served (3/4 = delayed ~15-20min), so
+    a delayed quote stays honestly labelled even when a live type was requested.
+    """
+    if isinstance(symbols, str):
+        symbols = [symbols]
+    syms = [s.strip().upper() for s in symbols
+            if s and not s.strip().startswith("^")]
+    if not syms or not enabled():
+        return {}
+    import time
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    ib = None
+    qualified: list = []
+    try:
+        from ib_async import Stock
+        mdt = _mktdata_type()
+        ib = _ib_factory()
+        try:
+            ib.reqMarketDataType(mdt)
+        except Exception:
+            pass
+        contracts = [Stock(s, "SMART", "USD") for s in syms]
+        qualified = list(ib.qualifyContracts(*contracts) or [])
+        if not qualified:
+            return {}
+        # Stream all symbols at once, then poll a single bounded window — one wait
+        # for the whole batch, not per-symbol. Break early once every ticker has a
+        # live field; otherwise fall back to whatever arrived (prior close) at the
+        # deadline rather than blocking open-ended like reqTickers.
+        tickers = [ib.reqMktData(c, "", False, False) for c in qualified]
+        deadline = time.monotonic() + _quote_timeout()
+        while time.monotonic() < deadline:
+            ib.sleep(_QUOTE_POLL)
+            if all(_ticker_ready(t) for t in tickers):
+                break
+        return _normalize_tickers(tickers, mdt)
+    except Exception as e:
+        log.warning("ibkr quote failed: %s", e)
+        return {}
+    finally:
+        for c in qualified:
+            try:
+                ib.cancelMktData(c)
+            except Exception:
+                pass
         try:
             if ib is not None and ib.isConnected():
                 ib.disconnect()

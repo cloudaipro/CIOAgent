@@ -280,6 +280,28 @@ def _quote_freshness_note(quote: dict | None) -> str:
     quote, so the agent labels it by date instead of calling it 'today's move'."""
     if not quote or quote.get("quote_kind") == "live_intraday":
         return ""
+    kind = quote.get("quote_kind")
+    if kind in ("live_postmarket", "live_premarket"):
+        sess = "after-hours" if kind == "live_postmarket" else "pre-market"
+        reg, cp, px = quote.get("regular_close"), quote.get("extended_hours_change_pct"), quote.get("price")
+        reg_s = f"{reg:,.2f}" if isinstance(reg, (int, float)) else "?"
+        cp_s = f"{cp:+.2f}%" if isinstance(cp, (int, float)) else "?"
+        px_s = f"{px:,.2f}" if isinstance(px, (int, float)) else "?"
+        src = quote.get("quote_source")
+        src_s = f" [source: {src}]" if src else ""
+        delayed_s = ""
+        if quote.get("extended_hours_delayed"):
+            delayed_s = (
+                " CAUTION: this is DELAYED data (~15-20 min behind, no real-time "
+                "subscription) — treat as directional, not exact; confirm the precise "
+                f"{sess} print in the broker app before acting on a tight limit."
+            )
+        return (
+            f"\n\nNOTE: this is the LIVE {sess} price ({px_s}){src_s}, {cp_s} vs the "
+            f"regular-session close of {reg_s}. Report it as a {sess} quote (e.g. "
+            f"'{px_s} {sess}'), NOT the regular close — they can differ by several "
+            f"percent.{delayed_s}"
+        )
     market = quote.get("market_status", "closed")
     bar_date = quote.get("date")          # actual bar date in cache
     session_date = quote.get("session_date") or bar_date  # expected current session
@@ -773,8 +795,9 @@ async def t_watchlist_prices(args):
     snap = watchlist.prices()
     if snap["id"] is None:
         return _text("No active watchlist yet. The user can create one in the dashboard.")
-    # Pick the most severe freshness case: stale_close > settled_close > live_intraday.
-    _kind_rank = {"stale_close": 2, "settled_close": 1, "live_intraday": 0}
+    # Pick the most severe freshness case: stale_close > settled_close > live_*.
+    _kind_rank = {"stale_close": 2, "settled_close": 1,
+                  "live_intraday": 0, "live_postmarket": 0, "live_premarket": 0}
     worst = max(
         (q for q in snap.get("quotes", []) if q),
         key=lambda q: _kind_rank.get(q.get("quote_kind", ""), 0),

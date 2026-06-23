@@ -97,6 +97,27 @@ class StubIB:
     def disconnect(self):
         self.disconnected = True
 
+    # --- market-data surface used by ibkr.quote() (streaming + bounded poll) ---
+    def reqMarketDataType(self, mdt):
+        self.requested_mdt = mdt
+
+    def qualifyContracts(self, *contracts):
+        return list(contracts)
+
+    def reqMktData(self, contract, *a, **k):
+        # One ticker per contract; symbol carried on contract.symbol. Default
+        # ticker has a live `last` so the poll loop is ready immediately (no wait).
+        return getattr(self, "_tickers", {}).get(getattr(contract, "symbol", "")) \
+            or SimpleNamespace(contract=contract, last=100.0, bid=99.0, ask=101.0,
+                               close=98.0, marketDataType=3, halted=0)
+
+    def sleep(self, *a):
+        pass
+
+    def cancelMktData(self, contract):
+        self.cancelled = getattr(self, "cancelled", [])
+        self.cancelled.append(getattr(contract, "symbol", ""))
+
 
 @pytest.fixture
 def fake_tws(monkeypatch):
@@ -137,6 +158,119 @@ def test_snapshot_none_when_no_accounts(monkeypatch):
     monkeypatch.delenv("CIO_IBKR_ACCOUNT", raising=False)
     monkeypatch.setattr(ibkr, "_ib_factory", lambda: StubIB(accounts=()))
     assert ibkr.snapshot() is None
+
+
+# ---------------------------------------------------------------------------
+# market-data quote() — extended-hours / last price (read-only)
+# ---------------------------------------------------------------------------
+
+def _tk(sym, *, last=None, bid=None, ask=None, close=None, mdt=3, halted=0):
+    return SimpleNamespace(contract=SimpleNamespace(symbol=sym), last=last, bid=bid,
+                           ask=ask, close=close, marketDataType=mdt, halted=halted)
+
+
+def test_normalize_tickers_last_price_and_delayed_flag():
+    """last is the reported price (price_source 'last'); mdt 3/4 -> delayed True."""
+    out = ibkr._normalize_tickers([_tk("MU", last=1170.27, close=1211.38, mdt=3)], 3)
+    assert out["MU"]["price"] == 1170.27
+    assert out["MU"]["price_source"] == "last"
+    assert out["MU"]["prev_close"] == 1211.38
+    assert out["MU"]["market_data_type"] == 3
+    assert out["MU"]["delayed"] is True
+
+
+def test_normalize_tickers_live_type_not_delayed():
+    out = ibkr._normalize_tickers([_tk("AAPL", last=201.5, mdt=1)], 1)
+    assert out["AAPL"]["delayed"] is False
+
+
+def test_normalize_tickers_midpoint_then_close_fallback():
+    """No last -> bid/ask midpoint; no last+no quote -> prior close (flagged
+    'close'); nothing -> dropped. price_source records which."""
+    nan = float("nan")
+    out = ibkr._normalize_tickers([
+        _tk("MID", last=nan, bid=10.0, ask=12.0, close=9.0),   # -> midpoint 11.0
+        _tk("CLS", last=nan, bid=nan, ask=nan, close=9.0),     # -> close 9.0
+        _tk("DEAD", last=nan, bid=nan, ask=nan, close=nan),    # -> dropped
+    ], 3)
+    assert out["MID"]["price"] == 11.0 and out["MID"]["price_source"] == "midpoint"
+    assert out["CLS"]["price"] == 9.0 and out["CLS"]["price_source"] == "close"
+    assert "DEAD" not in out
+
+
+def test_normalize_tickers_minus_one_sentinel_is_missing():
+    """IBKR sends -1 on price fields when no live tick is on the line (market
+    closed / nothing streaming). It must NOT leak in as a real price; only the
+    valid `close` survives, flagged price_source 'close' (regression: a live test
+    against Gateway at 01:40 ET returned last/bid/ask = -1)."""
+    out = ibkr._normalize_tickers(
+        [_tk("MU", last=-1.0, bid=-1.0, ask=-1.0, close=1211.38, mdt=3)], 3)
+    assert out["MU"]["price"] == 1211.38
+    assert out["MU"]["price_source"] == "close"
+    assert out["MU"]["bid"] is None and out["MU"]["ask"] is None
+
+
+def test_quote_disabled_returns_empty(monkeypatch):
+    monkeypatch.delenv("CIO_IBKR_TWS", raising=False)
+    assert ibkr.quote("MU") == {}
+
+
+def test_quote_index_symbols_skipped(fake_tws):
+    """Leading-'^' index symbols are skipped (TWS needs a separate index line)."""
+    assert ibkr.quote("^IXIC") == {}
+
+
+def test_quote_happy_path_and_teardown(fake_tws, monkeypatch):
+    """End-to-end glue: a stubbed ib_async module + StubIB returns a normalized
+    quote and the socket is released afterwards."""
+    import sys
+    fake_mod = SimpleNamespace(Stock=lambda sym, exch, ccy: SimpleNamespace(symbol=sym))
+    monkeypatch.setitem(sys.modules, "ib_async", fake_mod)
+    fake_tws._tickers = {"MU": _tk("MU", last=1170.27, close=1211.38, mdt=3)}
+    out = ibkr.quote("MU")
+    assert out["MU"]["price"] == 1170.27
+    assert out["MU"]["price_source"] == "last"
+    assert out["MU"]["delayed"] is True
+    assert fake_tws.requested_mdt == 3
+    assert fake_tws.cancelled == ["MU"]           # market-data line cancelled
+    assert fake_tws.disconnected                  # socket released after the call
+
+
+def test_quote_batches_multiple_symbols_one_connect(fake_tws):
+    """A list of symbols streams in one connect and returns all of them; the index
+    symbol is dropped. One socket for the batch, not one per symbol."""
+    fake_tws._tickers = {
+        "MU": _tk("MU", last=1170.27, close=1211.38, mdt=3),
+        "AAPL": _tk("AAPL", last=297.0, close=297.01, mdt=3),
+    }
+    out = ibkr.quote(["MU", "AAPL", "^IXIC"])
+    assert set(out) == {"MU", "AAPL"}             # ^IXIC skipped
+    assert out["MU"]["price"] == 1170.27 and out["AAPL"]["price"] == 297.0
+    assert set(fake_tws.cancelled) == {"MU", "AAPL"}
+
+
+def test_quote_default_mktdata_type_is_delayed(monkeypatch):
+    monkeypatch.delenv("CIO_IBKR_MKTDATA_TYPE", raising=False)
+    assert ibkr._mktdata_type() == 3              # free delayed by default
+    monkeypatch.setenv("CIO_IBKR_MKTDATA_TYPE", "1")
+    assert ibkr._mktdata_type() == 1              # live for subscribers
+
+
+def test_quote_timeout_env_and_default(monkeypatch):
+    monkeypatch.delenv("CIO_IBKR_QUOTE_TIMEOUT", raising=False)
+    assert ibkr._quote_timeout() == 6.0
+    monkeypatch.setenv("CIO_IBKR_QUOTE_TIMEOUT", "2.5")
+    assert ibkr._quote_timeout() == 2.5
+    monkeypatch.setenv("CIO_IBKR_QUOTE_TIMEOUT", "junk")   # bad -> default
+    assert ibkr._quote_timeout() == 6.0
+
+
+def test_ticker_ready_waits_for_live_field():
+    """last (or both bid&ask) -> ready; prior close alone or -1 sentinels -> not."""
+    assert ibkr._ticker_ready(_tk("X", last=10.0)) is True
+    assert ibkr._ticker_ready(_tk("X", bid=9.0, ask=11.0)) is True
+    assert ibkr._ticker_ready(_tk("X", last=-1.0, bid=-1.0, ask=-1.0, close=9.0)) is False
+    assert ibkr._ticker_ready(_tk("X", close=9.0)) is False
 
 
 # ---------------------------------------------------------------------------

@@ -107,6 +107,8 @@ def test_latest_quote_offline(monkeypatch):
         return synthetic
 
     monkeypatch.setattr(data_mod, "load_or_download_stock_data", fake_load)
+    # Pin market closed so latest_quote never reaches out for an extended-hours price.
+    monkeypatch.setattr(data_mod, "nasdaq_trading_status", lambda *a, **k: 0)
 
     result = s.latest_quote("X")
     assert isinstance(result, dict), f"Expected dict, got {type(result)}"
@@ -124,8 +126,12 @@ def test_latest_quote_offline(monkeypatch):
 # 4b. latest_quote freshness signal (market_status / is_live / quote_kind)
 # ---------------------------------------------------------------------------
 
-def _freshness_quote(monkeypatch, *, status, bar_date, session_date):
-    """latest_quote with the market status and bar/session dates pinned."""
+def _freshness_quote(monkeypatch, *, status, bar_date, session_date, ext=None):
+    """latest_quote with the market status and bar/session dates pinned.
+
+    `ext` stubs extended_hours_price (the live pre/after-market fetch): None means
+    'no extended-hours quote available'; a dict overlays a live price. Always pinned
+    so the test never hits the network."""
     import cio.stock.data as data_mod
     from datetime import datetime
 
@@ -135,6 +141,7 @@ def _freshness_quote(monkeypatch, *, status, bar_date, session_date):
     )
     monkeypatch.setattr(data_mod, "load_or_download_stock_data", lambda *a, **k: df)
     monkeypatch.setattr(data_mod, "nasdaq_trading_status", lambda now=None: status)
+    monkeypatch.setattr(data_mod, "extended_hours_price", lambda *a, **k: ext)
     monkeypatch.setattr(
         data_mod, "closest_trading_day",
         lambda x, method="prev": datetime.strptime(session_date, "%Y-%m-%d"),
@@ -165,6 +172,135 @@ def test_latest_quote_stale_close(monkeypatch):
     assert q["is_live"] is False
     assert q["quote_kind"] == "stale_close"
     assert q["date"] == "2026-06-04" and q["session_date"] == "2026-06-05"
+
+
+def test_latest_quote_afterhours_overlays_post_market_price(monkeypatch):
+    """Afterhours WITH an extended-hours print -> live_postmarket; `price` is the AH
+    price, `close` stays the regular session close, and the change% is computed
+    against that close (8.7 vs 9 = -3.33%). Regression for the MU bug where the
+    $1211 session close was reported while the stock traded $1170 after hours."""
+    q = _freshness_quote(
+        monkeypatch, status=3, bar_date="2026-06-05", session_date="2026-06-05",
+        ext={"price": 8.7, "source": "ibkr", "delayed": False},
+    )
+    assert q["market_status"] == "afterhours"
+    assert q["is_live"] is True
+    assert q["quote_kind"] == "live_postmarket"
+    assert q["price"] == 8.7                 # the live AH price, not the 9 close
+    assert q["close"] == 9 and q["regular_close"] == 9
+    assert q["extended_hours_price"] == 8.7
+    assert q["extended_hours_change_pct"] == -3.33     # (8.7-9)/9*100, computed here
+    assert q["quote_source"] == "ibkr"
+    assert q["extended_hours_delayed"] is False
+
+
+def test_latest_quote_afterhours_delayed_flag_propagates(monkeypatch):
+    """A delayed IBKR print is still used, but flagged delayed so the agent can warn."""
+    q = _freshness_quote(
+        monkeypatch, status=3, bar_date="2026-06-05", session_date="2026-06-05",
+        ext={"price": 8.7, "source": "ibkr", "delayed": True},
+    )
+    assert q["quote_kind"] == "live_postmarket"
+    assert q["price"] == 8.7
+    assert q["extended_hours_delayed"] is True
+
+
+def test_latest_quote_afterhours_without_ext_is_settled_not_live(monkeypatch):
+    """Afterhours but NO extended-hours price available -> honest settled_close,
+    NOT live_intraday (the original mislabel)."""
+    q = _freshness_quote(
+        monkeypatch, status=3, bar_date="2026-06-05", session_date="2026-06-05", ext=None,
+    )
+    assert q["market_status"] == "afterhours"
+    assert q["is_live"] is False
+    assert q["quote_kind"] == "settled_close"
+    assert q["price"] == 9                    # falls back to the regular close
+    assert q["extended_hours_price"] is None
+    assert q["quote_source"] is None
+
+
+def test_ibkr_extended_price_rejects_close_only(monkeypatch):
+    """IBKR returning only the prior close (price_source 'close', no live tick) is
+    NOT an after-hours print -> _ibkr_extended_price returns None so the caller
+    falls through to an honest settled/stale close (validated live at 01:40 ET)."""
+    import cio.stock.data as data_mod
+    import cio.data.ibkr as ibkr_mod
+    monkeypatch.setattr(ibkr_mod, "enabled", lambda: True)
+    monkeypatch.setattr(
+        ibkr_mod, "quote",
+        lambda sym: {"MU": {"price": 1211.38, "price_source": "close", "delayed": True}},
+    )
+    assert data_mod._ibkr_extended_price("MU") is None
+    # A real last print IS accepted, with the delayed flag carried through.
+    monkeypatch.setattr(
+        ibkr_mod, "quote",
+        lambda sym: {"MU": {"price": 1170.27, "price_source": "last", "delayed": True}},
+    )
+    got = data_mod._ibkr_extended_price("MU")
+    assert got == {"price": 1170.27, "source": "ibkr", "delayed": True}
+
+
+def test_batch_ibkr_quotes_gating(monkeypatch):
+    """One batched fetch only in pre/after-market AND when IBKR is enabled; a
+    regular-session or closed refresh, or a disabled client, pays no socket."""
+    import cio.stock.data as data_mod
+    import cio.data.ibkr as ibkr_mod
+    calls = []
+    monkeypatch.setattr(ibkr_mod, "enabled", lambda: True)
+    monkeypatch.setattr(ibkr_mod, "quote",
+                        lambda syms: calls.append(list(syms)) or {"MU": {"price": 1}})
+
+    # Regular session (status 2) -> no fetch.
+    monkeypatch.setattr(data_mod, "nasdaq_trading_status", lambda *a, **k: 2)
+    assert data_mod.batch_ibkr_quotes(["MU"]) == {} and calls == []
+
+    # After-hours (status 3) + enabled -> forwards the whole list once.
+    monkeypatch.setattr(data_mod, "nasdaq_trading_status", lambda *a, **k: 3)
+    assert data_mod.batch_ibkr_quotes(["MU", "AAPL"]) == {"MU": {"price": 1}}
+    assert calls == [["MU", "AAPL"]]
+
+    # After-hours but IBKR disabled -> no fetch.
+    monkeypatch.setattr(ibkr_mod, "enabled", lambda: False)
+    calls.clear()
+    assert data_mod.batch_ibkr_quotes(["MU"]) == {} and calls == []
+
+
+def test_latest_quote_uses_injected_ibkr_quote_no_fetch(monkeypatch):
+    """latest_quote(ibkr_quote=...) reuses the batched entry through the REAL
+    extended_hours_price/_adapt path and never calls the single-symbol IBKR fetch
+    (the batched watchlist path)."""
+    import cio.stock.data as data_mod
+    from datetime import datetime as _dt
+    # Blow up if the single-symbol fetch is reached — it must not be.
+    monkeypatch.setattr(data_mod, "_ibkr_extended_price",
+                        lambda *a, **k: pytest.fail("single IBKR fetch must not run"))
+    df = pd.DataFrame(
+        {"Open": [1, 2], "High": [1, 2], "Low": [1, 2], "Close": [10, 9], "Volume": [1, 2]},
+        index=pd.to_datetime(["2020-01-01", "2026-06-05"]),
+    )
+    monkeypatch.setattr(data_mod, "load_or_download_stock_data", lambda *a, **k: df)
+    monkeypatch.setattr(data_mod, "nasdaq_trading_status", lambda *a, **k: 3)
+    monkeypatch.setattr(data_mod, "closest_trading_day",
+                        lambda x, method="prev": _dt(2026, 6, 5))
+    out = s.latest_quote("MU", ibkr_quote={"price": 8.7, "price_source": "last", "delayed": True})
+    assert out["price"] == 8.7
+    assert out["quote_kind"] == "live_postmarket"
+    assert out["quote_source"] == "ibkr"
+    assert out["extended_hours_delayed"] is True
+
+
+def test_latest_quote_premarket_overlays_pre_market_price(monkeypatch):
+    """Pre-market WITH an extended-hours print -> live_premarket overlay."""
+    q = _freshness_quote(
+        monkeypatch, status=1, bar_date="2026-06-05", session_date="2026-06-05",
+        ext={"price": 9.5, "source": "yfinance", "delayed": False},
+    )
+    assert q["market_status"] == "premarket"
+    assert q["is_live"] is True
+    assert q["quote_kind"] == "live_premarket"
+    assert q["price"] == 9.5
+    assert q["extended_hours_change_pct"] == 5.56      # (9.5-9)/9*100, rounded
+    assert q["quote_source"] == "yfinance"
 
 
 # ---------------------------------------------------------------------------
