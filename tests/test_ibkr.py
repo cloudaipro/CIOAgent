@@ -124,7 +124,7 @@ def fake_tws(monkeypatch):
     stub = StubIB()
     monkeypatch.setenv("CIO_IBKR_TWS", "127.0.0.1:7496")
     monkeypatch.delenv("CIO_IBKR_ACCOUNT", raising=False)
-    monkeypatch.setattr(ibkr, "_ib_factory", lambda: stub)
+    monkeypatch.setattr(ibkr, "_ib_factory", lambda *a, **k: stub)
     return stub
 
 
@@ -254,6 +254,19 @@ def test_quote_default_mktdata_type_is_delayed(monkeypatch):
     assert ibkr._mktdata_type() == 3              # free delayed by default
     monkeypatch.setenv("CIO_IBKR_MKTDATA_TYPE", "1")
     assert ibkr._mktdata_type() == 1              # live for subscribers
+
+
+def test_quote_client_id_distinct_from_sync(monkeypatch):
+    """Quotes use a DISTINCT client id (base+100) so they never collide with the
+    portfolio-sync id / the operator's live app (IBKR error 326). Overridable."""
+    monkeypatch.delenv("CIO_IBKR_QUOTE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CIO_IBKR_CLIENT_ID", raising=False)
+    assert ibkr._client_id() == 17
+    assert ibkr._quote_client_id() == 117           # base 17 + 100, never == sync id
+    monkeypatch.setenv("CIO_IBKR_CLIENT_ID", "5")
+    assert ibkr._quote_client_id() == 105
+    monkeypatch.setenv("CIO_IBKR_QUOTE_CLIENT_ID", "42")
+    assert ibkr._quote_client_id() == 42            # explicit override wins
 
 
 def test_quote_timeout_env_and_default(monkeypatch):
