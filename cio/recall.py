@@ -14,6 +14,7 @@ are fused with Reciprocal Rank Fusion (RRF), the same technique Hermes/Milvus us
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 import sqlite_vec
 
@@ -23,8 +24,28 @@ from .db import DB_PATH, EMBED_DIM
 MODEL_NAME = "BAAI/bge-base-en-v1.5"   # 768-dim, full precision (higher recall fidelity)
 _CACHE_DIR = str((db.Path(__file__).resolve().parent.parent / "data" / "models"))
 _RRF_K = 60
+_EPISODIC_HALF_LIFE_DAYS = 10.0  # turn/digest recall weight halves every 10 days
 
 _model = None
+
+
+def _recency_decay(created_at: str | None,
+                   half_life_days: float = _EPISODIC_HALF_LIFE_DAYS) -> float:
+    """Age multiplier in (0,1] for episodic hits (turns/digests). Notes are
+    excluded — they carry explicit TTL via `expires_at`, episodic rows do not, so
+    stale "this Monday / 6/16 FOMC binding" chatter surfaced at full RRF weight and
+    crowded evergreen rules. Half-life decay sinks old episodes without deleting
+    history. Unparseable/empty timestamp → 1.0 (no penalty)."""
+    if not created_at:
+        return 1.0
+    try:
+        ts = datetime.fromisoformat(created_at.strip().replace("T", " "))
+    except ValueError:
+        return 1.0
+    age_days = (datetime.now() - ts).total_seconds() / 86400.0
+    if age_days <= 0:
+        return 1.0
+    return 0.5 ** (age_days / half_life_days)
 
 
 def _embedder():
@@ -287,7 +308,7 @@ def search(query: str, k: int = 5, scope: str | None = None,
         scores = _rrf([fts_ids, vec_ids])
         if scores:
             rows = {r["id"]: r for r in conn.execute(
-                f"SELECT id, role, content, chat_id FROM conv_turns WHERE id IN "
+                f"SELECT id, role, content, chat_id, ts FROM conv_turns WHERE id IN "
                 f"({','.join('?'*len(scores))})", tuple(scores)).fetchall()}
             for _id, sc in scores.items():
                 r = rows.get(_id)
@@ -296,7 +317,8 @@ def search(query: str, k: int = 5, scope: str | None = None,
                 if cid is not None and r["chat_id"] is not None and r["chat_id"] != cid:
                     continue
                 results.append({"kind": "turn", "id": _id,
-                                "text": f"[{r['role']}] {r['content']}", "score": sc})
+                                "text": f"[{r['role']}] {r['content']}",
+                                "score": sc * _recency_decay(r["ts"])})
 
     if "digest" in kinds:
         cid = _scope_chat_id(scope)
@@ -327,7 +349,8 @@ def search(query: str, k: int = 5, scope: str | None = None,
                     continue
                 day = (r["created_at"] or "")[:10]
                 results.append({"kind": "digest", "id": _id,
-                                "text": f"[digest {day}] {r['summary']}", "score": sc})
+                                "text": f"[digest {day}] {r['summary']}",
+                                "score": sc * _recency_decay(r["created_at"])})
 
     conn.close()
     results.sort(key=lambda h: h["score"], reverse=True)

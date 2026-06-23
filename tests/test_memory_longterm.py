@@ -252,6 +252,33 @@ def test_prune_turns_disabled_by_zero():
     assert memory.prune_turns(retain_days=0, max_rows=0, db_path=p) == 0
 
 
+# ----- 5b. episodic recency decay (turns/digests) -------------------------------
+
+def test_recency_decay_demotes_stale_turn_below_fresh():
+    """A stale episodic turn ("6/16 FOMC binding") must rank below a fresh turn of
+    equal relevance — turns/digests carry no TTL, so age-decay is what keeps past
+    catalysts from surfacing at full weight next to current context."""
+    p = _tmpdb()
+    stale = _insert_turn(p, "FOMC eve trim still binding for the 6/16 decision")
+    _age_turn(p, stale, 30)                       # ~3 half-lives → ~0.125x
+    fresh = _insert_turn(p, "FOMC eve trim rule applies before the decision")
+    hits = recall.search("FOMC eve trim binding", k=5, scope="chat:1",
+                         kinds=("turn",), db_path=p)
+    ids = [h["id"] for h in hits]
+    assert stale in ids and fresh in ids
+    assert ids.index(fresh) < ids.index(stale), "stale turn outranked the fresh one"
+
+
+def test_recency_decay_no_penalty_for_today():
+    """A turn from now keeps essentially its full RRF score (decay ~1.0)."""
+    p = _tmpdb()
+    tid = _insert_turn(p, "fresh thesis on datacenter demand")
+    hits = recall.search("datacenter demand thesis", k=3, scope="chat:1",
+                         kinds=("turn",), db_path=p)
+    assert any(h["id"] == tid for h in hits)
+    assert recall._recency_decay(None) == 1.0     # missing ts → no penalty
+
+
 # ----- 6. vector-index self-healing ----------------------------------------------
 
 def test_remember_survives_embedding_failure(monkeypatch):
