@@ -73,14 +73,25 @@ def _client_id() -> int:
     return int(raw) if raw.isdigit() else _DEFAULT_CLIENT_ID
 
 
-def _ib_factory():
+def _quote_client_id() -> int:
+    """Client id for market-data quotes — DISTINCT from the portfolio-sync id so a
+    quote and a sync (or the operator's live app, which typically holds the default
+    id) can connect concurrently without IBKR error 326 'client id already in use'.
+    Defaults to the base id + 100; override with CIO_IBKR_QUOTE_CLIENT_ID."""
+    raw = (os.getenv("CIO_IBKR_QUOTE_CLIENT_ID") or "").strip()
+    return int(raw) if raw.isdigit() else _client_id() + 100
+
+
+def _ib_factory(client_id: int | None = None):
     """Connected, read-only IB instance (lazy import keeps the dependency
-    optional — CIOAgent imports fine without ib_async installed)."""
+    optional — CIOAgent imports fine without ib_async installed). ``client_id``
+    overrides the default sync id (quotes pass a distinct one)."""
     from ib_async import IB
 
     host, port = tws_endpoint()
     ib = IB()
-    ib.connect(host, port, clientId=_client_id(), timeout=_TIMEOUT, readonly=True)
+    ib.connect(host, port, clientId=client_id if client_id is not None else _client_id(),
+               timeout=_TIMEOUT, readonly=True)
     return ib
 
 
@@ -485,10 +496,15 @@ def quote(symbols) -> dict:
     resolved; unresolved ones are omitted. ``{}`` when IBKR is disabled,
     unreachable, ib_async is not installed, or nothing came back. Never raises.
 
-    Connects, reads, disconnects per call (same rationale as ``snapshot``), in a
-    fresh event loop so dashboard worker threads can call it. ``market_data_type``
-    on each quote reflects what IBKR actually served (3/4 = delayed ~15-20min), so
-    a delayed quote stays honestly labelled even when a live type was requested.
+    Connects, reads, disconnects per call (same rationale as ``snapshot``).
+    ``market_data_type`` on each quote reflects what IBKR actually served (3/4 =
+    delayed ~15-20min), so a delayed quote stays honestly labelled even when a live
+    type was requested.
+
+    The blocking ib_async work runs in a dedicated worker thread with its own fresh
+    event loop, so this is safe to call from a thread that already has a running
+    event loop (e.g. the async agent tool path) — a bare ``new_event_loop`` there
+    raises "This event loop is already running".
     """
     if isinstance(symbols, str):
         symbols = [symbols]
@@ -496,6 +512,15 @@ def quote(symbols) -> dict:
             if s and not s.strip().startswith("^")]
     if not syms or not enabled():
         return {}
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(_quote_blocking, syms).result()
+
+
+def _quote_blocking(syms: list) -> dict:
+    """The synchronous reqMktData read for ``quote`` — connect, stream, poll,
+    cancel, disconnect — in its own fresh event loop. Must run on a thread with no
+    already-running loop (``quote`` guarantees this by offloading to a worker)."""
     import time
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -504,7 +529,7 @@ def quote(symbols) -> dict:
     try:
         from ib_async import Stock
         mdt = _mktdata_type()
-        ib = _ib_factory()
+        ib = _ib_factory(client_id=_quote_client_id())
         try:
             ib.reqMarketDataType(mdt)
         except Exception:
