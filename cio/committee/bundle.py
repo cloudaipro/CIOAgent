@@ -7,6 +7,7 @@ Never raises; all fields default to None when data is missing.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from typing import Any
 
@@ -78,6 +79,30 @@ def _external(symbol: str, is_etf: bool) -> tuple[list, Any, Any, Any]:
     return filings, analyst, earnings, insider
 
 
+def _convergence_on() -> bool:
+    return (os.getenv("CIO_CONVERGENCE") or "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _convergence(symbol: str, is_etf: bool, ta_composite: str, insider):
+    """F10 cross-source convergence for the bundle. Reuses the TA composite +
+    insider already gathered (analyst trend is a cache hit; earnings-surprise +
+    news-spike are fetched inside, each self-gating). ETFs skip it (per-name
+    signals don't apply). Off with CIO_CONVERGENCE=0. Never raises."""
+    if is_etf or not _convergence_on():
+        return None
+    try:
+        from .. import convergence as conv_mod
+        result = conv_mod.convergence(symbol, ta_composite=ta_composite, insider=insider)
+        _evlog.info("tool=convergence symbol=%s label=%s score=%d conviction=%s active=%d via=committee",
+                    symbol, result.get("label"), result.get("score", 0),
+                    result.get("conviction"), result.get("active_count", 0))
+        return result
+    except Exception as e:
+        log.debug("convergence failed for %s: %s", symbol, e)
+        return None
+
+
 def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
     """
     Gather all available data for *symbol*.
@@ -139,6 +164,7 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
             "analyst": None,
             "earnings": None,
             "insider": None,
+            "convergence": None,
         }
 
     # TA signals — situation profile, best-effort (profile_signals never raises
@@ -152,6 +178,7 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
         log.debug("strategy profile %s failed for %s: %s", profile, resolved, e)
 
     filings, analyst, earnings, insider = _external(resolved, is_etf)
+    convergence = _convergence(resolved, is_etf, ta_composite, insider)
 
     return {
         "symbol": symbol,
@@ -167,6 +194,7 @@ def gather_bundle(symbol: str, profile: str = "committee") -> dict[str, Any]:
         "analyst": analyst,
         "earnings": earnings,
         "insider": insider,
+        "convergence": convergence,
     }
 
 
@@ -274,6 +302,15 @@ def format_bundle(bundle: dict) -> str:
         )
     else:
         lines.append("INSIDER: N/A (no source)")
+
+    # F10 cross-source convergence — deterministic tally of where the independent
+    # streams (TA / analyst trend / earnings / insider / news) agree.
+    conv = bundle.get("convergence")
+    if conv and conv.get("active_count"):
+        from .. import convergence as conv_mod
+        lines.append(conv_mod.format_line(conv))
+    else:
+        lines.append("CONVERGENCE: N/A (no active signals)")
 
     lines.append(f"IS_ETF: {bundle.get('is_etf', False)}")
 

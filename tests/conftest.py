@@ -18,6 +18,12 @@ if _REPO_ROOT not in sys.path:
 # (test_convlog overrides this per-test via monkeypatch.)
 os.environ["CIO_DETAILED_LOG"] = "0"
 
+# GDELT is the one external source ENABLED BY DEFAULT (it is keyless), so without
+# this the convergence/spike paths reached via gather_bundle would make live GDELT
+# calls during tests. Force it OFF for the suite; the GDELT-specific tests opt back
+# in with monkeypatch.setenv("CIO_GDELT_ENABLED", "1"). Keeps the suite offline.
+os.environ["CIO_GDELT_ENABLED"] = "0"
+
 import numpy as np
 import pandas as pd
 import pytest

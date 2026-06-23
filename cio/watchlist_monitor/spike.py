@@ -84,7 +84,9 @@ def detect_spike(symbol, *, query=None, tone_fn=None, headlines_fn=None, news_fn
     news_fn = news_fn or finnhub.company_news
 
     q = query or _query_for(symbol)
-    vol_2h = int((tone_fn(q, hours=_WINDOW_H) or {}).get("volume", 0))
+    tv_2h = tone_fn(q, hours=_WINDOW_H) or {}
+    vol_2h = int(tv_2h.get("volume", 0))
+    avg_tone = float(tv_2h.get("avg_tone", 0.0) or 0.0)
     if vol_2h < _min_count():
         return None
 
@@ -114,6 +116,7 @@ def detect_spike(symbol, *, query=None, tone_fn=None, headlines_fn=None, news_fn
         "baseline": round(baseline, 2),
         "multiplier": round(multiplier, 1) if multiplier is not None else None,
         "sources": len(sources),
+        "avg_tone": round(avg_tone, 2),   # GDELT tone of the surge: <0 negative, >0 positive
         "top_headlines": top,
         "query": q,
     }
