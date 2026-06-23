@@ -446,17 +446,26 @@ def prices(watchlist_id: int | None = None, *, quote_fn=None, db_path=db.DB_PATH
     ``stock.data.latest_quote`` (symbol, date, close, price, volume, OHLC).
     ``quote_fn`` overrides the price source (used by tests). If no watchlist
     exists, ``id``/``watchlist`` are None and quotes is empty."""
-    if quote_fn is None:
+    use_default = quote_fn is None
+    if use_default:
         from .stock import data as stockdata  # lazy: only the price path needs yfinance
         quote_fn = stockdata.latest_quote
     fetch = quote_fn
     wl = get(watchlist_id, db_path=db_path) if watchlist_id is not None else active(db_path=db_path)
     if wl is None:
         return {"watchlist": None, "id": None, "quotes": [], "missing": []}
+    # Batch the IBKR extended-hours fetch once (single socket for the whole list)
+    # instead of one connect per symbol. Returns {} outside pre/after-market or when
+    # IBKR is disabled, so a regular-session refresh is unaffected. Skipped when a
+    # test injects its own quote_fn.
+    ibkr_quotes = stockdata.batch_ibkr_quotes(wl["symbols"]) if use_default else {}
     quotes, missing = [], []
     for sym in wl["symbols"]:
         try:
-            q = fetch(sym)
+            if use_default:
+                q = fetch(sym, ibkr_quote=ibkr_quotes.get(sym.strip().upper()))
+            else:
+                q = fetch(sym)
         except Exception:
             q = None
         if q:
@@ -473,7 +482,12 @@ def format_prices(snapshot: dict) -> str:
         return "No active watchlist. Create one in the dashboard first."
     lines = [f"📋 Watchlist: {snapshot['watchlist']}"]
     for q in snapshot["quotes"]:
-        lines.append(f"  {q['symbol']:<8} {q['close']:>12,.2f}   ({q['date']})")
+        # Show the live pre/after-market price (with a tag) when present; the daily
+        # bar's close is only the regular session, stale once extended hours trade.
+        kind = q.get("quote_kind")
+        tag = {"live_postmarket": " AH", "live_premarket": " PM"}.get(kind, "")
+        px = q.get("price", q["close"]) if tag else q["close"]
+        lines.append(f"  {q['symbol']:<8} {px:>12,.2f}{tag:<3}   ({q['date']})")
     if not snapshot["quotes"]:
         lines.append("  (no prices available)")
     if snapshot["missing"]:

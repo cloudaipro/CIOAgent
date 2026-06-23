@@ -35,6 +35,33 @@ def test_note_live_intraday_is_empty():
     assert agent._quote_freshness_note(q) == ""
 
 
+def test_note_live_postmarket_flags_after_hours_and_change():
+    """An after-hours quote must NOT be silent (it isn't the regular close): the note
+    names it after-hours, shows the AH price and the move vs the regular close."""
+    q = {"symbol": "MU", "date": "2026-06-22", "session_date": "2026-06-22",
+         "market_status": "afterhours", "quote_kind": "live_postmarket",
+         "price": 1170.27, "regular_close": 1211.38, "extended_hours_change_pct": -3.39}
+    note = agent._quote_freshness_note(q)
+    assert "after-hours" in note
+    assert "1,170.27" in note and "1,211.38" in note
+    assert "-3.39%" in note
+    assert "STALE" not in note and "WARNING" not in note   # it's live, not stale
+
+
+def test_note_live_postmarket_delayed_warns_and_names_source():
+    """A DELAYED IBKR extended-hours quote must add a caution and name the source,
+    so the agent does not present a 15-20min-old price as an exact AH print."""
+    q = {"symbol": "MU", "date": "2026-06-22", "session_date": "2026-06-22",
+         "market_status": "afterhours", "quote_kind": "live_postmarket",
+         "price": 1170.27, "regular_close": 1211.38, "extended_hours_change_pct": -3.39,
+         "quote_source": "ibkr", "extended_hours_delayed": True}
+    note = agent._quote_freshness_note(q)
+    assert "after-hours" in note
+    assert "DELAYED" in note
+    assert "ibkr" in note            # source named
+    assert "broker app" in note      # told to confirm exact print
+
+
 def test_note_settled_close_says_settled_not_stale():
     q = _q("settled_close", date="2026-06-05", session_date="2026-06-05")
     note = agent._quote_freshness_note(q)
