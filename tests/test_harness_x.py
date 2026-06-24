@@ -159,6 +159,44 @@ class TestCitationProcessor:
         assert r.blocked is False  # Tier-3 fine when not backing a material fact
 
 
+# =========================================== ANTI-BOT BROWSER ESCALATION ==
+class TestBrowserEscalation:
+    """http_resolver escalates anti-bot refusals (403/429/...) to a headless
+    browser; true-dead statuses (404) never pay that cost. conv_turns 488/489."""
+    from cio.harness import citation as _cit
+    URL = "https://www.marketscreener.com/quote/stock/X/consensus/"
+
+    def test_disabled_keeps_stdlib_status(self, monkeypatch):
+        monkeypatch.delenv("CIO_CITATION_BROWSER", raising=False)
+        monkeypatch.setattr(self._cit, "_stdlib_status", lambda u, t=4.0: 403)
+        called = {"n": 0}
+        monkeypatch.setattr(self._cit, "browser_resolver",
+                            lambda u, t=20.0: called.__setitem__("n", called["n"] + 1) or 200)
+        assert self._cit.http_resolver(self.URL) == 403
+        assert called["n"] == 0  # browser never invoked when disabled
+
+    def test_anti_bot_escalates_to_browser(self, monkeypatch):
+        monkeypatch.setenv("CIO_CITATION_BROWSER", "1")
+        monkeypatch.setattr(self._cit, "_stdlib_status", lambda u, t=4.0: 403)
+        monkeypatch.setattr(self._cit, "browser_resolver", lambda u, t=20.0: 200)
+        assert self._cit.http_resolver(self.URL) == 200  # 403 -> live via browser
+
+    def test_dead_404_never_escalates(self, monkeypatch):
+        monkeypatch.setenv("CIO_CITATION_BROWSER", "1")
+        monkeypatch.setattr(self._cit, "_stdlib_status", lambda u, t=4.0: 404)
+        called = {"n": 0}
+        monkeypatch.setattr(self._cit, "browser_resolver",
+                            lambda u, t=20.0: called.__setitem__("n", called["n"] + 1) or 200)
+        assert self._cit.http_resolver(self.URL) == 404
+        assert called["n"] == 0  # 404 is real-dead, no browser cost
+
+    def test_browser_failure_falls_back(self, monkeypatch):
+        monkeypatch.setenv("CIO_CITATION_BROWSER", "1")
+        monkeypatch.setattr(self._cit, "_stdlib_status", lambda u, t=4.0: 403)
+        monkeypatch.setattr(self._cit, "browser_resolver", lambda u, t=20.0: None)
+        assert self._cit.http_resolver(self.URL) == 403  # browser dead -> keep 403
+
+
 # ================================================== VARIANT ROUTING (4) ==
 class TestVariantRouting:
     def test_harness_for_each_profile(self):

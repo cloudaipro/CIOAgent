@@ -20,7 +20,7 @@ from .models import (
     SkillStatus, HarnessSkill, AuditEntry, SkillManifest,
 )
 from .consistency import TradePlan, check_trade_plan
-from .citation import Citation, verify_citations, http_resolver
+from .citation import Citation, verify_citations, http_resolver, browser_resolver
 from .event_study import study, wave2_estimate
 from .registry import SkillRegistry, VerifyCase, GateError
 from .runloop import Hook, Event, ProcessorResult, RunResult, Runloop
@@ -32,7 +32,7 @@ __all__ = [
     "EventType", "EventStudyResult",
     "SkillStatus", "HarnessSkill", "AuditEntry", "SkillManifest",
     "TradePlan", "check_trade_plan",
-    "Citation", "verify_citations", "http_resolver",
+    "Citation", "verify_citations", "http_resolver", "browser_resolver",
     "study", "wave2_estimate",
     "SkillRegistry", "VerifyCase", "GateError",
     "Hook", "Event", "ProcessorResult", "RunResult", "Runloop",
