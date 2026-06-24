@@ -23,6 +23,14 @@ from .models import CitationVerdict, CitationReport, Finding, Severity
 
 Resolver = Callable[[str], "int | None"]
 
+# Statuses that mean "the host refused a bot", NOT "the page is dead". A stdlib
+# urllib request announces a non-browser UA + no JS challenge solve, so anti-bot
+# WAFs (DataDome/Cloudflare) answer these even when the page is perfectly live in
+# a real browser. conv_turns 488/489: marketscreener returned 403 to the harness
+# yet opened fine for the operator. We escalate these (and only these) to a real
+# headless browser before deciding a URL is dead.
+ANTI_BOT_STATUSES = frozenset({401, 403, 429, 503})
+
 
 @dataclass
 class Citation:
@@ -114,10 +122,25 @@ def _host(url: str) -> str:
 
 
 def http_resolver(url: str, timeout: float = 4.0) -> int | None:
-    """Default resolver: stdlib only, HEAD then GET fallback. Returns the HTTP
-    status code, or None if unreachable. No third-party deps; replaceable in
-    tests with a dict-backed fake. (Liveness ~ a HEAD; some hosts reject HEAD,
-    hence the GET fallback.)"""
+    """Default resolver: stdlib HEAD/GET, then escalate anti-bot refusals to a
+    real headless browser. Returns an HTTP status code, or None if unreachable.
+
+    The cheap stdlib path decides liveness for the common case. Only when it hits
+    an ANTI_BOT_STATUS (a refusal, not a 404) do we pay the browser cost, so a
+    normal turn never spins up Chromium. Browser escalation is off unless
+    CIO_CITATION_BROWSER is truthy *and* playwright is importable; it always
+    fails safe to the stdlib status. Replaceable in tests with a dict-backed
+    fake (the injected resolver bypasses all of this)."""
+    s = _stdlib_status(url, timeout)
+    if s in ANTI_BOT_STATUSES and _browser_enabled():
+        b = browser_resolver(url)
+        if b is not None:
+            return b
+    return s
+
+
+def _stdlib_status(url: str, timeout: float = 4.0) -> int | None:
+    """HEAD then GET fallback via stdlib (some hosts reject HEAD). No deps."""
     import urllib.request
     import urllib.error
 
@@ -138,3 +161,84 @@ def http_resolver(url: str, timeout: float = 4.0) -> int | None:
         if g is not None:
             return g
     return s
+
+
+def _browser_enabled() -> bool:
+    import os
+    return os.getenv("CIO_CITATION_BROWSER", "").strip().lower() in {
+        "1", "true", "yes", "on"}
+
+
+# A real desktop-Chrome UA; the default headless string is itself a bot tell.
+_BROWSER_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def browser_resolver(url: str, timeout: float = 20.0) -> int | None:
+    """Resolve liveness with a headless Chromium (playwright) + light stealth.
+
+    Returns the real navigation status (e.g. 200) when the page loads and yields
+    content, else None. Runs in its own thread so it is safe to call from inside
+    an asyncio event loop (playwright's sync API refuses a running loop, and the
+    harness may be driven from async code). Any failure — playwright missing,
+    launch error, timeout — returns None so the caller keeps the stdlib status.
+    """
+    import threading
+
+    result: dict[str, "int | None"] = {"status": None}
+
+    def _run() -> None:
+        result["status"] = _playwright_status(url, timeout)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout + 5.0)
+    if t.is_alive():  # hung navigation — abandon the thread, treat as unknown
+        return None
+    return result["status"]
+
+
+def _playwright_status(url: str, timeout: float) -> int | None:
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return None
+    try:
+        with sync_playwright() as p:
+            # Real Chrome (channel="chrome") clears anti-bot WAFs that block the
+            # bundled chromium (Akamai/DataDome); fall back if it isn't installed.
+            _args = dict(
+                headless=True,
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+            )
+            try:
+                browser = p.chromium.launch(channel="chrome", **_args)
+            except Exception:
+                browser = p.chromium.launch(**_args)
+            try:
+                ctx = browser.new_context(
+                    user_agent=_BROWSER_UA,
+                    viewport={"width": 1366, "height": 768},
+                    locale="en-US",
+                )
+                # navigator.webdriver === true is the classic headless giveaway.
+                ctx.add_init_script(
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+                page = ctx.new_page()
+                resp = page.goto(url, wait_until="domcontentloaded",
+                                 timeout=timeout * 1000)
+                status = resp.status if resp else None
+                # A WAF may serve a 200 challenge shell; require real body too.
+                try:
+                    body = page.content()
+                except Exception:
+                    body = ""
+                if status is not None and 200 <= status < 400 and len(body) > 500:
+                    return status
+                return status
+            finally:
+                browser.close()
+    except Exception:
+        return None
