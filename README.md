@@ -518,6 +518,15 @@ Pages:
   and a **model-catalog** editor (add/remove the model names that populate the dropdowns).
   Saves round-trip the YAML (comments preserved via `ruamel.yaml`) and clears the config
   cache so edits apply to the next run.
+  **General bot chat fallback chain** — a dropdown to pick the named fallback chain the
+  conversational Telegram agent (`CIOAgent`) uses; the bot applies that chain's first
+  Claude-service link as its SDK model, persisted to `data/dashboard_settings.json` so
+  it takes effect on the next session roll. *In progress on the
+  `feat/configure-bot-chat-fallback-chain` branch* — check it out to try:
+
+  ```bash
+  git checkout feat/configure-bot-chat-fallback-chain
+  ```
 
 Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:
 
