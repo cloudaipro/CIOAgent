@@ -28,6 +28,7 @@ from claude_agent_sdk import (
 import urllib.parse
 
 from . import alpha, charts, context, convlog, memory, portfolio, recall, timeutil, watchlist, web
+from .committee import models as _models
 from . import harness
 from .data import source_policy as _sp
 
@@ -1258,7 +1259,7 @@ def build_options(model: str | None = None, resume: str | None = None,
         cwd=str(PROJECT_ROOT),
         # Explicit argument wins over the env default — without it a programmatic
         # CIOAgent(model=...) override was silently ignored.
-        model=model or _env("MODEL") or None,
+        model=model or _env("MODEL") or _models.bot_chat_model() or None,
         resume=resume,
         hooks=hooks,
     )

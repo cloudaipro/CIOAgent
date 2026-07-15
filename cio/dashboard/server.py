@@ -261,7 +261,10 @@ class _Handler(BaseHTTPRequestHandler):
                     log_locked_by_env=os.getenv("CIO_LOG_TO_FILE") is not None,
                     detailed_log=convlog.enabled(),
                     detailed_locked_by_env=convlog.locked_by_env(),
-                    candle_style=_settings.get_candle_style())
+                    candle_style=_settings.get_candle_style(),
+                    bot_chat_chain=_settings.get_bot_chat_chain(),
+                    bot_chat_locked_by_env=os.getenv("CIO_MODEL") is not None
+                    or os.getenv("CFO_MODEL") is not None)
             elif path == "/indicators":
                 sym = (query.get("symbol", [""])[0] or "").strip().upper()
                 prof = (query.get("profile", ["committee"])[0] or "committee").lower()
@@ -718,6 +721,15 @@ class _Handler(BaseHTTPRequestHandler):
                 catalog[svc] = deduped
             if any(catalog.values()):
                 doc["model_catalog"] = catalog
+
+            # --- general bot chat fallback chain ---
+            from . import settings as _settings
+            bc = f("bot_chat_chain")
+            if bc and bc not in known:
+                raise ValueError(f"bot chat chain {bc!r} not found")
+            _settings.set_bot_chat_chain(bc if bc else None)
+            if bc:
+                notes.append(f"bot chat chain → {bc!r}")
 
             models.write_doc(doc)
             msg = "saved committee_models.yaml — takes effect immediately (next committee call)"
