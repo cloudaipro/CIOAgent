@@ -1755,7 +1755,9 @@ def render_configure(cfg, level: int, services, model_suggestions,
                      log_dir: str = "", log_locked_by_env: bool = False,
                      detailed_log: bool = False,
                      detailed_locked_by_env: bool = False,
-                     candle_style: str = "standard") -> str:
+                     candle_style: str = "standard",
+                     bot_chat_chain: str | None = None,
+                     bot_chat_locked_by_env: bool = False) -> str:
     """Edit committee model routing. One big POST form → /configure.
 
     Fallback-chain settings render first: each named setting is a table of
@@ -1827,6 +1829,42 @@ def render_configure(cfg, level: int, services, model_suggestions,
         "<table><tr><th>Agent</th><th>Fallback chain</th><th></th></tr>"
         + "".join(agent_rows) + "</table>"
     )
+
+    # --- general bot chat: pick the fallback chain it uses ---
+    from cio.committee import models as _models  # imported here to avoid circular imports at module load
+    resolved_bot_model = _models.bot_chat_model()
+    if bot_chat_locked_by_env:
+        bot_chat_section = (
+            "<details><summary>General bot chat fallback chain</summary>"
+            "<p class='hint'>Locked by the <code>CIO_MODEL</code> / <code>CFO_MODEL</code> "
+            "environment variable; unset it to control this from here.</p>"
+            "<p>Current model: <strong>SDK default</strong> (env wins).</p>"
+            "</details>"
+        )
+    else:
+        bot_chain_opts = "".join(
+            f"<option value='{esc(n)}'{' selected' if n == bot_chat_chain else ''}>"
+            f"{esc(n)}</option>"
+            for n in chain_names
+        )
+        if resolved_bot_model:
+            cur_hint = f"Current model: <strong>{esc(resolved_bot_model)}</strong> "
+            f"(from chain &ldquo;{esc(bot_chat_chain or '')}&rdquo;)."
+        else:
+            cur_hint = "Current model: <strong>SDK default</strong> (no chain set, or chain has no Claude link)."
+        bot_chat_section = (
+            "<details open><summary>General bot chat fallback chain</summary>"
+            f"<p class='hint'>The bot chat (CIOAgent) uses the <em>first Claude link</em> of "
+            "the chosen chain as its SDK model. Applies on the next session roll — no restart needed. "
+            "Add a <code>claude</code> link to a chain above to use it here.</p>"
+            f"<p>{cur_hint}</p>"
+            "<p>"
+            f"<select name='bot_chat_chain' style='min-width:12em'>"
+            "<option value=''>— default (env or SDK default) —</option>"
+            + bot_chain_opts
+            + "</select>"
+            "</p></details>"
+        )
 
     # --- provider connection settings (collapsed) ---
     def _txt(name, val, ph=""):
@@ -1969,6 +2007,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
         + "<input type='hidden' name='form_kind' value='models'>"
         + chains_section
         + "<h2>Agents</h2>" + agents_tbl
+        + bot_chat_section
         + providers
         + catalog_ui
         + "<p style='margin-top:16px'><button type='submit' class='primary'>Save changes</button></p>"

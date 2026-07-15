@@ -87,3 +87,19 @@ def set_candle_style(style: str) -> None:
     if style not in ("standard", "hollow"):
         raise ValueError(f"candle_style must be 'standard' or 'hollow', got {style!r}")
     set("candle_style", style)
+
+
+def get_bot_chat_chain() -> str | None:
+    """The fallback-chain name the general bot chat (CIOAgent) should use.
+    None means unset (bot falls back to CIO_MODEL env or SDK default)."""
+    val = get("bot_chat_chain")
+    if not val or not isinstance(val, str):
+        return None
+    return val
+
+
+def set_bot_chat_chain(name: str | None) -> None:
+    if name:
+        set("bot_chat_chain", str(name))
+    else:
+        set("bot_chat_chain", None)

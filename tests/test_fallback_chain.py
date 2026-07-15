@@ -683,3 +683,124 @@ agents:
         assert result == "claude-answer"
         assert len(calls["claude"]) == 1
         assert len(calls["openai"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# F. bot_chat_model — resolver for the general bot chat's fallback chain
+# ---------------------------------------------------------------------------
+
+class TestBotChatModel:
+    """bot_chat_model() returns the first claude-service link of the chosen
+    chain. Honors the env lock (CIO_MODEL/CFO_MODEL) and falls back to None."""
+
+    @pytest.fixture(autouse=True)
+    def fresh_models(self, monkeypatch, tmp_path):
+        # Clear the models cache so each test gets a fresh load of its tmp yaml.
+        from cio.committee import models as _m
+        _m.load_config.cache_clear()
+        # Pin the dashboard_settings.json to a temp file.
+        monkeypatch.setattr("cio.dashboard.settings._PATH",
+                            tmp_path / "dashboard_settings.json")
+        # Ensure no env lock by default.
+        monkeypatch.delenv("CIO_MODEL", raising=False)
+        monkeypatch.delenv("CFO_MODEL", raising=False)
+
+    def _write_settings(self, tmp_path, data):
+        """Helper: write dashboard_settings.json."""
+        import json
+        path = tmp_path / "dashboard_settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+
+    def _write_models_yaml(self, tmp_path, monkeypatch, yaml_content):
+        """Write a temp committee_models.yaml and point CIO_MODELS_CONFIG at it."""
+        path = tmp_path / "committee_models.yaml"
+        path.write_text(yaml_content)
+        from cio.committee import models as _m
+        monkeypatch.setenv("CIO_MODELS_CONFIG", str(path))
+        _m.load_config.cache_clear()
+
+    def test_returns_first_claude_link(self, tmp_path, monkeypatch):
+        """When a chain is stored, bot_chat_model returns its first claude link."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "premium"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  premium:
+  - {service: openai, model: gpt-x}
+  - {service: claude, model: opus-test}
+  - {service: nim, model: n1}
+""")
+        from cio.committee.models import bot_chat_model
+        assert bot_chat_model() == "opus-test"
+
+    def test_resolves_translation_chain_correctly(self, tmp_path, monkeypatch):
+        """translation chain starts with claude-sonnet → returned."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "translation"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  translation:
+  - {service: claude, model: sonnet-test}
+  - {service: claude, model: opus-test}
+  - {service: nim, model: n1}
+""")
+        from cio.committee.models import bot_chat_model
+        assert bot_chat_model() == "sonnet-test"
+
+    def test_no_claude_link_returns_none(self, tmp_path, monkeypatch):
+        """A chain with no claude link cannot host the SDK → returns None."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "no-claude"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  no-claude:
+  - {service: openai, model: gpt-x}
+  - {service: nim, model: n1}
+""")
+        from cio.committee.models import bot_chat_model
+        assert bot_chat_model() is None
+
+    def test_unset_returns_none(self, tmp_path, monkeypatch):
+        """No chain stored → None (bot falls back to env or SDK default)."""
+        self._write_settings(tmp_path, {})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  premium:
+  - {service: claude, model: opus-test}
+""")
+        from cio.committee.models import bot_chat_model
+        assert bot_chat_model() is None
+
+    def test_unknown_chain_name_returns_none(self, tmp_path, monkeypatch):
+        """Stored chain name not in yaml → None."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "nonexistent"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  premium:
+  - {service: claude, model: opus-test}
+""")
+        from cio.committee.models import bot_chat_model
+        assert bot_chat_model() is None
+
+    def test_env_lock_returns_none(self, tmp_path, monkeypatch):
+        """CIO_MODEL set → env wins, resolver returns None (UI locked)."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "premium"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  premium:
+  - {service: claude, model: opus-test}
+""")
+        monkeypatch.setenv("CIO_MODEL", "claude-haiku-4-5-20251001")
+        from cio.committee.models import bot_chat_model
+        assert bot_chat_model() is None
+
+    def test_cfo_model_also_locks(self, tmp_path, monkeypatch):
+        """CFO_MODEL set → env wins, resolver returns None."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "premium"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  premium:
+  - {service: claude, model: opus-test}
+""")
+        monkeypatch.setenv("CFO_MODEL", "claude-haiku-4-5-20251001")
+        from cio.committee.models import bot_chat_model
+        assert bot_chat_model() is None

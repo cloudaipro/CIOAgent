@@ -422,6 +422,44 @@ def read_doc(path: str | None = None):
             return yaml.safe_load(fh)
 
 
+def bot_chat_model() -> str | None:
+    """
+    The Claude SDK model the general bot chat (CIOAgent) should use, derived
+    from the operator's chosen fallback chain in ``dashboard_settings.json``.
+
+    Returns None when:
+      - the CIO_MODEL / CFO_MODEL env var is set (env wins; UI is locked).
+      - no chain is stored in settings (operator hasn't picked one).
+      - the stored chain has no ``service: claude`` link (cannot host the SDK).
+
+    The bot path reads this fresh on every client construction, so the setting
+    takes effect on the next natural session roll with no restart.
+    """
+    # Env lock: if the operator has set CIO_MODEL/CFO_MODEL, that wins.
+    if os.getenv("CIO_MODEL") or os.getenv("CFO_MODEL"):
+        return None
+
+    from cio.dashboard import settings as _dashboard_settings
+
+    chain_name = _dashboard_settings.get_bot_chat_chain()
+    if not chain_name:
+        return None
+
+    available = chains()
+    links = available.get(chain_name)
+    if not links:
+        log.warning("bot_chat_model: chain %r not found in config; ignoring", chain_name)
+        return None
+
+    # Bot chat requires the Claude SDK — pick the first claude-service link.
+    for link in links:
+        if str(link.get("service") or "claude") == "claude":
+            return link.get("model")
+
+    log.warning("bot_chat_model: chain %r has no claude link; cannot host SDK", chain_name)
+    return None
+
+
 def write_doc(doc, path: str | None = None) -> None:
     """Persist an edited config doc, then clear the load_config cache so the new
     values take effect on the next resolve()."""

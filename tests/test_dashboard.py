@@ -112,6 +112,10 @@ def test_render_configure_named_chains():
     assert "legacy inline" in html
     # old per-service agent widgets are gone
     assert "agent:market:service" not in html
+    # bot chat fallback-chain dropdown
+    assert "name='bot_chat_chain'" in html
+    assert "default (env or SDK default)" in html  # empty-option hint
+    assert "bot chat" in html.lower()  # section heading
 
 
 def test_render_committee_run_shows_sent_and_returned():
@@ -329,6 +333,48 @@ def test_configure_post_named_chain_roundtrip(live, monkeypatch, tmp_path):
     # the running process resolves the new assignment immediately (cache cleared)
     assert _models.resolve_chain_name("market") == "newone"
     _models.load_config.cache_clear()
+
+
+def test_configure_bot_chat_chain_roundtrip(live, monkeypatch, tmp_path):
+    """POST /configure with bot_chat_chain saves it to dashboard_settings.json."""
+    from cio.dashboard import settings as _settings
+
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        "chains:\n"
+        "  premium:\n"
+        "  - {service: claude, model: c1}\n"
+        "  - {service: nim, model: n1}\n"
+        "defaults: {chain: premium}\n"
+        "agents: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIO_MODELS_CONFIG", str(p))
+
+    # Pin settings store to a temp file.
+    sp = tmp_path / "dashboard_settings.json"
+    monkeypatch.setattr(_settings, "_PATH", sp)
+
+    status, resp = _post(live, "/configure", {
+        "form_kind": "models",
+        "bot_chat_chain": "premium",
+    })
+    assert status == 303
+    assert "err=1" not in resp.getheader("Location", "")
+
+    # Saved to dashboard_settings.json, readable immediately.
+    from cio.committee import models as _models
+    _models.load_config.cache_clear()
+    assert _settings.get_bot_chat_chain() == "premium"
+
+    # POSTing empty clears it.
+    status2, resp2 = _post(live, "/configure", {
+        "form_kind": "models",
+        "bot_chat_chain": "",
+    })
+    assert status2 == 303
+    _models.load_config.cache_clear()
+    assert _settings.get_bot_chat_chain() is None
 
 
 def test_configure_blank_daily_limit_clears(live, monkeypatch, tmp_path):
