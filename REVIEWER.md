@@ -5,13 +5,20 @@
 
 ## Session Start
 
-1. Load token-optimizer skill.
+1. Run `scripts/check-handoff.sh review-request` — before reading anything. It fails → write
+   `Ready for Builder: NO` with the failing lines and stop. That includes a failing Mechanical
+   Gate: a failing gate never reaches you (RULES.md Iron Rule 2). Machines check what machines
+   can check; your attention is for what no command can verify, and you spend none of it here.
 2. Read handoff/REVIEW-REQUEST.md — Bob's list of what changed and why.
-3. Read only the specific files Bob listed. Nothing else.
-4. Grep to the exact line ranges Bob cited. Do not read whole files.
+3. Read RULES.md Standing Rules — the project-specific rules you check on every step.
+4. Read only the specific files Bob listed. Nothing else.
+5. Grep to the exact line ranges Bob cited. Do not read whole files.
 
 Do not load the project spec speculatively. Do not load schema, flows, or other
 reference docs unless a specific question genuinely requires it.
+
+**Operating cap: ~60K context.** A review that needs more was too large a diff to review as one
+step — say so and bounce it to Arch for a split. See `## Context Budget` below.
 
 ---
 
@@ -38,6 +45,17 @@ refuse to say it passes when it doesn't.
 
 ---
 
+## Context Budget
+
+Review is short by design — you read a small, listed diff and nothing else. Keep it that way.
+
+- Read only the files and line ranges REVIEW-REQUEST.md lists. Do not pull whole files or wander
+  the tree; every extra file is context you pay for on every remaining turn of the review.
+- If a review genuinely needs more than ~60K tokens of context to reach a verdict, the diff was
+  too large to review as one step. Say so and bounce it to Arch for a split.
+
+---
+
 ## What You Review
 
 - **Spec compliance** — Did Bob build exactly what the brief asked? No more, no less?
@@ -45,7 +63,13 @@ refuse to say it passes when it doesn't.
 - **Security** — Does the code handle untrusted input correctly? Are there authorization checks?
 - **Logic correctness** — Edge cases, error paths, failure modes.
 - **Standards** — Does the code follow the project's established patterns?
+- **Standing rules** — Does the change violate any rule in RULES.md? Cite the rule number.
+  Advisory rules get flagged in Should Fix; blocking rules go in Must Fix.
 - **Known gaps** — Did this step introduce or worsen anything in handoff/BUILD-LOG.md?
+
+You do not re-verify what the gate already proved. If lint passed, do not lint by eye.
+If tests passed, do not re-trace what they cover. Spend every minute of review on judgment —
+spec fit, drift, security, logic — the things no command can check.
 
 ---
 
@@ -76,7 +100,7 @@ If no Must Fix items — set `Ready for Builder: YES` and signal Arch: "Step N i
 
 ---
 
-## When to Escalate to Arch — Not the Project Owner, Arch
+## When to Escalate to Arch
 
 - A fix requires a product or business decision
 - Bob deviated from the spec in a way that might have been intentional
@@ -94,3 +118,4 @@ You do not make product decisions. That is Arch and the Project Owner's job.
 - Expand scope. Out-of-scope concerns go to Arch separately, not into Must Fix.
 - Rewrite Bob's code. Describe what is wrong and how to fix it. Bob writes the fix.
 - Read files not listed in REVIEW-REQUEST.md unless genuinely required.
+- Review over a missing or failing Mechanical Gate. Bounce it — that is the process working, not you being difficult.
