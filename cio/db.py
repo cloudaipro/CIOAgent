@@ -336,6 +336,28 @@ def _migrate_alpha_coverage(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE alpha_candidates ADD COLUMN {col} {typ}")
 
 
+def _migrate_chat_session_id(conn: sqlite3.Connection) -> None:
+    """Clear `chats.session_id` values the Claude CLI cannot resume.
+
+    That column holds the CLI's own session id (a UUID). The OpenAI runtime used
+    to publish its internal SQLiteSession key (`chat:<chat_id>`) through the same
+    `on_session_id` callback, so any chat that ever answered on OpenAI poisoned
+    the slot for Claude: the CLI got `--resume chat:<id>`, started fine, then
+    exited 1 while handling the first message — bricking every later turn on that
+    chat. The writer is fixed (cio/agent_openai.py `_ensure`); this clears rows
+    already poisoned. Idempotent, and losing an unresumable token costs nothing."""
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(chats)")]
+    if "session_id" not in cols:
+        return
+    with conn:
+        conn.execute(
+            "UPDATE chats SET session_id = NULL "
+            " WHERE session_id IS NOT NULL "
+            "   AND NOT (length(session_id) = 36 AND session_id GLOB "
+            "            '[0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*')"
+        )
+
+
 def _drop_stale_vec(conn: sqlite3.Connection) -> bool:
     """If the stored embedding dim differs from EMBED_DIM, drop the vec0 tables so
     the schema recreates them at the new dim. Returns True if dropped (needs
@@ -384,6 +406,7 @@ def connect(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     _migrate(conn)
     _migrate_watchlist_position(conn)
     _migrate_alpha_coverage(conn)
+    _migrate_chat_session_id(conn)
     with conn:
         conn.execute("INSERT OR REPLACE INTO meta (key,value) VALUES ('embed_dim',?)",
                      (str(EMBED_DIM),))

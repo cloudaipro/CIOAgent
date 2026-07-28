@@ -260,3 +260,4 @@ openclaw-main/
 .claude/scheduled_tasks.lock
 python-telegram-bot-master/
 .serena/
+.tmt*/

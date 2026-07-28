@@ -202,7 +202,15 @@ class OpenAIRuntime(BaseRuntime):
         if self._session is None:
             session_id = f"chat:{self._chat_id}"
             self._session = SQLiteSession(session_id=session_id, db_path=str(db.DB_PATH))
-            self._note_session(session_id)
+            # Record it locally -- the dashboard and memory.log_turn group turns by
+            # `session_id` -- but do NOT publish it through `_note_session`. That
+            # callback persists into `chats.session_id`, which is the *Claude*
+            # resume token: a `chat:<id>` key landing there is handed straight to
+            # the CLI as `--resume chat:<id>`, which it cannot resolve, and it then
+            # exits 1 on the first message of every subsequent Claude turn. This
+            # session needs no stored token anyway -- its id is deterministic and
+            # rebuilt here on every boot, unlike the Claude SDK's assigned id.
+            self._session_id = session_id
         if self._agent is None:
             self._agent = self._build_agent()
 

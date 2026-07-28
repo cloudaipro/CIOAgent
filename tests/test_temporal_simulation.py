@@ -83,9 +83,13 @@ class TemporalSim:
 
         async def fake_run(prompt: str):
             # The SDK assigns a session id on the first message of a new thread.
+            # UUID-shaped because that is what the CLI issues, and a resume token
+            # that isn't gets dropped before it reaches `--resume` (agent.py
+            # `_resumable_session_id`) — so a differently-shaped fake would make
+            # every restart below start fresh and the test would prove nothing.
             if a._session_id is None:
                 self._sid_seq += 1
-                a._note_session(f"sim-session-{self._sid_seq}")
+                a._note_session(f"51000000-0000-4000-8000-{self._sid_seq:012d}")
             # Log only user-facing turns (ask() prefixes them with "[context]").
             # Internal digest/playbook/rollup queries run one extra model turn on
             # the OLD thread during a roll — production never logs those to

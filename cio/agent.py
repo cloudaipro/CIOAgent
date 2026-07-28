@@ -12,13 +12,16 @@ import json
 import logging
 import os
 import re
+from collections import deque
 from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage,
+    CLIConnectionError,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     HookMatcher,
+    ProcessError,
     ResultMessage,
     TextBlock,
     create_sdk_mcp_server,
@@ -1247,8 +1250,33 @@ Rules:
   recompute those from the portfolio tools every time."""
 
 
+# The CLI issues session ids as UUIDs; `chat:<id>` and friends are other
+# runtimes' internal session keys and mean nothing to it.
+_SDK_SESSION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def _resumable_session_id(session_id: str | None) -> str | None:
+    """Return *session_id* only if the CLI could actually resume it, else None.
+
+    A `--resume` token the CLI can't resolve does NOT fail at connect — the
+    process starts fine and then exits 1 while handling the first message, so
+    every turn dies mid-stream with no usable diagnostic. Screen the token here
+    instead: an unresumable one costs us this chat's thread continuity, a bad one
+    costs us the chat entirely."""
+    if not session_id:
+        return None
+    if _SDK_SESSION_ID_RE.match(session_id):
+        return session_id
+    logging.getLogger("cio.agent").warning(
+        "session id %r is not a CLI session id — ignoring it and starting fresh",
+        session_id)
+    return None
+
+
 def build_options(model: str | None = None, resume: str | None = None,
-                  system_prompt: str | None = None, hooks=None) -> ClaudeAgentOptions:
+                  system_prompt: str | None = None, hooks=None,
+                  stderr=None) -> ClaudeAgentOptions:
     server = create_sdk_mcp_server("cio", "1.0.0", CIO_TOOLS)
     return ClaudeAgentOptions(
         system_prompt=system_prompt or SYSTEM_PROMPT,
@@ -1262,6 +1290,9 @@ def build_options(model: str | None = None, resume: str | None = None,
         model=model or _env("MODEL") or _models.bot_chat_model() or None,
         resume=resume,
         hooks=hooks,
+        # Without a callback the SDK leaves the child's stderr unpiped, so a CLI
+        # that dies mid-session ("exit code: 1") leaves no trace anywhere.
+        stderr=stderr,
     )
 
 
@@ -1595,8 +1626,16 @@ class CIOAgent(BaseRuntime):
         # This class is the ClaudeRuntime implementation behind cio.bot_runtime's
         # BotRuntime protocol; it always resolves to "claude" (Standing Rule R4 —
         # usage/transcript attribution takes the service that actually answered).
+        resume = _resumable_session_id(resume)
         super().__init__(model, chat_id, on_session_id, "claude", resume)
         self._resume = resume
+        # Has this session produced a single message yet? Until it has, a resumed
+        # thread is unproven and a mid-stream death is most likely the resume
+        # token — see `_run_query`.
+        self._resume_proven = False
+        # Last lines the CLI subprocess wrote to stderr, kept so a crash can be
+        # explained after the fact (the SDK only reports the exit code).
+        self._stderr_tail: deque[str] = deque(maxlen=20)
         self._client = self._make_client(resume)
         self._connected = False
 
@@ -1617,11 +1656,67 @@ class CIOAgent(BaseRuntime):
         prompt = context.compose_system_prompt(SYSTEM_PROMPT, self._chat_id)
         self._system_prompt = prompt   # kept for the detailed-history log (convlog)
         hooks = {"PreCompact": [HookMatcher(hooks=[self._on_precompact])]}
+        self._stderr_tail.clear()      # a new child gets a clean crash record
         return ClaudeSDKClient(
-            options=build_options(self._model, resume, system_prompt=prompt, hooks=hooks))
+            options=build_options(self._model, resume, system_prompt=prompt,
+                                  hooks=hooks, stderr=self._note_stderr))
+
+    def _note_stderr(self, line: str) -> None:
+        """SDK stderr callback — keep the tail so `_reconnect` can log why the
+        CLI died. Must never raise: it runs inside the transport's reader task."""
+        try:
+            self._stderr_tail.append(line.rstrip())
+        except Exception:
+            pass
+
+    def _transport_alive(self) -> bool:
+        """Is the CLI subprocess still writable?
+
+        `self._connected` records that *we* once connected, not that the child is
+        alive. When the CLI exits under us the SDK only surfaces it at write time
+        ("Cannot write to terminated process") — and since `_ensure` short-circuits
+        on `_connected`, every later turn on this chat would hit the same dead pipe
+        forever. Probing SDK internals defensively: unknown shape ⇒ assume alive
+        and let the write path's retry handle it."""
+        transport = getattr(self._client, "_transport", None)
+        if transport is None:
+            return False
+        is_ready = getattr(transport, "is_ready", None)
+        if callable(is_ready):
+            try:
+                if not is_ready():
+                    return False
+            except Exception:
+                pass
+        proc = getattr(transport, "_process", None)
+        return not (proc is not None and getattr(proc, "returncode", None) is not None)
+
+    async def _reconnect(self) -> None:
+        """Rebuild the client after the CLI subprocess died, resuming the same
+        thread when we know its session id so the conversation survives the
+        restart. Falls back to a fresh session via `_ensure` if the resume fails."""
+        if self._stderr_tail:
+            logging.getLogger("cio.agent").error(
+                "CLI stderr tail for %s:\n%s", self._scope, "\n".join(self._stderr_tail))
+        try:
+            await self._client.disconnect()
+        except Exception:
+            pass
+        self._connected = False
+        self._resume = _resumable_session_id(self._session_id or self._resume)
+        # The new child has to load that transcript for itself, so re-arm the
+        # one-shot fresh-session fallback in `_run_query`.
+        self._resume_proven = False
+        self._client = self._make_client(self._resume)
+        await self._ensure()
 
     async def _ensure(self):
         if self._connected:
+            if self._transport_alive():
+                return
+            logging.getLogger("cio.agent").warning(
+                "CLI transport for %s died between turns — reconnecting", self._scope)
+            await self._reconnect()   # _connected is False by then: no recursion
             return
         try:
             await self._client.connect()
@@ -1631,7 +1726,6 @@ class CIOAgent(BaseRuntime):
             # fresh session — financial truth lives in the DB regardless.
             if not self._resume:
                 raise
-            import logging
             logging.getLogger("cio.agent").warning(
                 "resume %s failed (%s); starting a fresh session", self._resume, e)
             self._resume = None
@@ -1658,22 +1752,60 @@ class CIOAgent(BaseRuntime):
 
         Also records the turn's Claude token usage so the dev dashboard reflects
         real chat consumption (input+output from each AssistantMessage.usage)."""
-        await self._client.query(prompt)
+        try:
+            await self._client.query(prompt)
+        except (CLIConnectionError, ProcessError) as e:
+            # The CLI died since the last turn and `_transport_alive` didn't catch
+            # it (races, or an SDK internal we can't see). The prompt never reached
+            # the child, so reconnecting and re-sending can't duplicate anything.
+            # One retry: a second failure is a real outage, not a stale pipe.
+            logging.getLogger("cio.agent").warning(
+                "query write failed for %s (%s) — reconnecting and retrying once",
+                self._scope, e)
+            await self._reconnect()
+            await self._client.query(prompt)
         parts: list[str] = []
         tokens = 0          # accumulated per-AssistantMessage usage (often empty)
         result_tokens = 0   # authoritative turn total from the final ResultMessage
-        async for msg in self._client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                self._note_session(msg.session_id)
-                for blk in msg.content:
-                    if isinstance(blk, TextBlock):
-                        parts.append(blk.text)
-                tokens += _usage_tokens(msg.usage)
-            elif isinstance(msg, ResultMessage):
-                # ResultMessage.usage is the cumulative usage for the whole turn
-                # (the agent SDK leaves AssistantMessage.usage empty), so prefer it.
-                self._note_session(getattr(msg, "session_id", None))
-                result_tokens = _usage_tokens(msg.usage)
+        try:
+            async for msg in self._client.receive_response():
+                self._resume_proven = True     # this thread demonstrably works
+                if isinstance(msg, AssistantMessage):
+                    self._note_session(msg.session_id)
+                    for blk in msg.content:
+                        if isinstance(blk, TextBlock):
+                            parts.append(blk.text)
+                    tokens += _usage_tokens(msg.usage)
+                elif isinstance(msg, ResultMessage):
+                    # ResultMessage.usage is the cumulative usage for the whole turn
+                    # (the agent SDK leaves AssistantMessage.usage empty), so prefer it.
+                    self._note_session(getattr(msg, "session_id", None))
+                    result_tokens = _usage_tokens(msg.usage)
+        except Exception as e:
+            # Deliberately broad: the SDK's message reader re-raises a CLI failure
+            # as a *bare* `Exception("Command failed with exit code 1")`, so
+            # matching on type alone misses the most common death. Whether the
+            # child is actually gone is the reliable signal — and every path here
+            # re-raises, so nothing is swallowed.
+            if not (isinstance(e, (CLIConnectionError, ProcessError))
+                    or not self._transport_alive()):
+                raise
+            self._connected = False   # next turn rebuilds instead of writing to a corpse
+            if self._stderr_tail:
+                logging.getLogger("cio.agent").error(
+                    "CLI stderr tail for %s:\n%s", self._scope,
+                    "\n".join(self._stderr_tail))
+            if self._resume and not self._resume_proven and not parts:
+                # The CLI took a `--resume` token, started, and died before saying
+                # anything. An unresolvable transcript looks exactly like this, and
+                # it repeats on every turn until the token is dropped — so drop it
+                # and retry once on a fresh session. Nothing ran, so nothing repeats.
+                logging.getLogger("cio.agent").warning(
+                    "resumed session %s died before its first message for %s — "
+                    "retrying once on a fresh session", self._resume, self._scope)
+                await self._reset_session()   # clears _resume: this can't loop
+                return await self._run_query(prompt)
+            raise
         text = "\n".join(parts).strip()
         # Effective tokens: ResultMessage total > summed AssistantMessage usage >
         # a local estimate (so the figure is never a misleading 0).

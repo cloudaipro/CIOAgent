@@ -178,6 +178,25 @@ def _try_acquire(chat_id: int, task: asyncio.Task | None) -> bool:
     return True
 
 
+def _is_transport_error(exc: BaseException) -> bool:
+    """Did this turn fail because the runtime's connection to its backend broke
+    (rather than the turn itself going wrong)? Matched by name, not by class, so
+    the check stays runtime-agnostic and needs no SDK import here."""
+    for e in (exc, exc.__cause__, exc.__context__):
+        if e is None:
+            continue
+        if type(e).__name__ in ("CLIConnectionError", "CLINotFoundError",
+                                "ProcessError", "ClaudeSDKError"):
+            return True
+        # The SDK's message reader re-raises a dead CLI as a bare Exception, so
+        # the text is all we get to go on.
+        text = str(e)
+        if ("terminated process" in text or "not ready for writing" in text
+                or "Command failed with exit code" in text):
+            return True
+    return False
+
+
 async def _reset_agent(chat_id: int) -> None:
     """Drop a chat's agent after a cancelled turn so a half-consumed SDK response
     stream can't corrupt the next turn. The next message lazily rebuilds it,
@@ -258,6 +277,13 @@ async def _run(update: Update, prompt: str) -> None:
             raise  # not a user stop (e.g. shutdown) — let it propagate
         except Exception as e:  # never let the bot die on one bad turn
             log.exception("agent error")
+            # A dead transport is sticky: the cached agent holds a client whose
+            # subprocess is gone, so every later message would fail identically
+            # until the bot restarts. Drop it — the next message rebuilds and
+            # resumes from the saved session_id. (The Claude runtime also
+            # self-heals; this covers runtimes that don't.)
+            if _is_transport_error(e):
+                await _reset_agent(chat_id)
             await update.effective_message.reply_text(f"⚠️ Agent error: {e}")
             return
         # Persist the exchange for the dev dashboard + cold-store recall (best-effort).

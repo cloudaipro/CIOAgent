@@ -10,23 +10,29 @@
 chains:
   # premium: paid head -> subscription -> cheap last resort (cio, wma).
   premium:
-  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 120000}
-  - {service: claude, model: claude-opus-4-8}
+  - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
+  - {service: claude, model: claude-opus-5}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # standard: subscription head (same primary the specialists always used),
   # degrading to paid then cheap.
   standard:
-  - {service: claude, model: claude-opus-4-8}
-  - {service: openai, model: gpt-5.5-2026-04-23, daily_limit: 120000}
+  - {service: openai, model: gpt-5.6-terra}
+  - {service: claude, model: claude-opus-5, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # translation: Claude sonnet head — reliable on long markdown + strong
   # Traditional Chinese. Output is ALSO post-converted with OpenCC s2twp
   # (translate.py) to GUARANTEE Traditional (Taiwan) glyphs/phrasing
   # regardless of which backend answers.
   translation:
-  - {service: claude, model: claude-sonnet-4-6}
   - {service: openai, model: gpt-5.4-mini-2026-03-17}
+  - {service: claude, model: claude-sonnet-5}
   - {service: nim, model: moonshotai/kimi-k2.6}
+  # bot_chat: the general Telegram chat's chain. claude+openai only — no nim
+  # link (a 42-tool surface needs a strong tool-caller). Claude first preserves
+  # today's billing (chat runs on the subscription).
+  bot_chat:
+  - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
+  - {service: claude, model: claude-opus-5}
 # defaults.chain: the setting used by any agent not listed below.
 defaults: {chain: premium}
 # agents.<key>.chain: name of the chain setting that agent uses.
@@ -46,6 +52,7 @@ agents:
   # briefing degrades gracefully when a backend is down/over-budget.
   wma: {chain: premium}
   translator: {chain: translation}
+  bot_chat: {chain: bot_chat}
 # nim.max_tokens = output cap value (env CIO_NIM_MAX_TOKENS overrides).
 nim: {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_KEY, max_tokens: 20480}
 # claude (claude-agent-sdk) has no plain output max_tokens; only a thinking-token
@@ -59,16 +66,16 @@ openai: {base_url: "https://api.openai.com/v1", api_key_env: OPENAI_API_KEY, tok
 # only seeds the dropdowns. Services omitted here fall back to built-in defaults.
 model_catalog:
   claude:
+  - claude-opus-5
   - claude-opus-4-8
-  - claude-opus-4-7
-  - claude-opus-4-6
-  - claude-sonnet-4-6
-  - claude-sonnet-4-5
+  - claude-sonnet-5
   - claude-haiku-4-5-20251001
   nim:
   - nvidia/nemotron-3-ultra-550b-a55b
   - minimaxai/minimax-m2.7
   - moonshotai/kimi-k2.6
   openai:
+  - gpt-5.6-terra
+  - gpt-5.6-sol
   - gpt-5.5-2026-04-23
   - gpt-5.4-mini-2026-03-17

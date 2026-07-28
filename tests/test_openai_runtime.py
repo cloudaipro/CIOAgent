@@ -130,11 +130,21 @@ class TestEnsure:
         assert rt._session is session1
         assert rt._agent is agent1
 
-    def test_ensure_reports_session_id_via_callback(self):
+    def test_ensure_records_its_session_id_locally(self):
+        rt = OpenAIRuntime(_LINKS, chat_id=555)
+        _run(rt._ensure())
+        assert rt.session_id == "chat:555"   # dashboard/log_turn group by this
+
+    def test_ensure_does_not_publish_its_session_id(self):
+        """`on_session_id` persists into chats.session_id, which is the *Claude*
+        resume token. Publishing this runtime's SQLiteSession key there handed the
+        CLI `--resume chat:555`, which it cannot resolve: the process started, then
+        exited 1 on the first message of every later Claude turn on that chat.
+        This session needs no stored token -- `_ensure` rebuilds its id every boot."""
         seen = []
         rt = OpenAIRuntime(_LINKS, chat_id=555, on_session_id=seen.append)
         _run(rt._ensure())
-        assert seen == ["chat:555"]
+        assert seen == []
         assert rt.session_id == "chat:555"
 
 

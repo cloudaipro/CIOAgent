@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: Module",
+            "name": "Python Debugger: bot",
             "type": "debugpy",
             "request": "launch",
             "module": "cio.bot",
