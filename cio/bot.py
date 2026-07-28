@@ -36,6 +36,7 @@ from telegram.ext import (
 
 from . import alpha, charts, memory, recall, richmsg, scheduler, watchlist
 from .agent import CIOAgent
+from .bot_runtime import BotRuntime, select_runtime
 
 load_dotenv()
 from .logsetup import configure_logging
@@ -104,18 +105,26 @@ _INLINE_MENU = InlineKeyboardMarkup(
      [InlineKeyboardButton("❓ Help", callback_data="cb:help")]],
 )
 
-# One conversational agent per chat, created lazily.
-_agents: dict[int, CIOAgent] = {}
+# One conversational runtime per chat, created lazily. Selection happens once
+# per cached runtime (session start / roll) and is then pinned — locked
+# decision D4 (docs/BOT-CHAT-OPENAI-MIGRATION.md:132).
+_agents: dict[int, BotRuntime] = {}
 
 
-def _agent(chat_id: int) -> CIOAgent:
+def _agent(chat_id: int) -> BotRuntime:
     if chat_id not in _agents:
         memory.touch_chat(chat_id)
-        _agents[chat_id] = CIOAgent(
-            resume=memory.get_session_id(chat_id),
-            on_session_id=lambda sid: memory.set_session_id(chat_id, sid),
-            chat_id=chat_id,
-        )
+        resume = memory.get_session_id(chat_id)
+        on_session_id = lambda sid: memory.set_session_id(chat_id, sid)
+        try:
+            _agents[chat_id] = select_runtime(
+                chat_id, resume=resume, on_session_id=on_session_id)
+        except Exception:
+            # R2: a routing bug must never take the bot down — degrade to the
+            # same direct construction this call site used before Step 11.
+            log.exception("select_runtime failed for chat %s; using CIOAgent directly", chat_id)
+            _agents[chat_id] = CIOAgent(
+                resume=resume, on_session_id=on_session_id, chat_id=chat_id)
     return _agents[chat_id]
 
 
@@ -252,7 +261,7 @@ async def _run(update: Update, prompt: str) -> None:
             await update.effective_message.reply_text(f"⚠️ Agent error: {e}")
             return
         # Persist the exchange for the dev dashboard + cold-store recall (best-effort).
-        memory.log_turn(chat_id, agent._session_id, prompt, text)
+        memory.log_turn(chat_id, agent.session_id, prompt, text)
         await _reply(update, text or "(no response)", images, docs)
     finally:
         _untrack_task(chat_id, task)
@@ -462,7 +471,11 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     dest = UPLOAD_DIR / f"{update.effective_chat.id}_{photo.file_unique_id}.jpg"
     await tg_file.download_to_drive(dest)
     caption = update.message.caption or "Read this image and extract the relevant financial figures."
-    await _run(update, f"{caption}\nThe image is saved at: {dest}\nUse the Read tool to view it.")
+    # Runtime-neutral on purpose: the Claude path reads the file with the CLI's
+    # Read builtin, while the OpenAI path inlines it as a vision input part
+    # (cio/agent_openai.build_turn_input). Naming either mechanism here would
+    # instruct one runtime to use a tool the other does not have.
+    await _run(update, f"{caption}\nThe image is saved at: {dest}")
 
 
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

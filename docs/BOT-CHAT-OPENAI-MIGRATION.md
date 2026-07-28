@@ -68,7 +68,7 @@ subprocess, no socket. It exists only because the Claude Code CLI reaches tools 
 wire format. `.mcp.json` in the repo root is the developer's Claude Code config (context7),
 not a CIOAgent runtime dependency.
 
-What bot chat actually needs is **tool calling over 42 typed handlers**, which OpenAI provides
+What bot chat actually needs is **tool calling over 44 typed handlers**, which OpenAI provides
 natively. And the port is mechanical, because `SdkMcpTool` is a plain dataclass:
 
 ```python
@@ -76,7 +76,7 @@ natively. And the port is mechanical, because `SdkMcpTool` is a plain dataclass:
 class SdkMcpTool(Generic[T]):
     name: str
     description: str
-    input_schema: type[T] | dict[str, Any]      # already a JSON schema in our tools
+    input_schema: type[T] | dict[str, Any]      # NOT JSON Schema for most tools -- see §4.1
     handler: Callable[[T], Awaitable[dict[str, Any]]]
 ```
 
@@ -102,7 +102,7 @@ The single most confusing part of this plan, so it comes first.
 Chain link "openai gpt-5.6-terra"            Chain link "claude claude-opus-4-8"
   → OpenAIRuntime                              → ClaudeRuntime
 
-  you  → prompt + 42 tool schemas → API        you  → prompt → Claude Code CLI
+  you  → prompt + 44 tool schemas → API        you  → prompt → Claude Code CLI
   API  → "call portfolio_summary"              CLI  → picks tools, invokes your
   you  → run handler, append result                   handlers over in-process MCP,
   you  → call API again                               loops internally
@@ -126,7 +126,7 @@ our own loop executes — would collapse this to one runtime. It was considered 
 
 | # | Decision | Rationale |
 |---|---|---|
-| **D1** | Bot chat supports **`claude` and `openai` only**. No LiteLLM, no NIM. A `nim` link inside a shared chain is logged and skipped. | 42 tools is a wide surface; a weak tool-caller burns whole turns. NIM stays a committee backend where output is prose. |
+| **D1** | Bot chat supports **`claude` and `openai` only**. No LiteLLM, no NIM. A `nim` link inside a shared chain is logged and skipped. | 44 tools is a wide surface; a weak tool-caller burns whole turns. NIM stays a committee backend where output is prose. |
 | **D2** | The Claude link is served by **`claude-agent-sdk`**, unchanged, subscription-billed. | Preserves today's cost model. |
 | **D3** | `claude-agent-sdk` therefore plugs in as a **whole-turn runtime**, never as an Agents SDK `Model`. | Forced by D2 — see §3.1. |
 | **D4** | **Runtime is selected at session start / roll, then pinned** for that session window. | The two transcripts never interleave → no history sync, no turn replay, no side-effect ledger. |
@@ -139,7 +139,7 @@ roll and at the start of any turn where the current link is latched or over budg
 
 The upgrade path, if that gap ever bites: per-turn runtime switching plus a **mutating-tool
 ledger**, so a failed turn replays on the next link only when nothing irreversible ran.
-Roughly ten of the 42 tools mutate — `ingest_transactions_csv`, `set_price`, `remember`,
+Roughly ten of the 44 tools mutate — `ingest_transactions_csv`, `set_price`, `remember`,
 `forget`, `save_playbook`, `add_econ_event`, `watchlist_add/remove/activate`,
 `run_alpha_hunter`, and `run_committee` (~20 LLM calls, KG-7). Replaying a turn without that
 ledger would double-execute them. **Do not add per-turn switching without the ledger.**
@@ -160,7 +160,7 @@ flowchart TD
     OR --> FM["FallbackModel(Model)<br>walks the chain's remaining OPENAI links<br>per MODEL CALL"]
     FM --> SAFE["Safe by construction: tool execution sits<br>in the SDK loop BETWEEN model calls,<br>so a fallback never replays a tool"]
 
-    CR --> TOOLS["The same 42 handlers<br>cio/agent.py CIO_TOOLS"]
+    CR --> TOOLS["The same 44 handlers<br>cio/agent.py CIO_TOOLS"]
     OR --> TOOLS
 ```
 
@@ -204,7 +204,7 @@ def to_function_tool(t) -> FunctionTool:
     return FunctionTool(
         name=t.name,
         description=t.description,
-        params_json_schema=t.input_schema,   # our tools already declare JSON schema
+        params_json_schema=_claude_schema(t),   # converted -- see §4.1, NOT t.input_schema
         on_invoke_tool=_invoke,
     )
 
@@ -224,6 +224,36 @@ framework state:
 
 `web_search` and `web_scrape` are **our own tools**, not the SDK's builtins (which are in
 `disallowed_tools` today), so evidence integrity and source tiering carry over untouched.
+
+### 4.1 Correction — `input_schema` is not JSON Schema
+
+*Added 2026-07-27 during implementation (Step 12), measured against the real `CIO_TOOLS`. The
+snippet above passed `t.input_schema` straight through as `params_json_schema`. That is wrong
+for 43 of the 44 tools.*
+
+Measured shapes:
+
+| Shape | Count | Conversion |
+|---|---|---|
+| `{}` — no parameters | 16 | → `{"type": "object", "properties": {}}` |
+| `{param: <python type>}` | 27 | → object schema; **every** key is required |
+| already real JSON Schema | 1 | passed through unchanged |
+
+Only `str`, `int`, `float` and `bool` appear. `claude_agent_sdk` performs this conversion in a
+private closure inside `create_sdk_mcp_server` (`_build_schema`), which cannot be imported — so
+`cio/tool_bridge.py` reimplements it, and the test asserts agreement against what the SDK itself
+registers rather than against a second copy of the algorithm.
+
+Two further findings that shaped the built code:
+
+- `agents.strict_schema.ensure_strict_json_schema` promotes every optional parameter to
+  `required` **without** making it nullable. One tool is affected
+  (`harness_event_study.horizon_days`), since the `{param: type}` schemas mark all keys required
+  anyway. The bridge makes such properties nullable so the model can say "not specified."
+- `cio/harness/tools.py:39` reads `inp.get("horizon_days", 20)`, so a present-but-`None` key
+  returns `None` rather than the default. The adapter therefore **strips `None` values before
+  invoking the handler**, which restores the Claude path's semantics exactly: omitted and
+  explicit-null both arrive absent.
 
 ---
 
@@ -296,7 +326,7 @@ framework state:
 
 | Feature | OpenAIRuntime | Note |
 |---|---|---|
-| 42 tools | ✅ | `FunctionTool` adapter, handler bodies unchanged |
+| 44 tools | ✅ | `FunctionTool` adapter, handler bodies unchanged |
 | memory tools, notes, recall, playbooks | ✅ | SQLite + local embeddings |
 | charts out, committee PDF out | ✅ | module globals |
 | Sources footer, citation registry, tier stamping | ✅ | deterministic, post-text |
@@ -304,11 +334,36 @@ framework state:
 | day roll, checkpoint digest, monthly rollup | ✅ | app logic |
 | `/stop` cancellation, single-flight per chat | ✅ | `cio/bot.py` task tracking is runtime-agnostic |
 | **usage + transcript attribution** | ⚠️ **fix required** | `cio/agent.py:1464,1484` hardcode `"claude"` — must take the resolved service, or bot chat corrupts the committee's shared budget table |
-| **image / receipt reading** | ⚠️ **gap** | the `Read` builtin (`cio/agent.py:1256`) does not exist off the Claude CLI. Needs a `read_image` FunctionTool, and the openai link must be vision-capable or receipt reading silently degrades |
-| **tool-calling strength** | ⚠️ | 42 tools needs a strong tool-caller; do not put a mini model in the bot-chat chain |
-| **prompt-cache warmth** | ⚠️ | the static prefix is system prompt + memory block + 42 schemas. Every runtime switch pays a cold prefix |
+| **image / receipt reading** | ⚠️ **gap** | the `Read` builtin (`cio/agent.py:1256`) does not exist off the Claude CLI. **A `read_image` FunctionTool cannot fix this** — see §7.1. The image must ride in as a multimodal *input part*, and the openai link must be vision-capable or receipt reading silently degrades |
+| **tool-calling strength** | ⚠️ | 44 tools needs a strong tool-caller; do not put a mini model in the bot-chat chain |
+| **prompt-cache warmth** | ⚠️ | the static prefix is system prompt + memory block + 44 schemas. Every runtime switch pays a cold prefix |
 | **persona continuity** | ⚠️ | tone/format shifts across a switch. The committee hides this behind role reports; chat will not |
 | streaming, structured output | n/a | unused today |
+
+### 7.1 Correction — image reading is an input concern, not a tool
+
+*Added 2026-07-27 during implementation, verified against `openai-agents` 0.19.0. The original
+plan said this gap "needs a `read_image` FunctionTool." That is wrong and would have been built
+wrong.*
+
+The tool bridge (`cio/tool_bridge.py`, Step 12) returns a **string** — it joins the `text` fields
+of the handler's content blocks. A tool result therefore cannot carry an image to the model, so
+no `read_image` tool can close this gap no matter how it is written.
+
+OpenAI vision takes the image as an **input content part**, not a tool result.
+`Runner.run` accepts `str | list[TResponseInputItem]`, and `ResponseInputImageParam` carries an
+`image_url` (a `data:` URI works). The fix therefore belongs in `OpenAIRuntime._run_query`:
+when the turn references an uploaded image, build a multimodal input list instead of a plain
+string.
+
+Two consequences that were not in the original plan:
+
+- `cio/bot.py`'s photo handler appends the literal instruction *"Use the Read tool to view it."*
+  to every image prompt. That names a Claude-CLI builtin; on the OpenAI path it directs the model
+  at a tool that does not exist. The prompt must become runtime-neutral.
+- Vision capability varies by link. A chain whose openai link is a non-vision model degrades
+  silently — the model simply never sees the receipt. Mark vision-capable links in chain config
+  before relying on the OpenAI path for image work.
 
 ---
 
@@ -390,7 +445,7 @@ Steps 1 and 2 are safe to ship independently and fix real bugs on their own.
 ## 11. Out of scope
 
 Committee / WMA / Alpha Hunter transports · `.mcp.json` · NIM in bot chat · Claude via LiteLLM
-· Claude via the raw Anthropic Messages API · re-hosting the 42 tools as a standalone MCP
+· Claude via the raw Anthropic Messages API · re-hosting the 44 tools as a standalone MCP
 server (worth doing only to reach them from Claude Desktop or Cursor — `FunctionTool` is
 strictly better in-app) · per-turn runtime switching and the mutating-tool ledger (§3.2, the
 documented upgrade path).

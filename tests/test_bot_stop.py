@@ -86,6 +86,11 @@ class FakeAgent:
         self.ask_calls = 0
         self.closed = False
 
+    @property
+    def session_id(self) -> str | None:
+        """Public read matching the BotRuntime protocol surface (KG-15)."""
+        return self._session_id
+
     async def ask(self, prompt: str):
         self.ask_calls += 1
         self.started.set()

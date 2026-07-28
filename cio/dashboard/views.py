@@ -1832,7 +1832,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
 
     # --- general bot chat: pick the fallback chain it uses ---
     from cio.committee import models as _models  # imported here to avoid circular imports at module load
-    resolved_bot_model = _models.bot_chat_model()
+    resolved_bot_link = _models.bot_chat_link()
     if bot_chat_locked_by_env:
         bot_chat_section = (
             "<details><summary>General bot chat fallback chain</summary>"
@@ -1847,16 +1847,27 @@ def render_configure(cfg, level: int, services, model_suggestions,
             f"{esc(n)}</option>"
             for n in chain_names
         )
-        if resolved_bot_model:
-            cur_hint = f"Current model: <strong>{esc(resolved_bot_model)}</strong> "
-            f"(from chain &ldquo;{esc(bot_chat_chain or '')}&rdquo;)."
+        if resolved_bot_link:
+            # service:model, so the operator can see when their chain resolves
+            # to something the bot cannot host yet (only claude runs today).
+            label = f"{resolved_bot_link.get('service')}:{resolved_bot_link.get('model')}"
+            chain_note = f"(from chain &ldquo;{esc(bot_chat_chain or '')}&rdquo;)"
+            if resolved_bot_link.get("service") == "claude":
+                cur_hint = f"Current link: <strong>{esc(label)}</strong> {chain_note}."
+            else:
+                resolved_service = esc(resolved_bot_link.get("service") or "")
+                cur_hint = (
+                    f"Current link: <strong>{esc(label)}</strong> {chain_note} "
+                    "— <span class='hint'>not hostable yet; the bot runs on the "
+                    f"SDK default until a {resolved_service} runtime ships.</span>"
+                )
         else:
-            cur_hint = "Current model: <strong>SDK default</strong> (no chain set, or chain has no Claude link)."
+            cur_hint = "Current link: <strong>SDK default</strong> (no chain set, or chain not found)."
         bot_chat_section = (
             "<details open><summary>General bot chat fallback chain</summary>"
-            f"<p class='hint'>The bot chat (CIOAgent) uses the <em>first Claude link</em> of "
-            "the chosen chain as its SDK model. Applies on the next session roll — no restart needed. "
-            "Add a <code>claude</code> link to a chain above to use it here.</p>"
+            "<p class='hint'>The bot chat (CIOAgent) uses the chosen chain's resolved "
+            "link — its first <code>claude</code> link, or the head link when it has "
+            "none. Applies on the next session roll — no restart needed.</p>"
             f"<p>{cur_hint}</p>"
             "<p>"
             f"<select name='bot_chat_chain' style='min-width:12em'>"

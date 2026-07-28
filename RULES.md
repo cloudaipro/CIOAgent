@@ -22,7 +22,11 @@ mechanically pays for it in review cycles.
 |---|---|
 | `awk 'END{exit (NR>400)}' handoff/BUILD-LOG.md` | BUILD-LOG has not outgrown rotation. Ships with the framework — do not delete it |
 | `scripts/check-handoff.sh brief` | The brief this step was built from is structurally complete — sections present, placeholders filled, Definition of Done carries a command. Ships with the framework — do not delete it |
-| `[command]` | [What passing means — e.g. "no lint errors", "all tests green", "build compiles"] |
+| `.venv/bin/python -m pytest -q` | Full suite green **on the repo interpreter**. Must be `.venv/bin/python` — the PATH `python` is py3.11 without pandas_ta and silently skips every stock/viz test (KG-11) |
+| `.venv/bin/python -c "import cio.agent, cio.bot, cio.committee.engine"` | The three modules the bot boots from still import cleanly — catches a broken import before the suite's 1197 tests do |
+
+The project has no linter, type checker or build step (no `pyproject.toml`, no ruff/mypy/black
+in `.venv`), so the suite is the gate. Do not add a lint row until a linter is actually configured.
 
 The handoff check runs at three points, and only the third is in the table above:
 
@@ -57,7 +61,11 @@ without false alarms. Observe first, enforce second.
 
 | # | Rule | Source | Fixable by | Status |
 |---|---|---|---|---|
-| R1 | [Stated so a violation is objectively checkable] | [Doc, decision, or Lesson L-N it comes from] | builder / architect / owner | advisory |
+| R1 | Tests are run with `.venv/bin/python -m pytest`, never a bare `python`/`pytest`. A green run reported from the PATH interpreter is not evidence. | KG-11 (BUILD-LOG) | builder | advisory |
+| R2 | A missing API key or unreachable network degrades to an empty/neutral result and a log line — it never raises out of a tool, a data fn, or a chat turn. | `cio/data/*` + `engine._ask_*` pattern; every step since AICAS 6 | builder | advisory |
+| R3 | Never persist figures (prices, P&L, share counts) into memory notes; recompute from the portfolio/stock tools. Enforced by `memory._guard_figures`. | `cio/memory.py:86` + SYSTEM_PROMPT | builder | advisory |
+| R4 | Service attribution (`usage.record`, `convlog.log_call`, dashboard capture) takes the service that actually answered — never a hardcoded literal. | This step; the `"claude"` hardcodes at `cio/agent.py:1464,1484` | builder | advisory |
+| R5 | A material fact must come from its claim-appropriate authority; Tier-3 sources never back one. Owner-locked policy, additive changes only. | `cio/data/source_policy.py`, `docs/EVIDENCE-INTEGRITY.md` | owner | advisory |
 
 Rules are born two ways: drafted at setup from the project's written docs, or promoted from
 BUILD-LOG `## Lessons` when the same lesson lands twice. A rule that keeps flagging things

@@ -69,6 +69,13 @@ def _capture(service: str | None, model: str | None, system_prompt: str,
                      scope=(f"committee:{role_key}" if role_key else "committee"),
                      role=role_key, kind="committee")
 
+
+# Public alias — cio.bot_runtime needs this outside the committee package.
+# Bound to the same object as _capture (not a wrapper); the underscore name
+# stays because tests/test_fallback_chain.py and tests/test_committee.py patch
+# it directly. No behaviour change.
+capture_call = _capture
+
 # ---------------------------------------------------------------------------
 # Parallel / concurrency config
 # ---------------------------------------------------------------------------
@@ -117,6 +124,10 @@ def _is_limit_notice(text: str) -> bool:
         "rate limit", "resets ", "try again later"))
 
 
+# Public alias — see the note by capture_call above. Bound to the same object.
+is_limit_notice = _is_limit_notice
+
+
 # ---------------------------------------------------------------------------
 # Limit latch — circuit breaker per service
 # ---------------------------------------------------------------------------
@@ -136,6 +147,11 @@ def _latch(service: str) -> None:
 
 def _latched(service: str) -> bool:
     return time.monotonic() < _LIMIT_LATCH.get(service, 0.0)
+
+
+# Public aliases — see the note by capture_call above. Bound to the same objects.
+latch = _latch
+is_latched = _latched
 
 
 # ---------------------------------------------------------------------------
