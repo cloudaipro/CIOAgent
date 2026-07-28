@@ -435,9 +435,72 @@ class TestDelegateApiSurface:
         """Responses defaults to store=true; Chat Completions never retained
         anything. Moving transport must not start parking portfolio positions
         and P&L in OpenAI-side storage as a side effect."""
-        from cio.agent_openai import _MODEL_SETTINGS
+        from cio.agent_openai import _model_settings
 
-        assert _MODEL_SETTINGS.store is False
+        assert _model_settings().store is False
+
+
+# ---------------------------------------------------------------------------
+# D3. The configured output cap actually reaches the model (KG-20)
+#
+#     `openai.max_tokens` governed the committee path only; bot chat ran on the
+#     model's own default while the yaml claimed otherwise.
+# ---------------------------------------------------------------------------
+
+class TestOutputCap:
+    def _settings(self, monkeypatch, cap):
+        monkeypatch.setattr(
+            "cio.committee.models.openai_settings",
+            lambda: {
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "OPENAI_API_KEY",
+                "max_output_tokens": cap,
+                "token_param": "max_completion_tokens",
+            },
+        )
+        from cio.agent_openai import _model_settings
+
+        return _model_settings()
+
+    def test_configured_cap_reaches_model_settings(self, monkeypatch):
+        # The SDK maps ModelSettings.max_tokens -> Responses' max_output_tokens.
+        assert self._settings(monkeypatch, 20480).max_tokens == 20480
+
+    def test_cap_is_reread_not_frozen_at_import(self, monkeypatch):
+        """Built per agent, so an operator's config edit lands on the next
+        session roll rather than the next process restart."""
+        assert self._settings(monkeypatch, 4096).max_tokens == 4096
+        assert self._settings(monkeypatch, 8192).max_tokens == 8192
+
+    @pytest.mark.parametrize("bad", [0, -1, None, "20480"])
+    def test_unusable_cap_degrades_to_uncapped(self, monkeypatch, bad):
+        """max_output_tokens=0 would guarantee an empty turn, and a non-int is a
+        misconfiguration. Neither should be forwarded verbatim (R2)."""
+        assert self._settings(monkeypatch, bad).max_tokens is None
+
+    def test_unreadable_config_degrades_to_uncapped(self, monkeypatch):
+        def boom():
+            raise RuntimeError("config is gone")
+
+        monkeypatch.setattr("cio.committee.models.openai_settings", boom)
+        from cio.agent_openai import _model_settings
+
+        s = _model_settings()
+        assert s.max_tokens is None
+        assert s.store is False   # the privacy carry-over must survive the failure
+
+
+class TestEmptyTurn:
+    def test_no_output_message_names_the_knob(self):
+        """A capped turn can end with no text (Responses counts reasoning
+        against the cap). bot.py renders "" as "(no response)", which looks
+        identical to a model that chose to say nothing -- so the runtime must
+        substitute something that names the cause and the setting to change."""
+        from cio.agent_openai import NO_OUTPUT_MESSAGE
+
+        assert NO_OUTPUT_MESSAGE.strip()
+        assert "max_tokens" in NO_OUTPUT_MESSAGE
+        assert "CIO_OPENAI_MAX_TOKENS" in NO_OUTPUT_MESSAGE
 
 
 # ---------------------------------------------------------------------------

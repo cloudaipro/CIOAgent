@@ -154,12 +154,53 @@ class TestRunQuery:
         assert text == "hello from openai"
         assert images == []
 
-    def test_final_output_none_becomes_empty_string(self, monkeypatch):
+    @pytest.mark.parametrize("empty", [None, "", "   "])
+    def test_no_text_returns_the_no_output_message(self, monkeypatch, empty):
+        """Changed by KG-20 (was: returns ""). Applying the configured output
+        cap created a truncation path that did not exist while this runtime ran
+        uncapped -- Responses counts reasoning tokens against
+        `max_output_tokens`, so a turn can legitimately end with no text.
+        cio/bot.py:265 renders "" as "(no response)", indistinguishable from a
+        model that chose to say nothing, so the runtime names the cause."""
         monkeypatch.setattr(agent_openai.Runner, "run", _fake_runner_run(
-            result=_FakeResult(None, Usage(input_tokens=1, output_tokens=1, total_tokens=2))))
+            result=_FakeResult(empty, Usage(input_tokens=1, output_tokens=1, total_tokens=2))))
         rt = _make_runtime()
         text, _ = _run(rt._guarded_turn("hi"))
-        assert text == ""
+        assert text == agent_openai.NO_OUTPUT_MESSAGE
+
+    def test_empty_turn_books_what_the_model_did_not_the_stand_in(self, monkeypatch):
+        """The stand-in message is for the user, not for the books. Usage must
+        reflect the real cost, and the conversation log must show the empty
+        output the model actually produced -- otherwise the log claims the model
+        said something it never said. Pins the substitution's position: it has
+        to happen *after* both records are written."""
+        recorded: dict = {}
+        logged: dict = {}
+        monkeypatch.setattr(_usage, "record",
+                            lambda service, tokens: recorded.update(service=service, tokens=tokens))
+        monkeypatch.setattr(agent_openai.convlog, "log_call",
+                            lambda *a, **kw: logged.update(text=a[4]))
+        monkeypatch.setattr(agent_openai.Runner, "run", _fake_runner_run(
+            result=_FakeResult(None, Usage(input_tokens=90, output_tokens=10, total_tokens=100))))
+        rt = _make_runtime()
+        text, _ = _run(rt._guarded_turn("hi"))
+        assert recorded == {"service": "openai", "tokens": 100}
+        assert logged["text"] == ""                      # what the model produced
+        assert text == agent_openai.NO_OUTPUT_MESSAGE    # what the user is told
+
+    def test_configured_output_cap_reaches_the_agent(self, monkeypatch):
+        """KG-20: `openai.max_tokens` used to govern the committee path only,
+        while bot chat ran on the model's own default."""
+        monkeypatch.setattr(
+            "cio.committee.models.openai_settings",
+            lambda: {"base_url": "https://example.invalid/v1",
+                     "api_key_env": "OPENAI_API_KEY",
+                     "max_output_tokens": 12345,
+                     "token_param": "max_completion_tokens"})
+        rt = _make_runtime()
+        _run(rt._ensure())
+        assert rt._agent.model_settings.max_tokens == 12345
+        assert rt._agent.model_settings.store is False
 
     def test_max_turns_is_passed_to_runner_run(self, monkeypatch):
         sink: dict = {}
