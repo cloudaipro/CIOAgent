@@ -1349,6 +1349,12 @@ class BaseRuntime:
     checkpoint triggers — so a second transport can never silently drift from the
     first. Subclasses supply the transport via three hooks: `_run_query`,
     `_ensure`, `_reset_session`.
+
+    Every turn goes through `_guarded_turn`, which acquires `_LOCK`, points the
+    memory tools at this runtime's scope, and clears the per-turn globals before
+    calling `_run_query`. `_run_query` is therefore always invoked with the lock
+    already held and the turn's globals already set — an implementer must not
+    re-acquire `_LOCK` or re-set `_ACTIVE_SCOPE`.
     """
 
     def __init__(self, model: str | None, chat_id: int | None, on_session_id,
@@ -1390,6 +1396,21 @@ class BaseRuntime:
         """Tear down the current session and start a fresh one — the fork half of
         `_checkpoint`. Implemented by each runtime."""
         raise NotImplementedError
+
+    async def _guarded_turn(self, prompt: str) -> tuple[str, list[str]]:
+        """Acquire the per-turn lock, point the memory tools at this runtime's
+        scope, clear the per-turn globals, then run the transport-specific
+        `_run_query`. Every `_run_query` call site in `BaseRuntime` goes through
+        here so a runtime can never forget the setup (see class docstring)."""
+        async with _LOCK:
+            global _ACTIVE_SCOPE, _SEARCHED_THIS_TURN
+            _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
+            _SEARCHED_THIS_TURN = False
+            _PENDING.clear()
+            _PENDING_DOCS.clear()
+            # NB: _SOURCES is NOT cleared here — it persists across turns within a
+            # session so cross-turn [n] citations resolve. Reset on roll/close only.
+            return await self._run_query(prompt)
 
     async def warm(self) -> None:
         """Eagerly connect (and resume) so the first message has no startup lag."""
@@ -1444,7 +1465,7 @@ class BaseRuntime:
         # Periodic nudge to persist notable context (cheap; no extra LLM call).
         if NUDGE_TURNS and self._turns and self._turns % NUDGE_TURNS == 0:
             prompt = prompt + _NUDGE_SUFFIX
-        text, images = await self._run_query(prompt)
+        text, images = await self._guarded_turn(prompt)
         # Append the verified Sources footer (user-facing only) BEFORE any checkpoint
         # below resets this scope's registry.
         text = _append_sources(text, list(_sources_for(self._scope)),
@@ -1492,7 +1513,7 @@ class BaseRuntime:
         import logging
         log = logging.getLogger("cio.agent")
         try:
-            digest, _ = await self._run_query(_DIGEST_PROMPT)
+            digest, _ = await self._guarded_turn(_DIGEST_PROMPT)
         except Exception:
             log.exception("checkpoint digest failed; deferring roll")
             return
@@ -1507,7 +1528,7 @@ class BaseRuntime:
         except Exception:
             log.exception("promote_hot failed")
         try:
-            pb_text, _ = await self._run_query(_PLAYBOOK_PROMPT)
+            pb_text, _ = await self._guarded_turn(_PLAYBOOK_PROMPT)
             parsed = _parse_playbook(pb_text)
             if parsed:
                 name, steps = parsed
@@ -1541,7 +1562,7 @@ class BaseRuntime:
             if not digests:
                 return
             joined = "\n".join(f"- [{d['created_at'][:10]}] {d['summary']}" for d in digests)
-            memo, _ = await self._run_query(_ROLLUP_PROMPT + joined)
+            memo, _ = await self._guarded_turn(_ROLLUP_PROMPT + joined)
             if memo.strip():
                 try:
                     memory.remember(memo.strip(), key=f"monthly_rollup:{year_month}",
@@ -1637,51 +1658,43 @@ class CIOAgent(BaseRuntime):
 
         Also records the turn's Claude token usage so the dev dashboard reflects
         real chat consumption (input+output from each AssistantMessage.usage)."""
-        async with _LOCK:
-            global _ACTIVE_SCOPE, _SEARCHED_THIS_TURN
-            _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
-            _SEARCHED_THIS_TURN = False
-            _PENDING.clear()
-            _PENDING_DOCS.clear()
-            # NB: _SOURCES is NOT cleared here — it persists across turns within a
-            # session so cross-turn [n] citations resolve. Reset on roll/close only.
-            await self._client.query(prompt)
-            parts: list[str] = []
-            tokens = 0          # accumulated per-AssistantMessage usage (often empty)
-            result_tokens = 0   # authoritative turn total from the final ResultMessage
-            async for msg in self._client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    self._note_session(msg.session_id)
-                    for blk in msg.content:
-                        if isinstance(blk, TextBlock):
-                            parts.append(blk.text)
-                    tokens += _usage_tokens(msg.usage)
-                elif isinstance(msg, ResultMessage):
-                    # ResultMessage.usage is the cumulative usage for the whole turn
-                    # (the agent SDK leaves AssistantMessage.usage empty), so prefer it.
-                    self._note_session(getattr(msg, "session_id", None))
-                    result_tokens = _usage_tokens(msg.usage)
-            text = "\n".join(parts).strip()
-            # Effective tokens: ResultMessage total > summed AssistantMessage usage >
-            # a local estimate (so the figure is never a misleading 0).
-            eff_tokens = result_tokens or tokens
-            if eff_tokens <= 0:
-                eff_tokens = context.count_tokens(prompt) + context.count_tokens(text)
-            # Sources footer is appended in ask() (user-facing only), so internal
-            # digest/playbook turns that reuse _run_query don't get a footer.
-            self._record_usage(eff_tokens, prompt, text, self._service)
-            # Detailed conversation history (opt-in, off by default): full text log.
-            convlog.log_call(self._service, self._model or "claude-agent-sdk",
-                             getattr(self, "_system_prompt", "") or "", prompt, text,
-                             eff_tokens, scope=self._scope, kind="chat")
-            images = list(_PENDING)
-            _PENDING.clear()
-            # Documents (committee PDF) are stashed on the instance, not returned,
-            # so the (text, images) signature stays stable for tests that stub
-            # _run_query. ask() drains it before any checkpoint turn overwrites it.
-            self._last_docs = list(_PENDING_DOCS)
-            _PENDING_DOCS.clear()
-            return text, images
+        await self._client.query(prompt)
+        parts: list[str] = []
+        tokens = 0          # accumulated per-AssistantMessage usage (often empty)
+        result_tokens = 0   # authoritative turn total from the final ResultMessage
+        async for msg in self._client.receive_response():
+            if isinstance(msg, AssistantMessage):
+                self._note_session(msg.session_id)
+                for blk in msg.content:
+                    if isinstance(blk, TextBlock):
+                        parts.append(blk.text)
+                tokens += _usage_tokens(msg.usage)
+            elif isinstance(msg, ResultMessage):
+                # ResultMessage.usage is the cumulative usage for the whole turn
+                # (the agent SDK leaves AssistantMessage.usage empty), so prefer it.
+                self._note_session(getattr(msg, "session_id", None))
+                result_tokens = _usage_tokens(msg.usage)
+        text = "\n".join(parts).strip()
+        # Effective tokens: ResultMessage total > summed AssistantMessage usage >
+        # a local estimate (so the figure is never a misleading 0).
+        eff_tokens = result_tokens or tokens
+        if eff_tokens <= 0:
+            eff_tokens = context.count_tokens(prompt) + context.count_tokens(text)
+        # Sources footer is appended in ask() (user-facing only), so internal
+        # digest/playbook turns that reuse _run_query don't get a footer.
+        self._record_usage(eff_tokens, prompt, text, self._service)
+        # Detailed conversation history (opt-in, off by default): full text log.
+        convlog.log_call(self._service, self._model or "claude-agent-sdk",
+                         getattr(self, "_system_prompt", "") or "", prompt, text,
+                         eff_tokens, scope=self._scope, kind="chat")
+        images = list(_PENDING)
+        _PENDING.clear()
+        # Documents (committee PDF) are stashed on the instance, not returned,
+        # so the (text, images) signature stays stable for tests that stub
+        # _run_query. ask() drains it before any checkpoint turn overwrites it.
+        self._last_docs = list(_PENDING_DOCS)
+        _PENDING_DOCS.clear()
+        return text, images
 
     async def close(self):
         await super().close()
