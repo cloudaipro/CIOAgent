@@ -1354,6 +1354,10 @@ class CIOAgent:
     def __init__(self, model: str | None = None, resume: str | None = None,
                  on_session_id=None, chat_id: int | None = None):
         self._model = model
+        # This class is the ClaudeRuntime implementation behind cio.bot_runtime's
+        # BotRuntime protocol; it always resolves to "claude" (Standing Rule R4 —
+        # usage/transcript attribution takes the service that actually answered).
+        self._service = "claude"
         self._resume = resume
         self._chat_id = chat_id
         self._scope = f"chat:{chat_id}" if chat_id is not None else "global"
@@ -1371,6 +1375,13 @@ class CIOAgent:
             self._last_turn_day = memory.get_last_turn_day(chat_id)
         except Exception:
             self._last_turn_day = None
+
+    @property
+    def session_id(self) -> str | None:
+        """Public read of the current SDK session id — the BotRuntime protocol's
+        surface. ``_session_id`` stays the backing attribute: existing tests set
+        and read it directly."""
+        return self._session_id
 
     async def _on_precompact(self, input_data, tool_use_id, ctx) -> dict:
         """PreCompact hook: the SDK is about to lossily summarize old turns.
@@ -1459,9 +1470,9 @@ class CIOAgent:
                 eff_tokens = context.count_tokens(prompt) + context.count_tokens(text)
             # Sources footer is appended in ask() (user-facing only), so internal
             # digest/playbook turns that reuse _run_query don't get a footer.
-            self._record_usage(eff_tokens, prompt, text)
+            self._record_usage(eff_tokens, prompt, text, self._service)
             # Detailed conversation history (opt-in, off by default): full text log.
-            convlog.log_call("claude", self._model or "claude-agent-sdk",
+            convlog.log_call(self._service, self._model or "claude-agent-sdk",
                              getattr(self, "_system_prompt", "") or "", prompt, text,
                              eff_tokens, scope=self._scope, kind="chat")
             images = list(_PENDING)
@@ -1474,14 +1485,15 @@ class CIOAgent:
             return text, images
 
     @staticmethod
-    def _record_usage(tokens: int, prompt: str, text: str) -> None:
-        """Add this turn's Claude tokens to the daily usage table. Never raises.
-        Falls back to a local estimate when the SDK reports no usage."""
+    def _record_usage(tokens: int, prompt: str, text: str, service: str) -> None:
+        """Add this turn's tokens to the daily usage table under *service* — the
+        one that actually answered (Standing Rule R4), never a hardcoded literal.
+        Never raises. Falls back to a local estimate when the SDK reports no usage."""
         try:
             if tokens <= 0:
                 tokens = context.count_tokens(prompt) + context.count_tokens(text)
             from .committee import usage as _usage
-            _usage.record("claude", tokens)
+            _usage.record(service, tokens)
         except Exception:
             pass
 

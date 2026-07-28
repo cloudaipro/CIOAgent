@@ -422,15 +422,22 @@ def read_doc(path: str | None = None):
             return yaml.safe_load(fh)
 
 
-def bot_chat_model() -> str | None:
+def bot_chat_link() -> dict | None:
     """
-    The Claude SDK model the general bot chat (CIOAgent) should use, derived
-    from the operator's chosen fallback chain in ``dashboard_settings.json``.
+    The resolved fallback-chain link ``{"service", "model"}`` the general bot
+    chat should use, derived from the operator's chosen chain in
+    ``dashboard_settings.json``.
+
+    Prefers the chain's first ``service: claude`` link, since that is the only
+    service the ``claude-agent-sdk`` client can host directly. If the chain has
+    no claude link at all, returns its head (first) link instead — so an
+    operator who picks an OpenAI-only chain sees that reflected here rather
+    than the resolver silently doing nothing (the bug this replaces).
 
     Returns None when:
       - the CIO_MODEL / CFO_MODEL env var is set (env wins; UI is locked).
       - no chain is stored in settings (operator hasn't picked one).
-      - the stored chain has no ``service: claude`` link (cannot host the SDK).
+      - the stored chain name is not found in config.
 
     The bot path reads this fresh on every client construction, so the setting
     takes effect on the next natural session roll with no restart.
@@ -448,16 +455,28 @@ def bot_chat_model() -> str | None:
     available = chains()
     links = available.get(chain_name)
     if not links:
-        log.warning("bot_chat_model: chain %r not found in config; ignoring", chain_name)
+        log.warning("bot_chat_link: chain %r not found in config; ignoring", chain_name)
         return None
 
-    # Bot chat requires the Claude SDK — pick the first claude-service link.
     for link in links:
         if str(link.get("service") or "claude") == "claude":
-            return link.get("model")
+            return {"service": "claude", "model": link.get("model")}
 
-    log.warning("bot_chat_model: chain %r has no claude link; cannot host SDK", chain_name)
-    return None
+    # No claude link anywhere in the chain: fall through to the head link so
+    # the resolver reflects an OpenAI-only chain instead of erasing it.
+    head = links[0]
+    return {"service": str(head.get("service") or "claude"), "model": head.get("model")}
+
+
+def bot_chat_model() -> str | None:
+    """
+    The Claude SDK model the general bot chat (CIOAgent) should use — a thin
+    wrapper over bot_chat_link() that returns None unless the resolved link is
+    a claude link. cio.agent.build_options() passes this straight into
+    ClaudeAgentOptions, which must never receive an OpenAI model name.
+    """
+    link = bot_chat_link()
+    return link["model"] if link and link["service"] == "claude" else None
 
 
 def write_doc(doc, path: str | None = None) -> None:
