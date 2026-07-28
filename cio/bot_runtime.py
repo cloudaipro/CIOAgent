@@ -10,8 +10,10 @@ shared with the committee; chain *transport* is not.
 
 A ``BotRuntime`` is whoever drives that tool loop for one chat turn. This step
 ships exactly one implementation, ``ClaudeRuntime`` (today's ``CIOAgent``,
-unchanged). ``select_runtime`` is the seam Step 11's ``OpenAIRuntime`` plugs
-into; until then a surviving ``openai`` link still runs the chat, on Claude.
+unchanged). ``select_runtime`` is the seam Step 12+'s ``OpenAIRuntime`` plugs
+into; until then a surviving ``openai`` link is skipped (logged, not silently
+answered on Claude while claiming to honour it) and the walk continues to the
+next link.
 
 Plan of record: docs/BOT-CHAT-OPENAI-MIGRATION.md.
 """
@@ -34,7 +36,7 @@ class BotRuntime(Protocol):
 
     Exactly the surface cio/bot.py already drives a chat agent through — read
     off the call sites (cio/bot.py:181,230,255,661). Do not widen it: a second
-    runtime (Step 11's OpenAIRuntime) must satisfy this same four-member
+    runtime (Step 12+'s OpenAIRuntime) must satisfy this same four-member
     surface and nothing more.
     """
 
@@ -53,22 +55,30 @@ class BotRuntime(Protocol):
         ...
 
 
-def select_runtime(chat_id: int) -> BotRuntime:
+def select_runtime(chat_id: int, *, resume: str | None = None,
+                    on_session_id=None) -> BotRuntime:
     """Resolve the operator's ``bot_chat`` chain and return a runtime for *chat_id*.
 
-    ``bot_chat`` is a role_key like any other agent's (models.resolve_chain),
-    walked in order. Per link:
+    Chain source is ``models.bot_chat_chain()`` — the operator's ``/configure``
+    selection when they've made one, else the yaml ``agents.bot_chat.chain``
+    (locked decision D5). ``models.bot_chat_link()`` resolves the identical
+    chain, so the two can no longer disagree on which chain is in effect.
+    Walked in order. Per link:
       1. ``service == "nim"`` → skip. Bot chat is claude+openai only — 44 tools
          is too wide a surface for a weak tool-caller.
       2. the service is limit-latched → skip.
       3. the service is over its configured daily budget → skip.
-    The first link surviving all three decides the runtime. In this step the
-    only runtime that exists is ClaudeRuntime: a surviving ``claude`` link uses
-    it directly, and a surviving ``openai`` link *also* falls back to it —
-    temporary, deleted in Step 11 once OpenAIRuntime exists.
+      4. ``service == "openai"`` → skip (logged). No OpenAIRuntime exists yet
+         (Step 12+); silently answering on Claude while claiming to honour an
+         openai link would be the same attribution dishonesty R4 exists to
+         prevent, so the walk continues to the next link instead.
+    The first ``claude`` (or otherwise unrecognized) link surviving all four
+    decides the runtime. *resume* and *on_session_id* are forwarded to it
+    unchanged — same constructor arguments ``cio.bot._agent()`` has always
+    passed.
 
     ``CIO_BOT_ENGINE=claude`` forces ClaudeRuntime and skips chain resolution
-    entirely. Any other value is logged and ignored (Step 11 adds ``openai``).
+    entirely. Any other value is logged and ignored (Step 12+ adds ``openai``).
 
     Never raises. A chat that cannot answer is worse than one that answers over
     budget, so budget/latch are advisory here: a missing chain, an unknown
@@ -76,18 +86,21 @@ def select_runtime(chat_id: int) -> BotRuntime:
     that throws all degrade to ClaudeRuntime, and if every link is skipped this
     still returns a (over-budget) ClaudeRuntime rather than nothing.
     """
+    def _claude() -> BotRuntime:
+        return ClaudeRuntime(chat_id=chat_id, resume=resume, on_session_id=on_session_id)
+
     override = os.getenv("CIO_BOT_ENGINE")
     if override:
         if override == "claude":
-            return ClaudeRuntime(chat_id=chat_id)
+            return _claude()
         log.warning("CIO_BOT_ENGINE=%r not recognized (only 'claude' today); ignoring",
                     override)
 
     try:
-        chain = models.resolve_chain("bot_chat") or []
+        chain = models.bot_chat_chain() or []
     except Exception:
-        log.exception("select_runtime: resolve_chain('bot_chat') failed; using Claude")
-        return ClaudeRuntime(chat_id=chat_id)
+        log.exception("select_runtime: bot_chat_chain() failed; using Claude")
+        return _claude()
 
     for link in chain:
         try:
@@ -107,20 +120,18 @@ def select_runtime(chat_id: int) -> BotRuntime:
                 continue
 
             if service == "openai":
-                # STEP-11: replace with a real OpenAIRuntime. Until then a
-                # surviving openai link still runs the chat turn — on Claude.
-                log.info("select_runtime: openai link selected but no OpenAI "
-                         "runtime yet; using Claude")
-                return ClaudeRuntime(chat_id=chat_id)
+                log.warning("select_runtime: openai link selected but no OpenAI "
+                            "runtime yet; skipping to the next link")
+                continue
 
             # service == "claude", or any other value we don't recognize yet:
             # Claude is the only runtime this step ships, so it is also the
             # safe default for the first link that survives the skips above.
-            return ClaudeRuntime(chat_id=chat_id)
+            return _claude()
         except Exception:
             log.exception("select_runtime: error evaluating link %r; skipping", link)
             continue
 
     log.warning("select_runtime: every bot_chat link was skipped; using Claude "
                "anyway (a chat that can't answer is worse than one over budget)")
-    return ClaudeRuntime(chat_id=chat_id)
+    return _claude()

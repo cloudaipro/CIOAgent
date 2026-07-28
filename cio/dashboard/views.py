@@ -1855,10 +1855,11 @@ def render_configure(cfg, level: int, services, model_suggestions,
             if resolved_bot_link.get("service") == "claude":
                 cur_hint = f"Current link: <strong>{esc(label)}</strong> {chain_note}."
             else:
+                resolved_service = esc(resolved_bot_link.get("service") or "")
                 cur_hint = (
                     f"Current link: <strong>{esc(label)}</strong> {chain_note} "
                     "— <span class='hint'>not hostable yet; the bot runs on the "
-                    "SDK default until an OpenAI runtime ships.</span>"
+                    f"SDK default until a {resolved_service} runtime ships.</span>"
                 )
         else:
             cur_hint = "Current link: <strong>SDK default</strong> (no chain set, or chain not found)."

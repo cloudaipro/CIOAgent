@@ -1,7 +1,8 @@
 """
 test_bot_runtime.py — cio.bot_runtime: the runtime-selection seam for the
 general Telegram bot chat (Architect brief Step 10 / migration plan build
-order 1-2).
+order 1-2; Step 11 wired the seam into cio.bot._agent() and unified chain
+resolution behind models.bot_chat_chain(), migration plan build order 3).
 
 Offline, no real LLM calls, no network. select_runtime() constructs real
 ClaudeRuntime (== CIOAgent) instances — construction alone never connects
@@ -26,11 +27,9 @@ from cio.committee import models as _models
 
 
 def _set_chain(monkeypatch, links):
-    """Force models.resolve_chain('bot_chat') to return *links* for this test,
-    without touching the real config/committee_models.yaml."""
-    monkeypatch.setattr(
-        bot_runtime.models, "resolve_chain",
-        lambda role_key: links if role_key == "bot_chat" else [])
+    """Force models.bot_chat_chain() to return *links* for this test, without
+    touching the real config/committee_models.yaml or dashboard_settings.json."""
+    monkeypatch.setattr(bot_runtime.models, "bot_chat_chain", lambda: links)
 
 
 @pytest.fixture(autouse=True)
@@ -114,14 +113,32 @@ class TestSelectRuntimeChainWalk:
         assert "claude at daily limit; falling through" in caplog.text
         assert "openai link selected but no OpenAI runtime yet" in caplog.text
 
-    def test_openai_link_falls_back_to_claude_runtime(self, monkeypatch, caplog):
-        """No OpenAIRuntime exists in this step (STEP-11): a surviving openai
-        link still answers the turn, on Claude."""
+    def test_openai_link_is_skipped_not_silently_answered(self, monkeypatch, caplog):
+        """No OpenAIRuntime exists yet (Step 12+): a surviving openai link is
+        skipped (logged), not silently answered on Claude while claiming to
+        honour it (Decision 1 replaces the temporary STEP-11 stopgap)."""
         caplog.set_level(logging.INFO, logger="cio.bot_runtime")
         _set_chain(monkeypatch, [{"service": "openai", "model": "gpt-5.6-terra"}])
         rt = bot_runtime.select_runtime(chat_id=106)
         assert isinstance(rt, bot_runtime.ClaudeRuntime)
-        assert "openai link selected but no OpenAI runtime yet; using Claude" in caplog.text
+        assert "openai link selected but no OpenAI runtime yet; skipping to the next link" in caplog.text
+        # The chain is exhausted (no other link) -- this is the "nothing survived" tail,
+        # not a per-link "using Claude" claim about the openai link itself.
+        assert "every bot_chat link was skipped" in caplog.text
+
+    def test_openai_link_falls_through_to_claude_link_behind_it(self, monkeypatch, caplog):
+        """An openai head link no longer short-circuits the walk: a claude link
+        further down the same chain is reached and used."""
+        caplog.set_level(logging.INFO, logger="cio.bot_runtime")
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "claude", "model": "claude-opus-4-8"},
+        ])
+        rt = bot_runtime.select_runtime(chat_id=114)
+        assert isinstance(rt, bot_runtime.ClaudeRuntime)
+        assert "openai link selected but no OpenAI runtime yet; skipping to the next link" in caplog.text
+        # Walked PAST openai to the claude link -- not the "nothing survived" tail.
+        assert "every bot_chat link was skipped" not in caplog.text
 
     def test_all_links_skipped_still_returns_a_runtime(self, monkeypatch, caplog):
         """Budget/latch are advisory: a chat that cannot answer is worse than
@@ -151,10 +168,21 @@ class TestSelectRuntimeChainWalk:
         assert isinstance(rt, bot_runtime.ClaudeRuntime)
         assert "malformed link" in caplog.text
 
-    def test_resolve_chain_exception_falls_back_to_claude(self, monkeypatch):
-        def _boom(role_key):
-            raise RuntimeError("config exploded")
-        monkeypatch.setattr(bot_runtime.models, "resolve_chain", _boom)
+    def test_bot_chat_chain_exception_falls_back_to_claude(self, monkeypatch):
+        """select_runtime's own defensive layer: even if bot_chat_chain() (which
+        has its own internal fallback/never-raises contract, Decision 1) somehow
+        still raised, select_runtime must not propagate it. Only the FIRST call
+        raises: ClaudeRuntime's own construction also calls bot_chat_chain()
+        (via build_options -> bot_chat_model()) for the SDK model string, an
+        orthogonal, expected second call this test isn't exercising."""
+        calls = {"n": 0}
+
+        def _flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("config exploded")
+            return [{"service": "claude", "model": "claude-opus-4-8"}]
+        monkeypatch.setattr(bot_runtime.models, "bot_chat_chain", _flaky)
         rt = bot_runtime.select_runtime(chat_id=110)
         assert isinstance(rt, bot_runtime.ClaudeRuntime)
 
@@ -179,15 +207,22 @@ class TestSelectRuntimeChainWalk:
 # ---------------------------------------------------------------------------
 
 class TestEngineOverride:
-    def test_claude_override_bypasses_chain_resolution(self, monkeypatch):
+    def test_claude_override_bypasses_chain_resolution(self, monkeypatch, caplog):
+        """CIO_BOT_ENGINE=claude skips select_runtime's own chain WALK (the
+        skip/latch/budget loop) even when the chain would behave very
+        differently if actually walked. (ClaudeRuntime's own construction
+        separately consults bot_chat_chain() -- via build_options() ->
+        bot_chat_model() -- for the specific Claude model string; that is an
+        orthogonal, expected call this test does not guard against.)"""
+        caplog.set_level(logging.INFO, logger="cio.bot_runtime")
         monkeypatch.setenv("CIO_BOT_ENGINE", "claude")
-
-        def _must_not_be_called(role_key):
-            raise AssertionError("resolve_chain must not be called under CIO_BOT_ENGINE=claude")
-        monkeypatch.setattr(bot_runtime.models, "resolve_chain", _must_not_be_called)
+        _set_chain(monkeypatch, [{"service": "nim", "model": "n1"}])
 
         rt = bot_runtime.select_runtime(chat_id=112)
         assert isinstance(rt, bot_runtime.ClaudeRuntime)
+        # The chain walk itself never ran: no skip/fall-through log from it.
+        assert "nim link skipped" not in caplog.text
+        assert "falling through" not in caplog.text
 
     def test_unrecognized_override_is_ignored(self, monkeypatch, caplog):
         """Any value other than 'claude' logs a warning and normal chain
@@ -268,6 +303,83 @@ chains:
 
 
 # ---------------------------------------------------------------------------
+# models.bot_chat_chain (Decision 1 / locked D5: the /configure selection is
+# the single source of truth select_runtime and bot_chat_link both derive from)
+# ---------------------------------------------------------------------------
+
+class TestBotChatChain:
+    @pytest.fixture(autouse=True)
+    def fresh_models(self, monkeypatch, tmp_path):
+        _models.load_config.cache_clear()
+        monkeypatch.setattr("cio.dashboard.settings._PATH",
+                            tmp_path / "dashboard_settings.json")
+        monkeypatch.delenv("CIO_MODEL", raising=False)
+        monkeypatch.delenv("CFO_MODEL", raising=False)
+
+    def _write_settings(self, tmp_path, data):
+        import json
+        path = tmp_path / "dashboard_settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+
+    def _write_models_yaml(self, tmp_path, monkeypatch, yaml_content):
+        path = tmp_path / "committee_models.yaml"
+        path.write_text(yaml_content)
+        monkeypatch.setenv("CIO_MODELS_CONFIG", str(path))
+        _models.load_config.cache_clear()
+
+    def test_dashboard_selection_wins_over_yaml_agents_bot_chat(self, tmp_path, monkeypatch):
+        """The operator's /configure pick wins over agents.bot_chat.chain even
+        when both name a real, different chain (the contradiction Richard's
+        Step 10 review escalated)."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "operator-pick"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+agents:
+  bot_chat: {chain: yaml-default}
+chains:
+  operator-pick:
+  - {service: claude, model: from-dashboard}
+  yaml-default:
+  - {service: claude, model: from-yaml}
+""")
+        assert _models.bot_chat_chain() == [{"service": "claude", "model": "from-dashboard"}]
+
+    def test_unknown_dashboard_name_falls_back_to_yaml_chain(self, tmp_path, monkeypatch):
+        """A /configure name that isn't a real chain setting isn't trusted --
+        falls through to resolve_chain('bot_chat') (the yaml agents.bot_chat.chain),
+        same as an unset selection."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "does-not-exist"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+agents:
+  bot_chat: {chain: yaml-default}
+chains:
+  yaml-default:
+  - {service: claude, model: from-yaml}
+""")
+        assert _models.bot_chat_chain() == [{"service": "claude", "model": "from-yaml"}]
+        assert _models.bot_chat_chain() == _models.resolve_chain("bot_chat")
+
+    def test_bot_chat_chain_and_bot_chat_link_agree(self, tmp_path, monkeypatch):
+        """bot_chat_link() takes its links from bot_chat_chain() so the two
+        can't resolve to different chains -- the defect Step 10's reviewer
+        escalated. Its resolved link must be a member of the chain."""
+        self._write_settings(tmp_path, {"bot_chat_chain": "mix"})
+        self._write_models_yaml(tmp_path, monkeypatch, """
+chains:
+  mix:
+  - {service: openai, model: gpt-x}
+  - {service: claude, model: opus-test}
+""")
+        chain = _models.bot_chat_chain()
+        link = _models.bot_chat_link()
+        assert chain == [{"service": "openai", "model": "gpt-x"},
+                          {"service": "claude", "model": "opus-test"}]
+        assert link in chain
+        assert link == {"service": "claude", "model": "opus-test"}
+
+
+# ---------------------------------------------------------------------------
 # committee/engine.py public aliases (Decision 5)
 # ---------------------------------------------------------------------------
 
@@ -283,3 +395,47 @@ class TestEnginePublicAliases:
         assert engine.is_latched is engine._latched
         assert engine.is_limit_notice is engine._is_limit_notice
         assert engine.capture_call is engine._capture
+
+
+# ---------------------------------------------------------------------------
+# cio.bot._agent() -- wired through the runtime seam (Decisions 2 and 4)
+# ---------------------------------------------------------------------------
+
+class TestAgentSeam:
+    """_agent() now selects a runtime through bot_runtime.select_runtime()
+    instead of constructing CIOAgent directly, caching one runtime per chat
+    exactly as before (locked decision D4: choose at session start/roll, then
+    pin). Memory calls are stubbed so these never touch the real data/cio.db."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_agent_cache(self, monkeypatch):
+        import cio.bot as bot_mod
+        bot_mod._agents.clear()
+        monkeypatch.setattr(bot_mod.memory, "touch_chat", lambda chat_id: None)
+        monkeypatch.setattr(bot_mod.memory, "get_session_id", lambda chat_id: None)
+        monkeypatch.setattr(bot_mod.memory, "set_session_id", lambda chat_id, sid: None)
+        yield
+        bot_mod._agents.clear()
+
+    def test_agent_returns_and_caches_a_runtime(self, monkeypatch):
+        """A second call for the same chat returns the SAME object -- the
+        per-chat cache (and therefore warm()/session survival) is unchanged."""
+        import cio.bot as bot_mod
+        _set_chain(monkeypatch, [{"service": "claude", "model": "m"}])
+        rt1 = bot_mod._agent(9001)
+        rt2 = bot_mod._agent(9001)
+        assert rt1 is rt2
+        assert isinstance(rt1, bot_runtime.ClaudeRuntime)
+
+    def test_select_runtime_exception_still_yields_a_working_agent(self, monkeypatch):
+        """R2: a routing bug in select_runtime must never take the bot down --
+        _agent() degrades to constructing CIOAgent directly."""
+        import cio.bot as bot_mod
+
+        def _boom(chat_id, *, resume=None, on_session_id=None):
+            raise RuntimeError("routing exploded")
+        monkeypatch.setattr(bot_mod, "select_runtime", _boom)
+
+        rt = bot_mod._agent(9002)
+        assert isinstance(rt, bot_mod.CIOAgent)
+        assert bot_mod._agent(9002) is rt   # still cached despite the fallback path

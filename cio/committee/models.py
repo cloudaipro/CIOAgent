@@ -422,11 +422,54 @@ def read_doc(path: str | None = None):
             return yaml.safe_load(fh)
 
 
+def bot_chat_chain() -> list[dict]:
+    """
+    The ordered fallback-chain links (same element shape ``resolve_chain()``
+    returns) that the general bot chat should walk — the single source of
+    truth both ``bot_chat_link()`` (Claude SDK model string) and
+    ``bot_runtime.select_runtime()`` (vendor/runtime choice) derive from, so
+    the two can't disagree (locked decision D5,
+    docs/BOT-CHAT-OPENAI-MIGRATION.md:133: the operator's ``/configure``
+    selection is authoritative).
+
+    Answers *"which chain does the runtime selector walk?"* — it always
+    yields a chain, falling back to the yaml default with no operator
+    selection at all (contrast ``bot_chat_model()``, which answers a
+    different question and must NOT inherit that fallback — KG-14).
+
+    Resolution order:
+      1. ``dashboard_settings.get_bot_chat_chain()`` names a chain that exists
+         in ``chains()`` -> its links.
+      2. Name missing or unknown -> ``resolve_chain("bot_chat")`` (the yaml
+         ``agents.bot_chat.chain``).
+      3. Anything raises -> ``resolve_chain("bot_chat")``; if that raises too,
+         an empty list.
+    Never raises.
+    """
+    try:
+        from cio.dashboard import settings as _dashboard_settings
+
+        chain_name = _dashboard_settings.get_bot_chat_chain()
+        if chain_name:
+            links = chains().get(chain_name)
+            if links:
+                return links
+            log.warning("bot_chat_chain: chain %r not found in config; "
+                        "falling back to the yaml bot_chat chain", chain_name)
+        return resolve_chain("bot_chat")
+    except Exception:
+        log.exception("bot_chat_chain: resolution failed; falling back to the yaml bot_chat chain")
+        try:
+            return resolve_chain("bot_chat")
+        except Exception:
+            return []
+
+
 def bot_chat_link() -> dict | None:
     """
     The resolved fallback-chain link ``{"service", "model"}`` the general bot
-    chat should use, derived from the operator's chosen chain in
-    ``dashboard_settings.json``.
+    chat should use, derived from ``bot_chat_chain()`` — so this and
+    ``select_runtime`` always agree on the same chain by construction.
 
     Prefers the chain's first ``service: claude`` link, since that is the only
     service the ``claude-agent-sdk`` client can host directly. If the chain has
@@ -436,8 +479,12 @@ def bot_chat_link() -> dict | None:
 
     Returns None when:
       - the CIO_MODEL / CFO_MODEL env var is set (env wins; UI is locked).
-      - no chain is stored in settings (operator hasn't picked one).
-      - the stored chain name is not found in config.
+      - the operator has made no ``/configure`` selection, or selected a name
+        absent from ``chains()`` (KG-14): ``bot_chat_chain()``'s yaml fallback
+        answers "which chain does the runtime walk", not "did the operator
+        choose to override" — so it must not reach this function.
+      - the selected chain still resolves to no links at all (config
+        unreadable and the yaml fallback also failed).
 
     The bot path reads this fresh on every client construction, so the setting
     takes effect on the next natural session roll with no restart.
@@ -446,16 +493,25 @@ def bot_chat_link() -> dict | None:
     if os.getenv("CIO_MODEL") or os.getenv("CFO_MODEL"):
         return None
 
-    from cio.dashboard import settings as _dashboard_settings
+    # No operator /configure selection means "no override" -- do not let
+    # bot_chat_chain()'s yaml fallback leak in here as an implicit override
+    # (KG-14). R2: never raise out of a data fn that feeds build_options() on
+    # every chat turn, so a lookup failure also reads as "no selection".
+    try:
+        from cio.dashboard import settings as _dashboard_settings
 
-    chain_name = _dashboard_settings.get_bot_chat_chain()
-    if not chain_name:
+        chain_name = _dashboard_settings.get_bot_chat_chain()
+    except Exception:
+        return None
+    if not chain_name or chain_name not in chains():
         return None
 
-    available = chains()
-    links = available.get(chain_name)
+    # bot_chat_chain()'s real sources (chains()/resolve_chain()) already run
+    # every link through _normalize_links, but this filters defensively too --
+    # never trust an upstream contract not to change (R2: never raise out of
+    # a data fn that feeds build_options() on every chat turn).
+    links = [link for link in bot_chat_chain() if isinstance(link, dict)]
     if not links:
-        log.warning("bot_chat_link: chain %r not found in config; ignoring", chain_name)
         return None
 
     for link in links:
@@ -474,6 +530,12 @@ def bot_chat_model() -> str | None:
     wrapper over bot_chat_link() that returns None unless the resolved link is
     a claude link. cio.agent.build_options() passes this straight into
     ClaudeAgentOptions, which must never receive an OpenAI model name.
+
+    Answers *"has the operator chosen a model to override ``ClaudeAgentOptions``
+    with?"* — no ``/configure`` selection means None (do not override), never
+    the yaml ``bot_chat`` default (KG-14; locked decision D5 makes
+    ``/configure`` authoritative for vendor selection, not for overriding the
+    SDK's own default model).
     """
     link = bot_chat_link()
     return link["model"] if link and link["service"] == "claude" else None
