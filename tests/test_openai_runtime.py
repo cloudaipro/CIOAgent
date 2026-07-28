@@ -22,6 +22,7 @@ OpenAIRuntime into select_runtime/bot.py; Step 16 does.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from agents import Usage
@@ -255,3 +256,69 @@ class TestClose:
             raise RuntimeError("disk full")
         rt._session.close = _boom
         _run(rt.close())   # must not propagate
+
+
+# ---------------------------------------------------------------------------
+# Vision (Step 17) -- an image rides in as an INPUT part, never a tool result
+# ---------------------------------------------------------------------------
+
+class TestBuildTurnInput:
+    """`tool_bridge` joins content-block *text*, so a tool result can never
+    carry an image (plan §7.1). The image must be an input content part."""
+
+    def test_plain_prompt_stays_a_string(self):
+        assert agent_openai.build_turn_input("what is my P&L?") == "what is my P&L?"
+
+    def test_image_path_becomes_a_multimodal_input(self, tmp_path):
+        img = tmp_path / "receipt.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\nfake-bytes")
+        out = agent_openai.build_turn_input(f"Read this.\nThe image is saved at: {img}")
+        assert isinstance(out, list)
+        content = out[0]["content"]
+        assert content[0]["type"] == "input_text"
+        assert content[1]["type"] == "input_image"
+        assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+    def test_csv_upload_is_not_inlined_as_an_image(self, tmp_path):
+        """ingest_transactions_csv is a tool; a CSV must not become a picture."""
+        csv = tmp_path / "trades.csv"
+        csv.write_text("symbol,qty\nAAPL,10\n")
+        assert agent_openai.build_turn_input(f"Import this: {csv}") == f"Import this: {csv}"
+
+    def test_missing_file_degrades_to_text(self, tmp_path):
+        """R2: a vanished upload must not kill the turn."""
+        ghost = tmp_path / "gone.png"
+        prompt = f"Read this.\nThe image is saved at: {ghost}"
+        assert agent_openai.build_turn_input(prompt) == prompt
+
+    def test_unreadable_file_degrades_to_text(self, tmp_path, monkeypatch):
+        img = tmp_path / "receipt.jpg"
+        img.write_bytes(b"jpegbytes")
+        monkeypatch.setattr(Path, "read_bytes",
+                            lambda self: (_ for _ in ()).throw(OSError("EACCES")))
+        prompt = f"Read this.\nThe image is saved at: {img}"
+        assert agent_openai.build_turn_input(prompt) == prompt
+
+    def test_oversized_image_is_refused(self, tmp_path, monkeypatch):
+        img = tmp_path / "huge.png"
+        img.write_bytes(b"\x89PNG" + b"x" * 32)
+        monkeypatch.setattr(agent_openai, "_MAX_IMAGE_BYTES", 8)
+        prompt = f"Read this.\nThe image is saved at: {img}"
+        assert agent_openai.build_turn_input(prompt) == prompt
+
+    def test_run_query_passes_the_multimodal_input_to_runner(self, tmp_path, monkeypatch):
+        """The wiring, not just the helper: a turn with an image must reach
+        Runner.run as a list, or the model never sees the picture."""
+        img = tmp_path / "receipt.png"
+        img.write_bytes(b"\x89PNG\r\n\x1a\nbytes")
+        seen = {}
+
+        async def _capture(agent, inp, **kw):
+            seen["input"] = inp
+            return _FakeResult("ok", Usage(input_tokens=1, output_tokens=1, total_tokens=2))
+
+        monkeypatch.setattr(agent_openai.Runner, "run", _capture)
+        rt = _make_runtime()
+        _run(rt._guarded_turn(f"Read this.\nThe image is saved at: {img}"))
+        assert isinstance(seen["input"], list)
+        assert seen["input"][0]["content"][1]["type"] == "input_image"

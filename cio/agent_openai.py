@@ -8,12 +8,20 @@ hooks (`_ensure`, `_run_query`, `_reset_session`) plus `close`; it must never
 grow an `ask()` of its own (Step 13 split `BaseRuntime` out precisely to
 keep a second transport from drifting off the first).
 
-Not wired in yet: `cio.bot_runtime.select_runtime` still returns
-`ClaudeRuntime` for every chat. Step 16 wires this in.
+Vision (Step 17): the Claude path reads an uploaded image with the CLI's
+`Read` builtin, which does not exist here. A `read_image` tool cannot replace
+it either -- `tool_bridge` returns a *string*, so a tool result can never
+carry an image (see plan §7.1). OpenAI takes the image as an input content
+part instead, so `_run_query` rewrites a prompt that references an uploaded
+file into a multimodal input list.
 """
 from __future__ import annotations
 
+import base64
 import logging
+import mimetypes
+import re
+from pathlib import Path
 
 from agents import Agent, Runner, SQLiteSession
 
@@ -30,6 +38,66 @@ log = logging.getLogger(__name__)
 # would make this path give up where the Claude path succeeds. Same
 # CIO_*/CFO_* fallback convention as the rest of cio/agent.py (_env).
 MAX_TURNS = int(_env("MAX_TURNS", "24"))
+
+# Paths the photo/document handlers write (cio/bot.py UPLOAD_DIR). Matching on
+# the path the prompt itself carries is deliberate: the bot tells the agent
+# where it saved the upload, so that sentence is the only reliable signal that
+# this turn has an image. Bounded to real image suffixes so a CSV upload -- read
+# by ingest_transactions_csv, a tool -- is never inlined as a picture.
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+_UPLOAD_PATH_RE = re.compile(r"(/\S+?\.(?:png|jpe?g|gif|webp))", re.I)
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024   # refuse to inline something absurd
+
+
+def _image_parts(prompt: str) -> list[dict]:
+    """Base64 `input_image` parts for every readable image path in *prompt*.
+
+    Returns an empty list when there is nothing to attach, which is the common
+    case — the caller then sends the plain string it already had. Never raises:
+    an unreadable or oversized file degrades to "no image" plus a log line, so
+    the turn still runs and the model simply says it cannot see the receipt
+    (Standing Rule R2).
+    """
+    parts: list[dict] = []
+    for match in _UPLOAD_PATH_RE.findall(prompt or ""):
+        path = Path(match)
+        # Belt and braces: `_UPLOAD_PATH_RE` already matches image extensions
+        # only, so this cannot currently reject anything (verified by mutation
+        # — removing it changes no test). It stays as the guard that still
+        # holds if the regex is ever widened, which is the likely edit here.
+        if path.suffix.lower() not in _IMAGE_SUFFIXES:
+            continue
+        try:
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            if size > _MAX_IMAGE_BYTES:
+                log.warning("image %s is %d bytes; too large to inline", path, size)
+                continue
+            mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
+            data = base64.b64encode(path.read_bytes()).decode("ascii")
+        except Exception:
+            log.warning("could not read image %s; the turn will run without it",
+                        path, exc_info=True)
+            continue
+        parts.append({"type": "input_image", "image_url": f"data:{mime};base64,{data}"})
+    return parts
+
+
+def build_turn_input(prompt: str):
+    """The `Runner.run` input for this turn: the plain string, or a multimodal
+    input list when the prompt references an uploaded image.
+
+    OpenAI vision takes an image as an input content part, never as a tool
+    result — `tool_bridge` joins content-block *text*, so an image cannot ride
+    back from a handler (plan §7.1). Whether the model can actually see it
+    depends on the link's model being vision-capable; a text-only link silently
+    ignores the part, which is why chain config should mark vision links.
+    """
+    parts = _image_parts(prompt)
+    if not parts:
+        return prompt
+    return [{"role": "user", "content": [{"type": "input_text", "text": prompt}, *parts]}]
 
 
 class OpenAIRuntime(BaseRuntime):
@@ -53,20 +121,29 @@ class OpenAIRuntime(BaseRuntime):
         self._links = links
         self._session: SQLiteSession | None = None
         self._agent: Agent | None = None
+        # Built once and reused across agent rebuilds. FallbackModel caches an
+        # AsyncOpenAI (and so an httpx connection pool) per base_url, so
+        # constructing a new one on every session roll would abandon a pool
+        # each time. The Agent is rebuilt on a roll to refresh its injected
+        # memory; the model behind it has no such need.
+        self._model_impl: FallbackModel | None = None
         self._system_prompt: str = ""   # kept for the detailed-history log (convlog)
 
     def _build_agent(self) -> Agent:
         """(Re)compose the system prompt (with this chat's injected memory
         block) and build a fresh `Agent` bound to it. Called from `_ensure`
         (first build) and `_reset_session` (post-checkpoint rebuild) so both
-        paths pick up the latest digest the same way."""
+        paths pick up the latest digest the same way. The FallbackModel is
+        built once and carried across rebuilds (see `__init__`)."""
         prompt = context.compose_system_prompt(SYSTEM_PROMPT, self._chat_id)
         self._system_prompt = prompt
+        if self._model_impl is None:
+            self._model_impl = FallbackModel(self._links)
         return Agent(
             name="cio",
             instructions=prompt,
             tools=OPENAI_TOOLS,
-            model=FallbackModel(self._links),
+            model=self._model_impl,
         )
 
     async def _ensure(self) -> None:
@@ -90,8 +167,8 @@ class OpenAIRuntime(BaseRuntime):
         would deadlock the turn).
         """
         try:
-            result = await Runner.run(self._agent, prompt, session=self._session,
-                                      max_turns=MAX_TURNS)
+            result = await Runner.run(self._agent, build_turn_input(prompt),
+                                      session=self._session, max_turns=MAX_TURNS)
         except Exception as e:
             # R2: a transport failure -- including a FallbackModel chain
             # exhaustion -- must not escape as a bare exception into the

@@ -471,7 +471,11 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     dest = UPLOAD_DIR / f"{update.effective_chat.id}_{photo.file_unique_id}.jpg"
     await tg_file.download_to_drive(dest)
     caption = update.message.caption or "Read this image and extract the relevant financial figures."
-    await _run(update, f"{caption}\nThe image is saved at: {dest}\nUse the Read tool to view it.")
+    # Runtime-neutral on purpose: the Claude path reads the file with the CLI's
+    # Read builtin, while the OpenAI path inlines it as a vision input part
+    # (cio/agent_openai.build_turn_input). Naming either mechanism here would
+    # instruct one runtime to use a tool the other does not have.
+    await _run(update, f"{caption}\nThe image is saved at: {dest}")
 
 
 async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:

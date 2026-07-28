@@ -90,11 +90,12 @@ class TestSelectRuntimeChainWalk:
             {"service": "openai", "model": "gpt-5.6-terra"},
         ])
         rt = bot_runtime.select_runtime(chat_id=104)
-        assert isinstance(rt, bot_runtime.ClaudeRuntime)
         assert "claude limit-latched; falling through" in caplog.text
-        # Proves the WALK moved past claude to openai, rather than coincidentally
-        # landing on ClaudeRuntime by dispatching the latched claude link anyway.
-        assert "openai link selected but no OpenAI runtime yet" in caplog.text
+        # Proves the WALK moved past claude to openai. Since Step 16 the openai
+        # link is honoured rather than skipped, so the proof is the runtime TYPE:
+        # landing on OpenAIRuntime cannot happen by dispatching the latched
+        # claude link anyway.
+        assert type(rt).__name__ == "OpenAIRuntime"
 
     def test_over_budget_link_skipped(self, monkeypatch, tmp_path, caplog):
         caplog.set_level(logging.INFO, logger="cio.bot_runtime")
@@ -109,35 +110,55 @@ class TestSelectRuntimeChainWalk:
             {"service": "openai", "model": "gpt-5.6-terra"},
         ])
         rt = bot_runtime.select_runtime(chat_id=105)
-        assert isinstance(rt, bot_runtime.ClaudeRuntime)
         assert "claude at daily limit; falling through" in caplog.text
-        assert "openai link selected but no OpenAI runtime yet" in caplog.text
+        assert type(rt).__name__ == "OpenAIRuntime"
 
-    def test_openai_link_is_skipped_not_silently_answered(self, monkeypatch, caplog):
-        """No OpenAIRuntime exists yet (Step 12+): a surviving openai link is
-        skipped (logged), not silently answered on Claude while claiming to
-        honour it (Decision 1 replaces the temporary STEP-11 stopgap)."""
+    def test_openai_link_is_honoured(self, monkeypatch, caplog):
+        """Since Step 16 a surviving openai link builds an OpenAIRuntime.
+
+        Replaces the Step 11-15 scaffold, which skipped the link and logged
+        that no OpenAI runtime existed yet — deliberately loud rather than
+        silently answering on Claude while claiming to honour the operator's
+        choice. The runtime now exists, so the link is honoured for real.
+        """
         caplog.set_level(logging.INFO, logger="cio.bot_runtime")
         _set_chain(monkeypatch, [{"service": "openai", "model": "gpt-5.6-terra"}])
         rt = bot_runtime.select_runtime(chat_id=106)
-        assert isinstance(rt, bot_runtime.ClaudeRuntime)
-        assert "openai link selected but no OpenAI runtime yet; skipping to the next link" in caplog.text
-        # The chain is exhausted (no other link) -- this is the "nothing survived" tail,
-        # not a per-link "using Claude" claim about the openai link itself.
-        assert "every bot_chat link was skipped" in caplog.text
+        assert type(rt).__name__ == "OpenAIRuntime"
+        # The walk stopped at the openai link, so the "nothing survived" tail
+        # must NOT have been reached.
+        assert "every bot_chat link was skipped" not in caplog.text
 
-    def test_openai_link_falls_through_to_claude_link_behind_it(self, monkeypatch, caplog):
-        """An openai head link no longer short-circuits the walk: a claude link
-        further down the same chain is reached and used."""
+    def test_openai_runtime_receives_every_openai_link_from_here_on(self, monkeypatch):
+        """FallbackModel walks per model call, so it must get the openai links
+        BEHIND the selected one too — otherwise a rate limit on the head has
+        nothing to fall back to (the defect 14a fixed one layer down)."""
+        _set_chain(monkeypatch, [
+            {"service": "claude", "model": "claude-opus-4-8"},
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "openai", "model": "gpt-5.4-mini"},
+        ])
+        from cio.committee import engine
+        engine.latch("claude")          # force the walk past the claude head
+        rt = bot_runtime.select_runtime(chat_id=115)
+        assert type(rt).__name__ == "OpenAIRuntime"
+        assert [l["model"] for l in rt._links] == ["gpt-5.6-terra", "gpt-5.4-mini"]
+
+    def test_claude_link_behind_an_openai_link_is_still_reachable(self, monkeypatch, caplog):
+        """An openai link that cannot be built falls through to a claude link
+        behind it, rather than ending the walk."""
         caplog.set_level(logging.INFO, logger="cio.bot_runtime")
         _set_chain(monkeypatch, [
             {"service": "openai", "model": "gpt-5.6-terra"},
             {"service": "claude", "model": "claude-opus-4-8"},
         ])
+        # Make OpenAIRuntime construction fail so the fall-through path runs.
+        import cio.agent_openai as ao
+        monkeypatch.setattr(ao, "OpenAIRuntime",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         rt = bot_runtime.select_runtime(chat_id=114)
         assert isinstance(rt, bot_runtime.ClaudeRuntime)
-        assert "openai link selected but no OpenAI runtime yet; skipping to the next link" in caplog.text
-        # Walked PAST openai to the claude link -- not the "nothing survived" tail.
+        assert "could not build OpenAIRuntime" in caplog.text
         assert "every bot_chat link was skipped" not in caplog.text
 
     def test_all_links_skipped_still_returns_a_runtime(self, monkeypatch, caplog):
@@ -225,14 +246,34 @@ class TestEngineOverride:
         assert "falling through" not in caplog.text
 
     def test_unrecognized_override_is_ignored(self, monkeypatch, caplog):
-        """Any value other than 'claude' logs a warning and normal chain
-        resolution proceeds (Step 11 adds 'openai')."""
+        """Any value other than claude|openai logs a warning and normal chain
+        resolution proceeds."""
         caplog.set_level(logging.INFO, logger="cio.bot_runtime")
-        monkeypatch.setenv("CIO_BOT_ENGINE", "openai")
+        monkeypatch.setenv("CIO_BOT_ENGINE", "gemini")
         _set_chain(monkeypatch, [{"service": "claude", "model": "m"}])
         rt = bot_runtime.select_runtime(chat_id=113)
         assert isinstance(rt, bot_runtime.ClaudeRuntime)
         assert "not recognized" in caplog.text
+
+    def test_openai_override_forces_the_openai_runtime(self, monkeypatch):
+        """CIO_BOT_ENGINE=openai takes the openai links regardless of chain
+        order — the debugging escape hatch D6 describes."""
+        monkeypatch.setenv("CIO_BOT_ENGINE", "openai")
+        _set_chain(monkeypatch, [
+            {"service": "claude", "model": "claude-opus-4-8"},
+            {"service": "openai", "model": "gpt-5.6-terra"},
+        ])
+        rt = bot_runtime.select_runtime(chat_id=116)
+        assert type(rt).__name__ == "OpenAIRuntime"
+
+    def test_openai_override_without_an_openai_link_says_so(self, monkeypatch, caplog):
+        """An override that cannot be satisfied must not be honoured silently."""
+        caplog.set_level(logging.INFO, logger="cio.bot_runtime")
+        monkeypatch.setenv("CIO_BOT_ENGINE", "openai")
+        _set_chain(monkeypatch, [{"service": "claude", "model": "claude-opus-4-8"}])
+        rt = bot_runtime.select_runtime(chat_id=117)
+        assert isinstance(rt, bot_runtime.ClaudeRuntime)
+        assert "no usable openai link" in caplog.text
 
 
 # ---------------------------------------------------------------------------

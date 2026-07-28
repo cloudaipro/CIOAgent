@@ -4,16 +4,25 @@ bot_runtime.py — Runtime seam for the general Telegram bot chat.
 Every other agent (committee specialists, moderator, CIO, translator, WMA) goes
 through ``engine.ask_role``'s ``(system, user) -> text`` transport, so the named
 fallback chains (docs/FALLBACK-CHAINS.md) cover them for free. Bot chat cannot
-use that transport — it drives a 42-tool tool-calling loop, not a single prompt
+use that transport — it drives a 44-tool tool-calling loop, not a single prompt
 — so it needs its own runtime selection. Chain *policy* (chains, skip rules) is
 shared with the committee; chain *transport* is not.
 
-A ``BotRuntime`` is whoever drives that tool loop for one chat turn. This step
-ships exactly one implementation, ``ClaudeRuntime`` (today's ``CIOAgent``,
-unchanged). ``select_runtime`` is the seam Step 12+'s ``OpenAIRuntime`` plugs
-into; until then a surviving ``openai`` link is skipped (logged, not silently
-answered on Claude while claiming to honour it) and the walk continues to the
-next link.
+A ``BotRuntime`` is whoever drives that tool loop for one chat turn, and there
+are two, because ``claude-agent-sdk`` is an agent rather than an API client: it
+runs its own loop and keeps its own transcript, so it cannot serve a single
+model call inside someone else's loop.
+
+  ``ClaudeRuntime``  — ``CIOAgent``; the Claude CLI drives the loop
+  ``OpenAIRuntime``  — the Agents SDK loop runs in *this* process, with
+                       ``FallbackModel`` walking the chain's openai links per
+                       model call
+
+``select_runtime`` walks the operator's chain and returns a runtime for the
+first link that survives the skips. That choice is then **pinned** for the
+session by ``cio/bot.py``'s per-chat cache (locked decision D4): the two
+transcripts live in different places, so switching mid-thread would need a
+history sync and a mutating-tool ledger that do not exist.
 
 Plan of record: docs/BOT-CHAT-OPENAI-MIGRATION.md.
 """
@@ -89,12 +98,45 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
     def _claude() -> BotRuntime:
         return ClaudeRuntime(chat_id=chat_id, resume=resume, on_session_id=on_session_id)
 
+    def _openai(links: list) -> BotRuntime | None:
+        """Build an OpenAIRuntime over *links*, or None if it cannot be built.
+
+        Imported lazily: `cio.agent_openai` pulls in the whole Agents SDK plus
+        the 44-tool bridge, which every importer of this module would otherwise
+        pay for even on a Claude-only chain. Returns None rather than raising —
+        FallbackModel's constructor rejects an empty link list by design, and a
+        routing problem must never take the chat down (Standing Rule R2).
+        """
+        if not links:
+            return None
+        try:
+            from .agent_openai import OpenAIRuntime
+            return OpenAIRuntime(links, chat_id=chat_id, on_session_id=on_session_id)
+        except Exception:
+            log.exception("select_runtime: could not build OpenAIRuntime; falling through")
+            return None
+
     override = os.getenv("CIO_BOT_ENGINE")
     if override:
         if override == "claude":
             return _claude()
-        log.warning("CIO_BOT_ENGINE=%r not recognized (only 'claude' today); ignoring",
-                    override)
+        if override == "openai":
+            # Force the OpenAI path for debugging, using whatever openai links
+            # the chain has. No openai link -> say so and use Claude, rather
+            # than silently honouring an override that cannot be satisfied.
+            try:
+                forced = [l for l in (models.bot_chat_chain() or [])
+                          if isinstance(l, dict) and l.get("service") == "openai"]
+            except Exception:
+                log.exception("CIO_BOT_ENGINE=openai: chain lookup failed")
+                forced = []
+            runtime = _openai(forced)
+            if runtime is not None:
+                return runtime
+            log.warning("CIO_BOT_ENGINE=openai but the chain has no usable openai "
+                        "link; using Claude")
+            return _claude()
+        log.warning("CIO_BOT_ENGINE=%r not recognized (claude|openai); ignoring", override)
 
     try:
         chain = models.bot_chat_chain() or []
@@ -102,7 +144,7 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
         log.exception("select_runtime: bot_chat_chain() failed; using Claude")
         return _claude()
 
-    for link in chain:
+    for index, link in enumerate(chain):
         try:
             if not isinstance(link, dict):
                 log.warning("select_runtime: malformed link %r; skipping", link)
@@ -120,13 +162,21 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
                 continue
 
             if service == "openai":
-                log.warning("select_runtime: openai link selected but no OpenAI "
-                            "runtime yet; skipping to the next link")
-                continue
+                # Hand FallbackModel every openai link from HERE onward, not
+                # just this one: it walks them per model call, so a rate limit
+                # on this link falls through to the next without replaying a
+                # tool. Links before this one were skipped for a reason.
+                openai_links = [
+                    l for l in chain[index:]
+                    if isinstance(l, dict) and l.get("service") == "openai"
+                ]
+                runtime = _openai(openai_links)
+                if runtime is not None:
+                    return runtime
+                continue    # construction failed; try the next link
 
-            # service == "claude", or any other value we don't recognize yet:
-            # Claude is the only runtime this step ships, so it is also the
-            # safe default for the first link that survives the skips above.
+            # service == "claude", or any value we don't recognize: Claude is
+            # the safe default for the first link that survives the skips.
             return _claude()
         except Exception:
             log.exception("select_runtime: error evaluating link %r; skipping", link)
