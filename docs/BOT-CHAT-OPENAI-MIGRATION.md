@@ -264,7 +264,8 @@ Two further findings that shaped the built code:
   items after it completes.
 - **Compaction: keep ours, do not adopt theirs.** `OpenAIResponsesCompactionSession` is
   Responses-API-bound and would install a second compaction authority competing with the roll
-  logic we already have. Our `_checkpoint()` (`cio/agent.py:1559`) already does the right
+  logic we already have. (This rejects OpenAI's *compaction session*, not the Responses API —
+  the transport does run on `/v1/responses`; see §5.1.) Our `_checkpoint()` (`cio/agent.py:1559`) already does the right
   thing and matches OpenAI's own long-running-agent guidance — compact at workflow boundaries,
   and keep durable facts in artifacts rather than in compacted conversation state (our
   digests, notes and playbooks are exactly those artifacts, with the figures firewall making
@@ -284,6 +285,43 @@ Two further findings that shaped the built code:
   day-boundary roll — which must keep working identically on both runtimes, since it is what
   fixed the memory-misattribution incident (`docs/MEMORY-MISATTRIBUTION.md`).
 - **A roll is the only place the runtime may change** (D4).
+
+### 5.1 Correction — the OpenAI path runs on `/v1/responses`
+
+This section is written after the fact. The build shipped `FallbackModel._build_delegate`
+returning an `OpenAIChatCompletionsModel`, every test passed, and the path was still broken:
+**it had never once called OpenAI.** The first live turn (KG-19) failed on the first request:
+
+```
+400  Function tools with reasoning_effort are not supported for gpt-5.6-terra in
+     /v1/chat/completions. To use function tools, use /v1/responses or set
+     reasoning_effort to 'none'.
+```
+
+The SDK omits `reasoning_effort` for a `Model` instance, so the effort in play is the model's
+own server-side default — and on Chat Completions that default is incompatible with function
+tools. Bot chat presents 44 of them, so this is not an edge case; it is every turn.
+
+The API offers two repairs and they are not equivalent:
+
+| Repair | Cost |
+|---|---|
+| `reasoning_effort='none'` on Chat Completions | Turns reasoning off across a 44-tool selection surface — the judgement we least want to lose |
+| **`/v1/responses`** ✅ | None. Reasoning intact, function tools supported |
+
+Responses is also the more honest fit for what this path already produces: the `input_image`
+parts `build_turn_input` emits and the item shape `SQLiteSession` stores are both
+Responses-shaped and were being down-converted per call.
+
+**One consequence to hold onto:** Responses defaults to `store=true`, Chat Completions retains
+nothing. Swapping transport would therefore have started parking every chat turn — positions,
+holdings, P&L — in OpenAI-side storage as an invisible side effect of a bug fix. `Agent` is
+built with `ModelSettings(store=False)` (`cio/agent_openai.py`) to hold the previous
+behaviour. Our `SQLiteSession` is the session of record; nothing here needs server-side state.
+
+The generalisable lesson is not about OpenAI. Every test on this path injected a fake model,
+so the suite proved the *chain-walking logic* and could never have proven the *wire format*.
+A transport with no live test is unverified no matter how green the suite is.
 
 ---
 
