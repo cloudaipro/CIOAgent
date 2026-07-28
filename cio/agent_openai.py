@@ -27,6 +27,7 @@ from agents import Agent, ModelSettings, Runner, SQLiteSession
 
 from . import context, convlog, db
 from .agent import SYSTEM_PROMPT, BaseRuntime, _PENDING, _PENDING_DOCS, _env
+from .committee import models
 from .fallback_model import FallbackModel
 from .tool_bridge import OPENAI_TOOLS
 
@@ -48,13 +49,53 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _UPLOAD_PATH_RE = re.compile(r"(/\S+?\.(?:png|jpe?g|gif|webp))", re.I)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024   # refuse to inline something absurd
 
-# store=False is a deliberate carry-over, not a new policy. FallbackModel used
-# to delegate to Chat Completions, which does not retain a transcript; KG-19's
-# live smoke moved it to Responses, which defaults to store=true and would have
-# started retaining every chat turn -- portfolio positions, holdings, P&L --
-# server-side as a silent side effect of a transport fix. The session of record
-# is our own SQLiteSession, so nothing here needs OpenAI-side state.
-_MODEL_SETTINGS = ModelSettings(store=False)
+# What a turn tells the user when the model produced no text at all. Named
+# rather than inlined so the test that pins this behaviour cannot drift from it.
+NO_OUTPUT_MESSAGE = (
+    "I ran out of output budget before I could answer. Raise the OpenAI output "
+    "cap (`openai.max_tokens` in config/committee_models.yaml, or the "
+    "CIO_OPENAI_MAX_TOKENS env var) and ask again."
+)
+
+
+def _model_settings() -> ModelSettings:
+    """The per-turn `ModelSettings` for the OpenAI runtime.
+
+    Read at agent-build time rather than at import, so an operator's config
+    change takes effect on the next session roll instead of the next restart.
+
+    **store=False** is a deliberate carry-over, not a new policy. FallbackModel
+    used to delegate to Chat Completions, which retains no transcript; KG-19's
+    live smoke moved it to Responses, which defaults to store=true and would
+    have started retaining every chat turn -- positions, holdings, P&L --
+    server-side as a silent side effect of a transport fix. Our SQLiteSession
+    is the session of record, so nothing here needs OpenAI-side state.
+
+    **max_tokens** carries `openai.max_tokens` from the yaml (env override
+    CIO_OPENAI_MAX_TOKENS), which until KG-20 governed the committee path only
+    -- bot chat ran uncapped on the model's own default while the config file
+    claimed otherwise. The SDK maps it to Responses' `max_output_tokens`.
+
+    `token_param` from the same settings block is deliberately *not* used here:
+    it chooses between Chat Completions' `max_completion_tokens` and
+    `max_tokens`, and this path is on Responses, which has neither. Wiring it
+    would imply a choice that does not exist.
+
+    Never raises -- a config read that fails degrades to "no cap" plus a log
+    line, which is the pre-KG-20 behaviour and cannot take the chat down
+    (Standing Rule R2).
+    """
+    cap = None
+    try:
+        cap = models.openai_settings().get("max_output_tokens")
+    except Exception:
+        log.warning("could not read the OpenAI output cap; this turn runs uncapped",
+                    exc_info=True)
+    # A non-positive cap is a misconfiguration, not an instruction to send
+    # max_output_tokens=0 and guarantee an empty turn.
+    if not isinstance(cap, int) or cap <= 0:
+        cap = None
+    return ModelSettings(store=False, max_tokens=cap)
 
 
 def _image_parts(prompt: str) -> list[dict]:
@@ -152,7 +193,7 @@ class OpenAIRuntime(BaseRuntime):
             instructions=prompt,
             tools=OPENAI_TOOLS,
             model=self._model_impl,
-            model_settings=_MODEL_SETTINGS,
+            model_settings=_model_settings(),
         )
 
     async def _ensure(self) -> None:
@@ -198,6 +239,17 @@ class OpenAIRuntime(BaseRuntime):
         convlog.log_call(self._service, self._model or "openai-agents-sdk",
                          self._system_prompt, prompt, text, tokens,
                          scope=self._scope, kind="chat")
+        if not text.strip():
+            # Responses counts *reasoning* tokens against max_output_tokens, so
+            # a capped turn can end with no text at all -- a path that did not
+            # exist while this runtime was (wrongly) uncapped. cio/bot.py:265
+            # renders empty text as "(no response)", which is indistinguishable
+            # from a model that simply chose to say nothing; name the cause
+            # instead. Usage and convlog above deliberately recorded the real
+            # empty output rather than this stand-in.
+            log.warning("OpenAI turn produced no text after %d tokens; the output "
+                        "cap is the usual cause", tokens)
+            text = NO_OUTPUT_MESSAGE
         images = list(_PENDING)
         _PENDING.clear()
         # Documents (committee PDF) are stashed on the instance, not returned,
