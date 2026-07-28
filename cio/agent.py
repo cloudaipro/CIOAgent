@@ -1342,29 +1342,23 @@ def _usage_tokens(u) -> int:
         return 0
 
 
-class CIOAgent:
-    """One conversational session (per chat). Reuses a connected SDK client.
-
-    For 24/7 operation the SDK handles long-context overflow with automatic
-    compaction; durable facts go to the memory tools. `resume` reconnects to a
-    prior SDK session so a restarted bot continues the same thread. The latest
-    `session_id` is reported via `on_session_id` so the caller can persist it.
+class BaseRuntime:
+    """Shared turn pipeline for every CIO runtime (Claude, OpenAI, ...). Owns the
+    orchestration `ask()` runs on every turn — day roll, clock injection, nudge,
+    sources footer, harness hook, verifier, doc capture, turn/token accounting,
+    checkpoint triggers — so a second transport can never silently drift from the
+    first. Subclasses supply the transport via three hooks: `_run_query`,
+    `_ensure`, `_reset_session`.
     """
 
-    def __init__(self, model: str | None = None, resume: str | None = None,
-                 on_session_id=None, chat_id: int | None = None):
+    def __init__(self, model: str | None, chat_id: int | None, on_session_id,
+                 service: str, session_id: str | None):
         self._model = model
-        # This class is the ClaudeRuntime implementation behind cio.bot_runtime's
-        # BotRuntime protocol; it always resolves to "claude" (Standing Rule R4 —
-        # usage/transcript attribution takes the service that actually answered).
-        self._service = "claude"
-        self._resume = resume
+        self._service = service
         self._chat_id = chat_id
         self._scope = f"chat:{chat_id}" if chat_id is not None else "global"
-        self._client = self._make_client(resume)
-        self._connected = False
         self._on_session_id = on_session_id
-        self._session_id: str | None = resume
+        self._session_id: str | None = session_id
         self._turns = 0          # turns since last checkpoint (rolling session)
         self._tokens = 0         # approx tokens since last checkpoint
         self._compaction_pending = False   # set by PreCompact hook -> checkpoint soon
@@ -1383,45 +1377,19 @@ class CIOAgent:
         and read it directly."""
         return self._session_id
 
-    async def _on_precompact(self, input_data, tool_use_id, ctx) -> dict:
-        """PreCompact hook: the SDK is about to lossily summarize old turns.
-        Flag a checkpoint so we durably persist a digest right after this turn —
-        nothing notable is lost to the summary."""
-        import logging
-        logging.getLogger("cio.agent").info("PreCompact (%s) for %s — will checkpoint",
-                                             input_data.get("trigger"), self._scope)
-        self._compaction_pending = True
-        return {}
+    async def _run_query(self, prompt: str) -> tuple[str, list[str]]:
+        """One locked turn against the current transport; returns (text, images).
+        Transport-specific — implemented by each runtime."""
+        raise NotImplementedError
 
-    def _make_client(self, resume: str | None) -> ClaudeSDKClient:
-        """Build a client whose system prompt has this chat's memory injected.
-        Called on init, on fresh-session fallback, and on rolling-session fork —
-        so each (re)connect refreshes the injected context."""
-        prompt = context.compose_system_prompt(SYSTEM_PROMPT, self._chat_id)
-        self._system_prompt = prompt   # kept for the detailed-history log (convlog)
-        hooks = {"PreCompact": [HookMatcher(hooks=[self._on_precompact])]}
-        return ClaudeSDKClient(
-            options=build_options(self._model, resume, system_prompt=prompt, hooks=hooks))
+    async def _ensure(self) -> None:
+        """Connect/prepare the transport, idempotent. Implemented by each runtime."""
+        raise NotImplementedError
 
-    async def _ensure(self):
-        if self._connected:
-            return
-        try:
-            await self._client.connect()
-        except Exception as e:
-            # Stale/missing transcript after a reboot ("No conversation found
-            # with session ID ...") must not brick the chat. Fall back to a
-            # fresh session — financial truth lives in the DB regardless.
-            if not self._resume:
-                raise
-            import logging
-            logging.getLogger("cio.agent").warning(
-                "resume %s failed (%s); starting a fresh session", self._resume, e)
-            self._resume = None
-            self._session_id = None
-            self._client = self._make_client(None)
-            await self._client.connect()
-        self._connected = True
+    async def _reset_session(self) -> None:
+        """Tear down the current session and start a fresh one — the fork half of
+        `_checkpoint`. Implemented by each runtime."""
+        raise NotImplementedError
 
     async def warm(self) -> None:
         """Eagerly connect (and resume) so the first message has no startup lag."""
@@ -1432,57 +1400,6 @@ class CIOAgent:
             self._session_id = session_id
             if self._on_session_id:
                 self._on_session_id(session_id)
-
-    async def _run_query(self, prompt: str) -> tuple[str, list[str]]:
-        """One locked turn against the current client; returns (text, images).
-
-        Also records the turn's Claude token usage so the dev dashboard reflects
-        real chat consumption (input+output from each AssistantMessage.usage)."""
-        async with _LOCK:
-            global _ACTIVE_SCOPE, _SEARCHED_THIS_TURN
-            _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
-            _SEARCHED_THIS_TURN = False
-            _PENDING.clear()
-            _PENDING_DOCS.clear()
-            # NB: _SOURCES is NOT cleared here — it persists across turns within a
-            # session so cross-turn [n] citations resolve. Reset on roll/close only.
-            await self._client.query(prompt)
-            parts: list[str] = []
-            tokens = 0          # accumulated per-AssistantMessage usage (often empty)
-            result_tokens = 0   # authoritative turn total from the final ResultMessage
-            async for msg in self._client.receive_response():
-                if isinstance(msg, AssistantMessage):
-                    self._note_session(msg.session_id)
-                    for blk in msg.content:
-                        if isinstance(blk, TextBlock):
-                            parts.append(blk.text)
-                    tokens += _usage_tokens(msg.usage)
-                elif isinstance(msg, ResultMessage):
-                    # ResultMessage.usage is the cumulative usage for the whole turn
-                    # (the agent SDK leaves AssistantMessage.usage empty), so prefer it.
-                    self._note_session(getattr(msg, "session_id", None))
-                    result_tokens = _usage_tokens(msg.usage)
-            text = "\n".join(parts).strip()
-            # Effective tokens: ResultMessage total > summed AssistantMessage usage >
-            # a local estimate (so the figure is never a misleading 0).
-            eff_tokens = result_tokens or tokens
-            if eff_tokens <= 0:
-                eff_tokens = context.count_tokens(prompt) + context.count_tokens(text)
-            # Sources footer is appended in ask() (user-facing only), so internal
-            # digest/playbook turns that reuse _run_query don't get a footer.
-            self._record_usage(eff_tokens, prompt, text, self._service)
-            # Detailed conversation history (opt-in, off by default): full text log.
-            convlog.log_call(self._service, self._model or "claude-agent-sdk",
-                             getattr(self, "_system_prompt", "") or "", prompt, text,
-                             eff_tokens, scope=self._scope, kind="chat")
-            images = list(_PENDING)
-            _PENDING.clear()
-            # Documents (committee PDF) are stashed on the instance, not returned,
-            # so the (text, images) signature stays stable for tests that stub
-            # _run_query. ask() drains it before any checkpoint turn overwrites it.
-            self._last_docs = list(_PENDING_DOCS)
-            _PENDING_DOCS.clear()
-            return text, images
 
     @staticmethod
     def _record_usage(tokens: int, prompt: str, text: str, service: str) -> None:
@@ -1607,15 +1524,7 @@ class CIOAgent:
         self._compaction_pending = False
         _SOURCES.pop(self._scope, None)   # old source numbers die with the old thread
         _ISSUER_DOMAINS.pop(self._scope, None)   # issuer set is rebuilt on demand
-        try:
-            await self._client.disconnect()
-        except Exception:
-            pass
-        self._resume = None
-        self._session_id = None
-        self._client = self._make_client(None)   # re-injects context incl. new digest
-        self._connected = False
-        await self._ensure()
+        await self._reset_session()
         log.info("rolled session for %s; digest saved, fresh thread seeded", self._scope)
 
     async def _monthly_rollup(self, year_month: str) -> None:
@@ -1649,6 +1558,133 @@ class CIOAgent:
     async def close(self):
         _SOURCES.pop(self._scope, None)
         _ISSUER_DOMAINS.pop(self._scope, None)
+
+
+class CIOAgent(BaseRuntime):
+    """One conversational session (per chat). Reuses a connected SDK client.
+
+    For 24/7 operation the SDK handles long-context overflow with automatic
+    compaction; durable facts go to the memory tools. `resume` reconnects to a
+    prior SDK session so a restarted bot continues the same thread. The latest
+    `session_id` is reported via `on_session_id` so the caller can persist it.
+    """
+
+    def __init__(self, model: str | None = None, resume: str | None = None,
+                 on_session_id=None, chat_id: int | None = None):
+        # This class is the ClaudeRuntime implementation behind cio.bot_runtime's
+        # BotRuntime protocol; it always resolves to "claude" (Standing Rule R4 —
+        # usage/transcript attribution takes the service that actually answered).
+        super().__init__(model, chat_id, on_session_id, "claude", resume)
+        self._resume = resume
+        self._client = self._make_client(resume)
+        self._connected = False
+
+    async def _on_precompact(self, input_data, tool_use_id, ctx) -> dict:
+        """PreCompact hook: the SDK is about to lossily summarize old turns.
+        Flag a checkpoint so we durably persist a digest right after this turn —
+        nothing notable is lost to the summary."""
+        import logging
+        logging.getLogger("cio.agent").info("PreCompact (%s) for %s — will checkpoint",
+                                             input_data.get("trigger"), self._scope)
+        self._compaction_pending = True
+        return {}
+
+    def _make_client(self, resume: str | None) -> ClaudeSDKClient:
+        """Build a client whose system prompt has this chat's memory injected.
+        Called on init, on fresh-session fallback, and on rolling-session fork —
+        so each (re)connect refreshes the injected context."""
+        prompt = context.compose_system_prompt(SYSTEM_PROMPT, self._chat_id)
+        self._system_prompt = prompt   # kept for the detailed-history log (convlog)
+        hooks = {"PreCompact": [HookMatcher(hooks=[self._on_precompact])]}
+        return ClaudeSDKClient(
+            options=build_options(self._model, resume, system_prompt=prompt, hooks=hooks))
+
+    async def _ensure(self):
+        if self._connected:
+            return
+        try:
+            await self._client.connect()
+        except Exception as e:
+            # Stale/missing transcript after a reboot ("No conversation found
+            # with session ID ...") must not brick the chat. Fall back to a
+            # fresh session — financial truth lives in the DB regardless.
+            if not self._resume:
+                raise
+            import logging
+            logging.getLogger("cio.agent").warning(
+                "resume %s failed (%s); starting a fresh session", self._resume, e)
+            self._resume = None
+            self._session_id = None
+            self._client = self._make_client(None)
+            await self._client.connect()
+        self._connected = True
+
+    async def _reset_session(self) -> None:
+        """The fork half of `_checkpoint`: tear down the current session and
+        start a fresh one."""
+        try:
+            await self._client.disconnect()
+        except Exception:
+            pass
+        self._resume = None
+        self._session_id = None
+        self._client = self._make_client(None)   # re-injects context incl. new digest
+        self._connected = False
+        await self._ensure()
+
+    async def _run_query(self, prompt: str) -> tuple[str, list[str]]:
+        """One locked turn against the current client; returns (text, images).
+
+        Also records the turn's Claude token usage so the dev dashboard reflects
+        real chat consumption (input+output from each AssistantMessage.usage)."""
+        async with _LOCK:
+            global _ACTIVE_SCOPE, _SEARCHED_THIS_TURN
+            _ACTIVE_SCOPE = self._scope   # memory tools read/write this chat's namespace
+            _SEARCHED_THIS_TURN = False
+            _PENDING.clear()
+            _PENDING_DOCS.clear()
+            # NB: _SOURCES is NOT cleared here — it persists across turns within a
+            # session so cross-turn [n] citations resolve. Reset on roll/close only.
+            await self._client.query(prompt)
+            parts: list[str] = []
+            tokens = 0          # accumulated per-AssistantMessage usage (often empty)
+            result_tokens = 0   # authoritative turn total from the final ResultMessage
+            async for msg in self._client.receive_response():
+                if isinstance(msg, AssistantMessage):
+                    self._note_session(msg.session_id)
+                    for blk in msg.content:
+                        if isinstance(blk, TextBlock):
+                            parts.append(blk.text)
+                    tokens += _usage_tokens(msg.usage)
+                elif isinstance(msg, ResultMessage):
+                    # ResultMessage.usage is the cumulative usage for the whole turn
+                    # (the agent SDK leaves AssistantMessage.usage empty), so prefer it.
+                    self._note_session(getattr(msg, "session_id", None))
+                    result_tokens = _usage_tokens(msg.usage)
+            text = "\n".join(parts).strip()
+            # Effective tokens: ResultMessage total > summed AssistantMessage usage >
+            # a local estimate (so the figure is never a misleading 0).
+            eff_tokens = result_tokens or tokens
+            if eff_tokens <= 0:
+                eff_tokens = context.count_tokens(prompt) + context.count_tokens(text)
+            # Sources footer is appended in ask() (user-facing only), so internal
+            # digest/playbook turns that reuse _run_query don't get a footer.
+            self._record_usage(eff_tokens, prompt, text, self._service)
+            # Detailed conversation history (opt-in, off by default): full text log.
+            convlog.log_call(self._service, self._model or "claude-agent-sdk",
+                             getattr(self, "_system_prompt", "") or "", prompt, text,
+                             eff_tokens, scope=self._scope, kind="chat")
+            images = list(_PENDING)
+            _PENDING.clear()
+            # Documents (committee PDF) are stashed on the instance, not returned,
+            # so the (text, images) signature stays stable for tests that stub
+            # _run_query. ask() drains it before any checkpoint turn overwrites it.
+            self._last_docs = list(_PENDING_DOCS)
+            _PENDING_DOCS.clear()
+            return text, images
+
+    async def close(self):
+        await super().close()
         if self._connected:
             await self._client.disconnect()
             self._connected = False
