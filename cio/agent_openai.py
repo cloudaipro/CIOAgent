@@ -23,7 +23,7 @@ import mimetypes
 import re
 from pathlib import Path
 
-from agents import Agent, Runner, SQLiteSession
+from agents import Agent, ModelSettings, Runner, SQLiteSession
 
 from . import context, convlog, db
 from .agent import SYSTEM_PROMPT, BaseRuntime, _PENDING, _PENDING_DOCS, _env
@@ -47,6 +47,14 @@ MAX_TURNS = int(_env("MAX_TURNS", "24"))
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _UPLOAD_PATH_RE = re.compile(r"(/\S+?\.(?:png|jpe?g|gif|webp))", re.I)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024   # refuse to inline something absurd
+
+# store=False is a deliberate carry-over, not a new policy. FallbackModel used
+# to delegate to Chat Completions, which does not retain a transcript; KG-19's
+# live smoke moved it to Responses, which defaults to store=true and would have
+# started retaining every chat turn -- portfolio positions, holdings, P&L --
+# server-side as a silent side effect of a transport fix. The session of record
+# is our own SQLiteSession, so nothing here needs OpenAI-side state.
+_MODEL_SETTINGS = ModelSettings(store=False)
 
 
 def _image_parts(prompt: str) -> list[dict]:
@@ -144,6 +152,7 @@ class OpenAIRuntime(BaseRuntime):
             instructions=prompt,
             tools=OPENAI_TOOLS,
             model=self._model_impl,
+            model_settings=_MODEL_SETTINGS,
         )
 
     async def _ensure(self) -> None:

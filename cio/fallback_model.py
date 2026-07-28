@@ -33,7 +33,7 @@ import os
 from typing import Callable
 
 import openai
-from agents import Model, ModelResponse, OpenAIChatCompletionsModel
+from agents import Model, ModelResponse, OpenAIResponsesModel
 
 from cio.committee import engine, models, usage
 
@@ -106,14 +106,31 @@ class FallbackModel(Model):
         return client
 
     def _build_delegate(self, link: dict) -> Model | None:
-        """Default model_factory: an OpenAIChatCompletionsModel bound to the
-        cached client for this link's configured base_url. None if that
-        client cannot be built right now (missing key)."""
+        """Default model_factory: an OpenAIResponsesModel bound to the cached
+        client for this link's configured base_url. None if that client cannot
+        be built right now (missing key).
+
+        Responses, not Chat Completions — established by live smoke (KG-19),
+        not by preference. gpt-5.6-terra rejects the combination of function
+        tools and its own default reasoning effort on /v1/chat/completions:
+
+            400 Function tools with reasoning_effort are not supported for
+            gpt-5.6-terra in /v1/chat/completions. To use function tools, use
+            /v1/responses or set reasoning_effort to 'none'.
+
+        Since bot chat presents 44 tools, the model's tool-selection judgement
+        is the thing we least want to switch off, so the other repair the API
+        offers -- reasoning_effort='none' -- is the wrong trade here. Responses
+        is also the native surface for what this path already produces: the
+        `input_image` content parts `agent_openai.build_turn_input` emits and
+        the item shape `SQLiteSession` persists are both Responses-shaped, and
+        were being down-converted per call.
+        """
         settings = models.openai_settings()
         client = self._client_for(settings["base_url"], settings["api_key_env"])
         if client is None:
             return None
-        return OpenAIChatCompletionsModel(model=link["model"], openai_client=client)
+        return OpenAIResponsesModel(model=link["model"], openai_client=client)
 
     def _delegate_for(self, index: int, link: dict) -> Model | None:
         """Build-or-reuse the delegate Model for ``self._links[index]``

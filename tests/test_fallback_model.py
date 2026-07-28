@@ -397,6 +397,50 @@ class TestMissingApiKey:
 
 
 # ---------------------------------------------------------------------------
+# D2. Which OpenAI API the default factory targets (KG-19)
+#
+#     Chat Completions cannot serve this path at all: gpt-5.6-terra rejects
+#     function tools there unless reasoning_effort is 'none', and bot chat
+#     presents 44 tools. That was found by a live call, not by these tests --
+#     so the point of the two below is narrow but real: keep a later edit from
+#     quietly putting the 400 back.
+# ---------------------------------------------------------------------------
+
+class TestDelegateApiSurface:
+    def _fm(self, monkeypatch):
+        monkeypatch.setattr(
+            "cio.committee.models.openai_settings",
+            lambda: {
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "CIO_TEST_FALLBACK_MODEL_KEY",
+                "max_output_tokens": 2048,
+                "token_param": "max_completion_tokens",
+            },
+        )
+        monkeypatch.setenv("CIO_TEST_FALLBACK_MODEL_KEY", "sk-not-a-real-key")
+        return FallbackModel([{"service": "openai", "model": "gpt-5.6-terra"}])
+
+    def test_default_factory_builds_a_responses_model(self, monkeypatch):
+        from agents import OpenAIChatCompletionsModel, OpenAIResponsesModel
+
+        delegate = self._fm(monkeypatch)._build_delegate(
+            {"service": "openai", "model": "gpt-5.6-terra"})
+
+        assert isinstance(delegate, OpenAIResponsesModel)
+        # Stated separately rather than relying on the isinstance above: the two
+        # classes are unrelated, but this is the regression that actually bit.
+        assert not isinstance(delegate, OpenAIChatCompletionsModel)
+
+    def test_bot_chat_agent_disables_server_side_response_storage(self):
+        """Responses defaults to store=true; Chat Completions never retained
+        anything. Moving transport must not start parking portfolio positions
+        and P&L in OpenAI-side storage as a side effect."""
+        from cio.agent_openai import _MODEL_SETTINGS
+
+        assert _MODEL_SETTINGS.store is False
+
+
+# ---------------------------------------------------------------------------
 # E. _classify_error — Decision 6's table, row by row
 # ---------------------------------------------------------------------------
 
