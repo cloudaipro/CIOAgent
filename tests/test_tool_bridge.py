@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
+from typing import TypedDict
 
 import pytest
 from agents import FunctionTool
@@ -128,6 +130,39 @@ class TestUnknownTypeFallback:
         schema = tb._claude_schema(spy)
         assert schema["properties"]["weird"] == {"type": "string"}
         assert schema["required"] == ["weird"]
+
+
+# ---------------------------------------------------------------------------
+# KG-16 — the non-dict-schema branch warns instead of losing parameters silently
+# ---------------------------------------------------------------------------
+
+class TestNonDictSchemaWarns:
+    """claude_agent_sdk converts TypedDict schemas; we return an empty schema.
+
+    That is a deliberate non-goal (no tool uses one today), but it means the
+    OpenAI side would see such a tool as taking NO parameters while the Claude
+    path still passes them all. The parity test cannot catch it — no tool
+    reaches this branch — so the branch must announce itself.
+    """
+
+    class _Weird(TypedDict):
+        symbol: str
+
+    def test_non_dict_schema_warns_and_names_the_tool(self, caplog):
+        spy = SdkMcpTool(name="spy_typeddict", description="d",
+                         input_schema=self._Weird, handler=_ok_handler)
+        with caplog.at_level(logging.WARNING, logger="cio.tool_bridge"):
+            schema = tb._claude_schema(spy)
+        assert schema == {"type": "object", "properties": {}}
+        assert any("spy_typeddict" in r.getMessage() for r in caplog.records), caplog.text
+        assert "KG-16" in caplog.text
+
+    def test_dict_schemas_do_not_warn(self, caplog):
+        """The 44 real tools must stay silent — a warning on every import is noise."""
+        with caplog.at_level(logging.WARNING, logger="cio.tool_bridge"):
+            for t in agent.CIO_TOOLS:
+                tb._claude_schema(t)
+        assert caplog.records == []
 
 
 # ---------------------------------------------------------------------------

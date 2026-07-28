@@ -37,12 +37,15 @@ before writing this, not just trusted):
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from agents import FunctionTool
 from claude_agent_sdk import SdkMcpTool
 
 from .agent import CIO_TOOLS
+
+log = logging.getLogger(__name__)
 
 _PY_TYPE_TO_JSON_TYPE = {str: "string", int: "integer", float: "number", bool: "boolean"}
 
@@ -73,8 +76,22 @@ def _claude_schema(t: SdkMcpTool) -> dict[str, Any]:
         return {"type": "object", "properties": properties,
                 "required": list(properties.keys())}
     # No CIO_TOOLS schema takes this path today (verified: 16 empty-dict, 27
-    # param-mapping, 1 passthrough — see tests/test_tool_bridge.py). Kept only
-    # so a hypothetical future non-dict schema is still callable, not fatal.
+    # param-mapping, 1 passthrough — see tests/test_tool_bridge.py). Kept so a
+    # hypothetical future non-dict schema is still callable, not fatal.
+    #
+    # KG-16: claude_agent_sdk DOES handle TypedDict schemas here, via
+    # _typeddict_to_json_schema. We deliberately do not — but returning an empty
+    # schema silently means the model is told the tool takes NO parameters while
+    # the Claude path still sees them all: a parity break the parity test cannot
+    # catch, because no tool exercises this branch. Warn loudly so the divergence
+    # is visible the moment someone adds such a tool, rather than discovered as a
+    # tool that mysteriously never receives its arguments.
+    log.warning(
+        "tool_bridge: %r has a non-dict input_schema (%s); the OpenAI side will see it as "
+        "taking NO parameters, while the Claude path still passes them. Convert it to a "
+        "{name: type} dict, or teach _claude_schema about TypedDict (KG-16).",
+        t.name, type(schema).__name__,
+    )
     return {"type": "object", "properties": {}}
 
 
