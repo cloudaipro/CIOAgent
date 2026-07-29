@@ -480,3 +480,140 @@ class TestAgentSeam:
         rt = bot_mod._agent(9002)
         assert isinstance(rt, bot_mod.CIOAgent)
         assert bot_mod._agent(9002) is rt   # still cached despite the fallback path
+
+
+# ---------------------------------------------------------------------------
+# reselect_needed -- the narrow escape hatch from the D4 pin
+# ---------------------------------------------------------------------------
+
+class _FakeRuntime:
+    """Stands in for a pinned runtime: reselect_needed only reads _service."""
+    def __init__(self, service): self._service = service
+
+
+def _budget_db(monkeypatch, tmp_path, service, spent):
+    """Point cio.committee.usage at a throwaway db with *spent* tokens already
+    recorded against *service*, so over_budget() can be driven from a test."""
+    from cio.committee import usage as _usage
+    db = tmp_path / "usage.db"
+    monkeypatch.setattr(_usage, "DB_PATH", db)
+    _usage.record(service, spent, db_path=db)
+
+
+class TestReselectNeeded:
+    def test_false_while_the_pinned_service_can_still_answer(self, monkeypatch, tmp_path):
+        _budget_db(monkeypatch, tmp_path, "openai", 1)   # not the real day's usage
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra", "daily_limit": 120000},
+            {"service": "claude", "model": "claude-opus-5"},
+        ])
+        assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is False
+
+    def test_true_when_the_pinned_service_is_over_budget(self, monkeypatch, tmp_path):
+        """The stranded-chat bug: openai crossed its daily limit AFTER the pin,
+        FallbackModel holds only openai links, so the chain's claude link is
+        unreachable until something unpins the runtime."""
+        _budget_db(monkeypatch, tmp_path, "openai", 200)
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra", "daily_limit": 100},
+            {"service": "claude", "model": "claude-opus-5"},
+        ])
+        assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is True
+
+    def test_true_when_the_pinned_service_is_latched(self, monkeypatch):
+        from cio.committee import engine
+        engine.latch("openai")
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "claude", "model": "claude-opus-5"},
+        ])
+        assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is True
+
+    def test_false_when_no_other_service_could_answer_either(self, monkeypatch):
+        """Both dead: moving buys nothing, and select_runtime would return an
+        over-budget Claude anyway. Stay pinned rather than churn the session."""
+        from cio.committee import engine
+        engine.latch("openai")
+        engine.latch("claude")
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "claude", "model": "claude-opus-5"},
+        ])
+        assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is False
+
+    def test_false_when_the_only_alternative_is_nim(self, monkeypatch):
+        """Bot chat never routes to nim (44-tool surface), so a nim link does
+        not count as a usable alternative."""
+        from cio.committee import engine
+        engine.latch("openai")
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "nim", "model": "moonshotai/kimi-k2.6"},
+        ])
+        assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is False
+
+    def test_engine_override_disables_reselection(self, monkeypatch):
+        """CIO_BOT_ENGINE is honoured over budget, so it must also pin."""
+        from cio.committee import engine
+        engine.latch("openai")
+        monkeypatch.setenv("CIO_BOT_ENGINE", "openai")
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "claude", "model": "claude-opus-5"},
+        ])
+        assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is False
+
+    def test_chain_lookup_failure_keeps_the_current_runtime(self, monkeypatch):
+        def _boom():
+            raise RuntimeError("config exploded")
+        monkeypatch.setattr(bot_runtime.models, "bot_chat_chain", _boom)
+        assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is False
+
+    def test_unknown_transport_is_left_alone(self, monkeypatch):
+        _set_chain(monkeypatch, [{"service": "claude", "model": "claude-opus-5"}])
+        assert bot_runtime.reselect_needed(_FakeRuntime("something-else")) is False
+
+
+class TestAgentEviction:
+    """cio.bot._agent() acts on reselect_needed: evict the stranded runtime,
+    re-select from the chain, and queue the user-facing notice."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_agent_cache(self, monkeypatch):
+        import cio.bot as bot_mod
+        bot_mod._agents.clear()
+        bot_mod._switch_notice.clear()
+        monkeypatch.setattr(bot_mod.memory, "touch_chat", lambda chat_id: None)
+        monkeypatch.setattr(bot_mod.memory, "get_session_id", lambda chat_id: None)
+        monkeypatch.setattr(bot_mod.memory, "set_session_id", lambda chat_id, sid: None)
+        yield
+        bot_mod._agents.clear()
+        bot_mod._switch_notice.clear()
+
+    def test_stranded_runtime_is_replaced_and_the_user_is_told(self, monkeypatch):
+        import cio.bot as bot_mod
+        from cio.committee import engine
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "claude", "model": "claude-opus-5"},
+        ])
+        first = bot_mod._agent(9101)
+        assert type(first).__name__ == "OpenAIRuntime"
+
+        engine.latch("openai")            # budget/limit hit mid-session
+        second = bot_mod._agent(9101)
+        assert second is not first
+        assert isinstance(second, bot_runtime.ClaudeRuntime)
+        assert 9101 in bot_mod._switch_notice
+
+    def test_healthy_runtime_is_still_pinned(self, monkeypatch):
+        """D4 is intact: no eviction while the pinned service can answer, and
+        no spurious notice."""
+        import cio.bot as bot_mod
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-5.6-terra"},
+            {"service": "claude", "model": "claude-opus-5"},
+        ])
+        first = bot_mod._agent(9102)
+        assert bot_mod._agent(9102) is first
+        assert 9102 not in bot_mod._switch_notice

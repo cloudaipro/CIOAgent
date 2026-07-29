@@ -373,3 +373,69 @@ class TestBuildTurnInput:
         _run(rt._guarded_turn(f"Read this.\nThe image is saved at: {img}"))
         assert isinstance(seen["input"], list)
         assert seen["input"][0]["content"][1]["type"] == "input_image"
+
+
+# ---------------------------------------------------------------------------
+# Usage is recorded exactly once per turn (the 2026-07-29 double-count)
+# ---------------------------------------------------------------------------
+
+class TestUsageRecordedOnce:
+    """FallbackModel records the ledger per model call; one agent turn is many
+    calls, and `result.context_wrapper.usage` is the sum of those same calls.
+    Recording both charged every openai chat turn twice, tripping the 120,000
+    daily budget after two questions on a ~62,000-token day."""
+
+    def _runner_that_records(self, rt, per_call):
+        """Runner.run stand-in that mimics FallbackModel booking *per_call*
+        tokens for each of its model calls during the turn."""
+        async def run(agent_, input_, **kwargs):
+            for n in per_call:
+                rt._model_impl._recorded_tokens += n
+            return _FakeResult("ok", Usage(input_tokens=0, output_tokens=0,
+                                           total_tokens=sum(per_call)))
+        return run
+
+    def test_turn_level_recording_is_skipped_when_the_model_already_booked(self, monkeypatch):
+        booked: list = []
+        monkeypatch.setattr(_usage, "record",
+                            lambda service, tokens: booked.append((service, tokens)))
+        rt = _make_runtime()
+        _run(rt._ensure())
+        monkeypatch.setattr(agent_openai.Runner, "run",
+                            self._runner_that_records(rt, [4000, 5000, 3000]))
+        _run(rt._guarded_turn("hi"))
+        # The three per-call bookings are FallbackModel's own (stubbed out
+        # here); the turn must not add a fourth for the same 12,000 tokens.
+        assert booked == []
+
+    def test_estimate_still_lands_when_no_call_reached_the_ledger(self, monkeypatch):
+        """An API that reports no usage (or a turn where nothing succeeded)
+        leaves the counter at zero — the local estimate must still be booked,
+        so a turn is never free."""
+        booked: list = []
+        monkeypatch.setattr(_usage, "record",
+                            lambda service, tokens: booked.append((service, tokens)))
+        monkeypatch.setattr(agent_openai.Runner, "run", _fake_runner_run(
+            result=_FakeResult("a short reply", usage=None)))
+        rt = _make_runtime()
+        _run(rt._guarded_turn("hi"))
+        assert len(booked) == 1
+        assert booked[0][0] == "openai"
+        assert booked[0][1] > 0
+
+    def test_the_counter_is_reset_between_turns(self, monkeypatch):
+        """Turn 2 books nothing of its own; without the per-turn reset it
+        would see turn 1's total and skip its estimate."""
+        booked: list = []
+        monkeypatch.setattr(_usage, "record",
+                            lambda service, tokens: booked.append((service, tokens)))
+        rt = _make_runtime()
+        _run(rt._ensure())
+        monkeypatch.setattr(agent_openai.Runner, "run",
+                            self._runner_that_records(rt, [7000]))
+        _run(rt._guarded_turn("first"))
+        assert booked == []
+        monkeypatch.setattr(agent_openai.Runner, "run", _fake_runner_run(
+            result=_FakeResult("second reply", usage=None)))
+        _run(rt._guarded_turn("second"))
+        assert len(booked) == 1 and booked[0][1] > 0

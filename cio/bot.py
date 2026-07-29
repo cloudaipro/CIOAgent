@@ -36,7 +36,7 @@ from telegram.ext import (
 
 from . import alpha, charts, memory, recall, richmsg, scheduler, watchlist
 from .agent import CIOAgent
-from .bot_runtime import BotRuntime, select_runtime
+from .bot_runtime import BotRuntime, reselect_needed, select_runtime
 
 load_dotenv()
 from .logsetup import configure_logging
@@ -111,7 +111,56 @@ _INLINE_MENU = InlineKeyboardMarkup(
 _agents: dict[int, BotRuntime] = {}
 
 
+def _close_detached(runtime: BotRuntime) -> None:
+    """Close *runtime* without blocking: `_agent` is sync, and an OpenAIRuntime
+    holds an httpx pool that would otherwise be abandoned. Fire-and-forget —
+    the caller has already dropped its reference either way, and a close that
+    fails must not take the replacement turn down. Kept referenced in
+    `_closing` so the task is not garbage-collected mid-flight."""
+    async def _close() -> None:
+        try:
+            await runtime.close()
+        except Exception:
+            log.debug("detached runtime close failed", exc_info=True)
+
+    try:
+        task = asyncio.get_running_loop().create_task(_close())
+    except RuntimeError:
+        log.debug("no running loop; runtime closed implicitly on drop")
+        return
+    _closing.add(task)
+    task.add_done_callback(_closing.discard)
+
+
+_closing: set[asyncio.Task] = set()
+
+# chat_id -> one-line notice owed to the user because their runtime was
+# re-selected mid-thread (see `_agent`). Consumed and cleared by `_run`.
+_switch_notice: dict[int, str] = {}
+
+
 def _agent(chat_id: int) -> BotRuntime:
+    # D4 pins the runtime for the session, but the pin is chosen before the
+    # day's budget is spent: an openai-headed chain that crosses its daily
+    # limit mid-session strands the chat, because FallbackModel carries only
+    # openai links and nothing re-runs select_runtime. Evict in exactly that
+    # state (bot_runtime.reselect_needed) so the chain's next service is
+    # reachable without a bot restart. The new runtime starts a fresh
+    # transcript — the two SDKs cannot share one — so the user is told.
+    pinned = _agents.get(chat_id)
+    if pinned is not None and reselect_needed(pinned):
+        log.warning("chat %s: pinned %s runtime can no longer answer "
+                    "(latched or over budget); re-selecting from the chain",
+                    chat_id, getattr(pinned, "_service", "?"))
+        _agents.pop(chat_id, None)
+        _close_detached(pinned)
+        _switch_notice[chat_id] = (
+            "⚠️ My previous backend hit its daily limit, so I've switched to the "
+            "next one in the chain. It keeps its own transcript, so it may not "
+            "have this thread's recent history — re-state anything I need. "
+            "Saved data and reports are unaffected."
+        )
+
     if chat_id not in _agents:
         memory.touch_chat(chat_id)
         resume = memory.get_session_id(chat_id)
@@ -253,6 +302,12 @@ async def _run(update: Update, prompt: str) -> None:
         return
     await update.effective_chat.send_action(ChatAction.TYPING)
     agent = _agent(chat_id)
+    notice = _switch_notice.pop(chat_id, None)
+    if notice:
+        try:
+            await update.effective_message.reply_text(notice)
+        except Exception:
+            log.debug("backend-switch notice could not be delivered", exc_info=True)
     try:
         try:
             text, images, docs = await agent.ask(prompt)
