@@ -321,6 +321,28 @@ def test_maintain_demotes_over_cap_hot():
         == memory.MAX_HOT_PER_SCOPE
 
 
+def test_maintain_purges_orphan_vectors():
+    """Invariant I2's other direction: a vec row whose source row is gone. vec0
+    takes no foreign key, so a raw DELETE on the source table strands the
+    embedding — maintain() must clear it, not just report it forever."""
+    from cio import invariants
+    p = _tmpdb()
+    nid = memory.remember("stranded embedding probe", db_path=p)
+    conn = db.connect(p)
+    with conn:
+        conn.execute("DELETE FROM mem_notes WHERE id=?", (nid,))
+    assert conn.execute("SELECT 1 FROM mem_vec WHERE note_id=?", (nid,)).fetchone()
+    conn.close()
+    assert any(v.startswith("I2") and "orphan" in v for v in invariants.check(p))
+
+    out = memory.maintain(db_path=p, force=True)
+    assert out["orphans_purged"] == (1, 0, 0)
+    assert out["violations"] == []                   # checked post-purge
+    conn = db.connect(p)
+    assert conn.execute("SELECT 1 FROM mem_vec WHERE note_id=?", (nid,)).fetchone() is None
+    conn.close()
+
+
 # ----- 8. connect() init cache ------------------------------------------------------
 
 def test_connect_initializes_once_and_recovers_from_deletion():

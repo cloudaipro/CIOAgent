@@ -275,6 +275,106 @@ def test_gdelt_tone_volume_weighted_mean(monkeypatch):
     assert tv["avg_tone"] == 0.2                    # (-2*3 + 0*5 + 4*2) / 10
 
 
+def test_gdelt_failed_fetch_is_not_cached(monkeypatch):
+    """A 429 (get_json -> None) must not poison the 1h cache with an empty result:
+    the next caller has to be allowed to retry, not read back a fabricated []."""
+    monkeypatch.setenv("CIO_GDELT_ENABLED", "1")
+    from cio.data import gdelt
+    calls = {"n": 0}
+
+    def _fail(*a, **k):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr("cio.data.gdelt.get_json", _fail)
+    q = "GdeltCacheProbe Ltd"
+    assert gdelt.headlines(q) == []
+    assert gdelt.tone_volume(q) == {"volume": 0, "avg_tone": 0.0}
+    assert calls["n"] == 2
+
+    monkeypatch.setattr("cio.data.gdelt.get_json", lambda *a, **k: GDELT_TONECHART)
+    assert gdelt.tone_volume(q)["volume"] == 10   # refetched, not served from cache
+
+
+class TestHttpRetry:
+    """_http.get_json: transient failures retry with backoff, and a host that is
+    still 429ing afterwards is latched into a cooldown so the remaining symbols in
+    a committee run fail fast instead of deepening the throttle (2026-07-29)."""
+
+    @staticmethod
+    def _resp(status):
+        import httpx
+
+        class _R:
+            status_code = status
+            headers: dict = {}
+
+            def raise_for_status(self):
+                raise httpx.HTTPStatusError(f"{status}", request=None, response=self)
+
+            def json(self):
+                return {"ok": True}
+
+        return _R()
+
+    def _patch(self, monkeypatch, responses):
+        """Serve *responses* (status code, or a dict = success) in order."""
+        import httpx
+        from cio.data import _http
+        seq = list(responses)
+        calls = {"n": 0}
+
+        def _get(url, **kw):
+            calls["n"] += 1
+            item = seq.pop(0) if seq else responses[-1]
+            if isinstance(item, dict):
+                class _Ok:
+                    status_code = 200
+                    headers: dict = {}
+
+                    def raise_for_status(self):
+                        pass
+
+                    def json(self):
+                        return item
+                return _Ok()
+            return self._resp(item)
+
+        monkeypatch.setattr(httpx, "get", _get)
+        monkeypatch.setattr(_http.time, "sleep", lambda s: None)
+        _http._cooldown.clear()
+        return calls
+
+    def test_retries_then_succeeds(self, monkeypatch):
+        from cio.data import _http
+        monkeypatch.setenv("CIO_HTTP_RETRIES", "2")
+        calls = self._patch(monkeypatch, [429, {"ok": True}])
+        assert _http.get_json("https://retry.example/a") == {"ok": True}
+        assert calls["n"] == 2
+        assert _http._cooling("retry.example") == 0.0   # recovered -> no latch
+
+    def test_exhausted_429_latches_cooldown(self, monkeypatch):
+        from cio.data import _http
+        monkeypatch.setenv("CIO_HTTP_RETRIES", "2")
+        monkeypatch.setenv("CIO_HTTP_COOLDOWN", "300")
+        calls = self._patch(monkeypatch, [429])
+        assert _http.get_json("https://throttled.example/a") is None
+        assert calls["n"] == 3                          # 1 attempt + 2 retries
+        assert _http._cooling("throttled.example") > 0
+        # subsequent calls to the same host short-circuit without a request
+        assert _http.get_json("https://throttled.example/b") is None
+        assert calls["n"] == 3
+        _http._cooldown.clear()
+
+    def test_client_error_is_not_retried(self, monkeypatch):
+        from cio.data import _http
+        monkeypatch.setenv("CIO_HTTP_RETRIES", "2")
+        calls = self._patch(monkeypatch, [404])
+        assert _http.get_json("https://missing.example/a") is None
+        assert calls["n"] == 1
+        assert _http._cooling("missing.example") == 0.0
+
+
 def _capture_query(monkeypatch, ret):
     """Patch gdelt.get_json to record the query param it was called with."""
     seen = {}

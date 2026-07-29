@@ -475,7 +475,8 @@ def maintain(db_path=db.DB_PATH, force: bool = False) -> dict:
     2. prune the COLD turn store to its retention window,
     3. enforce the per-scope hot cap (demote stale hot notes),
     4. re-embed any rows the write path failed to index,
-    5. re-verify the design's runtime invariants (cio/invariants.py) — violations
+    5. drop vec rows whose source row is gone (orphans),
+    6. re-verify the design's runtime invariants (cio/invariants.py) — violations
        are logged, returned in the summary, and persisted to
        `meta.last_invariant_violations` for the dashboard.
 
@@ -510,6 +511,12 @@ def maintain(db_path=db.DB_PATH, force: bool = False) -> dict:
         summary["reindexed"] = _recall.reindex_missing(db_path=db_path)
     except Exception:
         log.warning("maintain: reindex_missing failed", exc_info=True)
+    try:
+        # Other half of invariant I2: reindex_missing() heals source rows without
+        # an embedding, this drops embeddings whose source row was deleted.
+        summary["orphans_purged"] = _recall.purge_orphan_vectors(db_path=db_path)
+    except Exception:
+        log.warning("maintain: purge_orphan_vectors failed", exc_info=True)
     try:
         # Invariants run LAST so they verify the post-maintenance state (e.g. no
         # expired notes left, hot caps hold). check() never raises.

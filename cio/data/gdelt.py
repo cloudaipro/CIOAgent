@@ -23,8 +23,20 @@ from ._http import RateLimiter, get_json
 log = logging.getLogger(__name__)
 
 _DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
-# GDELT asks light users to stay around 1 request/sec.
-_limiter = RateLimiter(1.0)
+
+
+def _min_interval() -> float:
+    """GDELT's published guidance is ~1 req/sec, but the live API throttles a
+    committee run (one ToneChart call per symbol, back-to-back) well below that —
+    2026-07-29 took a 429 on every symbol after the first. Default to 5s and let
+    CIO_GDELT_MIN_INTERVAL tune it."""
+    try:
+        return max(0.0, float(os.getenv("CIO_GDELT_MIN_INTERVAL", "5")))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+_limiter = RateLimiter(_min_interval())
 
 _ART_TTL = 3600   # headlines: 1h
 _TONE_TTL = 3600  # tone/volume: 1h
@@ -98,6 +110,8 @@ def headlines(query: str, hours: int = 24, limit: int = 20) -> list[dict]:
         params = {"query": q, "mode": "ArtList", "format": "json",
                   "maxrecords": n, "timespan": f"{h}h", "sort": "DateDesc"}
         data = get_json(_DOC_URL, params=params, limiter=_limiter)
+        if data is None:
+            return []  # fetch failed — do NOT cache the miss for _ART_TTL
         arts = data.get("articles") if isinstance(data, dict) else None
         cached = arts if isinstance(arts, list) else []
         _cache.write("gdelt_art", key, cached)
@@ -125,6 +139,8 @@ def tone_volume(query: str, hours: int = 24) -> dict:
         params = {"query": q, "mode": "ToneChart", "format": "json",
                   "timespan": f"{h}h"}
         data = get_json(_DOC_URL, params=params, limiter=_limiter)
+        if data is None:
+            return zero  # fetch failed — do NOT cache the miss for _TONE_TTL
         bins = data.get("tonechart") if isinstance(data, dict) else None
         cached = bins if isinstance(bins, list) else []
         _cache.write("gdelt_tone", f"{q}:{h}", cached)
