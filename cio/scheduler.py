@@ -51,6 +51,53 @@ def _is_briefing_day(days_spec: str, when: date | None = None) -> bool:
     return wd in allowed if allowed else True
 
 
+def _send_retries() -> int:
+    try:
+        return max(0, int(os.getenv("CIO_SEND_RETRIES", "3")))
+    except (TypeError, ValueError):
+        return 3
+
+
+async def _send_text(bot, chat_id, text: str) -> None:
+    """send_message with backoff on transient Telegram failures.
+
+    Scheduled pushes are once-a-day, fire-and-forget events: a single TCP connect
+    timeout to api.telegram.org (2026-07-29, 08:00 digest) silently loses the whole
+    day's digest, and the `last_digest_date` marker then suppresses a retry. Retry
+    the transport errors — a flood-control RetryAfter carries its own delay — and
+    let anything else (bad chat, blocked bot) raise to the caller's per-chat handler.
+    """
+    import telegram.error as tg_err
+
+    attempts = 1 + _send_retries()
+    backoff = 2.0
+    for attempt in range(attempts):
+        try:
+            await bot.send_message(chat_id=chat_id, text=text)
+            return
+        except tg_err.RetryAfter as e:
+            if attempt == attempts - 1:
+                raise
+            # PTB is migrating retry_after from seconds to timedelta (v22.2
+            # deprecation) — accept either.
+            raw = getattr(e, "retry_after", None)
+            if isinstance(raw, timedelta):
+                delay = raw.total_seconds()
+            else:
+                try:
+                    delay = float(raw)
+                except (TypeError, ValueError):
+                    delay = backoff
+        except (tg_err.TimedOut, tg_err.NetworkError) as e:
+            if attempt == attempts - 1:
+                raise
+            delay = backoff
+            backoff *= 2
+            log.warning("send to chat %s failed (%s); retrying in %.0fs "
+                        "(attempt %d/%d)", chat_id, e, delay, attempt + 1, attempts)
+        await asyncio.sleep(delay)
+
+
 def _format_digest() -> str:
     s = portfolio.summary()
     if not s["positions"]:
@@ -106,7 +153,7 @@ async def daily_digest(bot) -> None:
     sent_any = False
     for chat_id in chats:
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
+            await _send_text(bot, chat_id, text)
             sent_any = True
         except Exception:  # one bad chat must not block the rest
             log.exception("digest send failed for chat %s", chat_id)
@@ -140,7 +187,7 @@ async def _send_briefing(bot, chat_ids, briefing_md: str, summary_text: str,
     for chat_id in chat_ids:
         try:
             if not await richmsg.send_rich_text(bot, chat_id, summary_text):
-                await bot.send_message(chat_id=chat_id, text=summary_text)
+                await _send_text(bot, chat_id, summary_text)
             if doc_path is not None:
                 with open(doc_path, "rb") as fh:
                     await bot.send_document(chat_id=chat_id, document=fh,
@@ -225,7 +272,7 @@ async def econ_event_alert(bot) -> None:
         sent_any = False
         for chat_id in chats:
             try:
-                await bot.send_message(chat_id=chat_id, text=text)
+                await _send_text(bot, chat_id, text)
                 sent_any = True
             except Exception:  # one bad chat must not block the rest
                 log.exception("econ alert send failed for chat %s", chat_id)
@@ -266,7 +313,7 @@ async def news_spike_alert(bot) -> None:
         text = spike_mod.format_spike_alert(fresh)
         for chat_id in chats:
             try:
-                await bot.send_message(chat_id=chat_id, text=text)
+                await _send_text(bot, chat_id, text)
             except Exception:  # one bad chat must not block the rest
                 log.exception("spike alert send failed for chat %s", chat_id)
     except Exception:

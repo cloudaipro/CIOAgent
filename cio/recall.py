@@ -159,6 +159,31 @@ def reindex_missing(db_path=DB_PATH, limit: int = 500) -> tuple[int, int, int]:
     return len(notes), len(turns), len(digests)
 
 
+def purge_orphan_vectors(db_path=DB_PATH) -> tuple[int, int, int]:
+    """Delete vec rows whose source row is gone. Returns (notes, turns, digests).
+
+    reindex_missing() heals one direction of invariant I2 (a source row with no
+    embedding); this heals the other. `vec0` virtual tables take no foreign key,
+    so a deleted note/turn/digest leaves its embedding behind — the orphan then
+    scores in KNN and resolves to nothing, and I2 reports it on every nightly
+    sweep with no self-repair (observed 2026-07-29: 1 orphan in digest_vec)."""
+    pairs = [("mem_notes", "mem_vec", "note_id"),
+             ("conv_turns", "turn_vec", "turn_id"),
+             ("session_digests", "digest_vec", "digest_id")]
+    counts = []
+    conn = db.connect(db_path)
+    with conn:
+        for src, vec, col in pairs:
+            ids = [r[0] for r in conn.execute(
+                f"SELECT {col} FROM {vec} WHERE {col} NOT IN (SELECT id FROM {src})"
+            ).fetchall()]
+            for i in ids:
+                conn.execute(f"DELETE FROM {vec} WHERE {col}=?", (i,))
+            counts.append(len(ids))
+    conn.close()
+    return tuple(counts)  # type: ignore[return-value]
+
+
 # ----- scope pre-filtering ---------------------------------------------------
 # Ranking across ALL scopes and filtering afterwards starves recall as the DB
 # fills: a small fixed KNN/FTS pool gets dominated by other scopes' rows and the

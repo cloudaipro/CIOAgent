@@ -169,3 +169,92 @@ class TestPlaybookScopePreference:
         got_global = memory.get_playbook("monthly_review", scope="chat:99", db_path=dbp)
         assert got_global is not None
         assert got_global["steps"] == "global steps"
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-29 — a single ConnectTimeout to api.telegram.org lost the whole daily
+# digest: send_message was called once, the exception was logged, and the
+# last_digest_date marker then suppressed any re-send. Scheduled pushes now
+# retry the transport errors before giving up.
+# ---------------------------------------------------------------------------
+
+class TestScheduledSendRetry:
+    def test_send_text_retries_timeout_then_succeeds(self, monkeypatch):
+        import telegram.error as tg_err
+        from cio import scheduler
+
+        monkeypatch.setenv("CIO_SEND_RETRIES", "3")
+        calls = {"n": 0}
+        slept: list[float] = []
+
+        class _Bot:
+            async def send_message(self, **kw):
+                calls["n"] += 1
+                if calls["n"] < 3:
+                    raise tg_err.TimedOut()
+
+        async def _sleep(s):
+            slept.append(s)
+
+        monkeypatch.setattr(scheduler.asyncio, "sleep", _sleep)
+        asyncio.run(scheduler._send_text(_Bot(), 1, "hi"))
+        assert calls["n"] == 3
+        assert slept == [2.0, 4.0]           # exponential backoff
+
+    def test_send_text_raises_after_exhausting_retries(self, monkeypatch):
+        import telegram.error as tg_err
+        from cio import scheduler
+
+        monkeypatch.setenv("CIO_SEND_RETRIES", "2")
+        calls = {"n": 0}
+
+        class _Bot:
+            async def send_message(self, **kw):
+                calls["n"] += 1
+                raise tg_err.TimedOut()
+
+        async def _sleep(s):
+            pass
+
+        monkeypatch.setattr(scheduler.asyncio, "sleep", _sleep)
+        with pytest.raises(tg_err.TimedOut):
+            asyncio.run(scheduler._send_text(_Bot(), 1, "hi"))
+        assert calls["n"] == 3               # 1 attempt + 2 retries
+
+    def test_send_text_honours_retry_after(self, monkeypatch):
+        import telegram.error as tg_err
+        from cio import scheduler
+
+        monkeypatch.setenv("CIO_SEND_RETRIES", "2")
+        calls = {"n": 0}
+        slept: list[float] = []
+
+        class _Bot:
+            async def send_message(self, **kw):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise tg_err.RetryAfter(17)
+
+        async def _sleep(s):
+            slept.append(s)
+
+        monkeypatch.setattr(scheduler.asyncio, "sleep", _sleep)
+        asyncio.run(scheduler._send_text(_Bot(), 1, "hi"))
+        assert calls["n"] == 2 and slept == [17.0]
+
+    def test_send_text_does_not_retry_a_bad_chat(self, monkeypatch):
+        """A permanent error (blocked bot / unknown chat) must surface at once so
+        the per-chat handler moves on instead of stalling the whole broadcast."""
+        import telegram.error as tg_err
+        from cio import scheduler
+
+        calls = {"n": 0}
+
+        class _Bot:
+            async def send_message(self, **kw):
+                calls["n"] += 1
+                raise tg_err.Forbidden("bot was blocked by the user")
+
+        with pytest.raises(tg_err.Forbidden):
+            asyncio.run(scheduler._send_text(_Bot(), 1, "hi"))
+        assert calls["n"] == 1
