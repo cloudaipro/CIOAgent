@@ -224,6 +224,8 @@ class OpenAIRuntime(BaseRuntime):
         (`_LOCK` is an `asyncio.Lock`, not reentrant; re-acquiring it here
         would deadlock the turn).
         """
+        if self._model_impl is not None:
+            self._model_impl.reset_recorded()
         try:
             result = await Runner.run(self._agent, build_turn_input(prompt),
                                       session=self._session, max_turns=MAX_TURNS)
@@ -242,7 +244,18 @@ class OpenAIRuntime(BaseRuntime):
             tokens = usage.total_tokens or (usage.input_tokens + usage.output_tokens)
         if tokens <= 0:
             tokens = context.count_tokens(prompt) + context.count_tokens(text)
-        self._record_usage(tokens, prompt, text, self._service)
+        # FallbackModel records the usage ledger per *model call*, and one turn
+        # is many calls -- `result...usage` is the sum of exactly those same
+        # calls. Recording it again here double-counted every openai chat turn
+        # (2026-07-29: a 121,421-token ledger against ~62,000 real tokens, so
+        # the 120,000 daily budget tripped after two questions). Record only
+        # what FallbackModel could not: a turn where nothing reached the ledger
+        # -- no successful call, or an API that reported no usage -- still owes
+        # the local estimate. `tokens` below stays the SDK's real figure; it
+        # feeds the checkpoint counters and convlog regardless of who recorded.
+        already = self._model_impl.recorded_tokens if self._model_impl is not None else 0
+        if already <= 0:
+            self._record_usage(tokens, prompt, text, self._service)
         # Detailed conversation history (opt-in, off by default): full text log.
         convlog.log_call(self._service, self._model or "openai-agents-sdk",
                          self._system_prompt, prompt, text, tokens,

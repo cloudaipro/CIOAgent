@@ -533,3 +533,41 @@ class TestClassifyError:
     def test_anything_else_continues(self):
         assert _classify_error(ValueError("something unrelated")) == "continue"
         assert _classify_error(_api_status_error(openai.NotFoundError, 404)) == "continue"
+
+
+# ---------------------------------------------------------------------------
+# recorded_tokens -- how the runtime knows the ledger is already written
+# ---------------------------------------------------------------------------
+
+class TestRecordedTokensCounter:
+    """`recorded_tokens` lets the runtime driving the tool loop see that this
+    model already booked the turn's usage per model call, so it does not book
+    the same tokens again at turn level (the 2026-07-29 double-count)."""
+
+    def test_counter_accumulates_across_model_calls(self):
+        delegate = FakeDelegate(response=_canned_response(total_tokens=1500))
+        fm = FallbackModel([{"service": "openai", "model": "m1"}],
+                           model_factory=_factory({"m1": delegate}))
+        _run(fm.get_response(**_call_kwargs()))
+        _run(fm.get_response(**_call_kwargs()))
+        assert delegate.calls == 2
+        assert fm.recorded_tokens == 3000
+        assert usage.used_today("openai") == 3000   # one ledger write per call
+
+    def test_reset_zeroes_the_counter_without_touching_the_ledger(self):
+        fm = FallbackModel([{"service": "openai", "model": "m1"}],
+                           model_factory=_factory({
+                               "m1": FakeDelegate(response=_canned_response(total_tokens=900))}))
+        _run(fm.get_response(**_call_kwargs()))
+        assert fm.recorded_tokens == 900
+        fm.reset_recorded()
+        assert fm.recorded_tokens == 0
+        assert usage.used_today("openai") == 900
+
+    def test_a_failed_walk_records_nothing(self):
+        fm = FallbackModel([{"service": "openai", "model": "m1"}],
+                           model_factory=_factory({
+                               "m1": FakeDelegate(error=RuntimeError("down"))}))
+        with pytest.raises(RuntimeError):
+            _run(fm.get_response(**_call_kwargs()))
+        assert fm.recorded_tokens == 0

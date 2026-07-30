@@ -83,6 +83,29 @@ class FallbackModel(Model):
         self._model_factory: ModelFactory = model_factory or self._build_delegate
         self._delegates: dict[int, Model] = {}      # link index -> built Model (build/reuse)
         self._clients: dict[str, openai.AsyncOpenAI] = {}  # base_url -> client (Decision 7)
+        # Tokens this object has written to the usage ledger since the last
+        # `reset_recorded()`. The runtime driving the tool loop reads it to
+        # tell "usage already recorded, per model call" apart from "no usage
+        # recorded at all" -- see `recorded_tokens`.
+        self._recorded_tokens = 0
+
+    def reset_recorded(self) -> None:
+        """Zero the recorded-token counter. Called by the runtime at the start
+        of a turn; turns are serialized by `BaseRuntime._LOCK`, so one counter
+        per model object is enough."""
+        self._recorded_tokens = 0
+
+    @property
+    def recorded_tokens(self) -> int:
+        """Tokens written to the usage ledger since `reset_recorded()`.
+
+        This model records usage per *model call* (`_record_usage` below), and
+        one agent turn is many calls. A turn-level recorder on top of that
+        would double-count every openai chat turn -- which it did until this
+        counter existed, burning the openai daily budget at 2x the real rate.
+        Zero means nothing was recorded (no call succeeded, or the API
+        reported no usage) and the caller's own estimate should stand in."""
+        return self._recorded_tokens
 
     # -- delegate construction (default model_factory) -----------------------
 
@@ -219,7 +242,7 @@ class FallbackModel(Model):
                             service, model_name, action, exc)
                 continue
             else:
-                _record_usage(service, response)
+                self._recorded_tokens += _record_usage(service, response)
                 return response
 
         if last_exc is not None:
@@ -248,15 +271,17 @@ class FallbackModel(Model):
         raise NotImplementedError("FallbackModel.stream_response: bot chat does not stream today")
 
 
-def _record_usage(service: str, response: ModelResponse) -> None:
+def _record_usage(service: str, response: ModelResponse) -> int:
     """Usage recording (Decision 5): total_tokens when non-zero, else the sum
     of input_tokens + output_tokens. Only ever called for a link that just
-    succeeded — never for one that failed."""
+    succeeded — never for one that failed. Returns what it recorded, so the
+    caller can report whether this turn's usage is already on the ledger."""
     u = response.usage
     total = 0
     if u is not None:
         total = u.total_tokens or (u.input_tokens + u.output_tokens)
     usage.record(service, total)
+    return total
 
 
 def _classify_error(exc: Exception) -> str:

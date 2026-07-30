@@ -22,7 +22,9 @@ model call inside someone else's loop.
 first link that survives the skips. That choice is then **pinned** for the
 session by ``cio/bot.py``'s per-chat cache (locked decision D4): the two
 transcripts live in different places, so switching mid-thread would need a
-history sync and a mutating-tool ledger that do not exist.
+history sync and a mutating-tool ledger that do not exist. ``reselect_needed``
+is the one exception, and it unpins only when the pinned service has stopped
+being able to answer at all — see its docstring.
 
 Plan of record: docs/BOT-CHAT-OPENAI-MIGRATION.md.
 """
@@ -62,6 +64,58 @@ class BotRuntime(Protocol):
     async def close(self) -> None:
         """Release any connection/session resources this runtime holds."""
         ...
+
+
+def _link_usable(link: dict) -> bool:
+    """The same three skip rules ``select_runtime`` applies per link, factored
+    out so the staleness check below cannot drift from the selection walk."""
+    service = link.get("service")
+    if service == "nim":
+        return False
+    if engine.is_latched(service):
+        return False
+    if _usage.over_budget(service, link.get("daily_limit")):
+        return False
+    return True
+
+
+def reselect_needed(runtime: BotRuntime) -> bool:
+    """True when *runtime*'s pinned service can no longer answer but another
+    service in the chain still can.
+
+    Decision D4 pins one runtime per chat for the session, because the two
+    transcripts live in different places. That pin is applied at *selection*
+    time, so a service that goes over budget or gets limit-latched **after**
+    the pin strands the chat: ``FallbackModel`` only ever holds the chain's
+    openai links (cio/fallback_model.py:77-79), so an exhausted openai budget
+    raises "every openai link was skipped" on every turn while the chain's
+    claude link sits unreachable behind the cache.
+
+    This is the narrow escape hatch for exactly that state — not routine
+    re-routing. It says yes only when *both* hold:
+      * no link of the runtime's own service is usable any more, and
+      * some link of a different service is.
+    A chat that can still answer on its pinned service therefore never moves,
+    and neither does one where moving would not help.
+
+    ``CIO_BOT_ENGINE`` forces a runtime for debugging; an override is honoured
+    over budget, so it disables this entirely. Never raises: a lookup that
+    throws means "stay put", the same bias the rest of this module takes.
+    """
+    try:
+        if os.getenv("CIO_BOT_ENGINE"):
+            return False
+        service = getattr(runtime, "_service", None)
+        if service not in ("openai", "claude"):
+            return False   # unknown transport: not ours to second-guess
+        links = [l for l in (models.bot_chat_chain() or []) if isinstance(l, dict)]
+        if any(l.get("service") == service and _link_usable(l) for l in links):
+            return False   # the pinned service still has a live link
+        return any(l.get("service") not in (None, service) and _link_usable(l)
+                   for l in links)
+    except Exception:
+        log.exception("reselect_needed: staleness check failed; keeping the current runtime")
+        return False
 
 
 def select_runtime(chat_id: int, *, resume: str | None = None,
