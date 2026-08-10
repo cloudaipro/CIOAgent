@@ -17,6 +17,8 @@ model call inside someone else's loop.
   ``OpenAIRuntime``  — the Agents SDK loop runs in *this* process, with
                        ``FallbackModel`` walking the chain's openai links per
                        model call
+  ``CodexRuntime``   — Codex app-server drives the loop using ChatGPT account
+                       authentication and calls the CIO handlers as dynamic tools
 
 ``select_runtime`` walks the operator's chain and returns a runtime for the
 first link that survives the skips. That choice is then **pinned** for the
@@ -105,8 +107,10 @@ def reselect_needed(runtime: BotRuntime) -> bool:
     try:
         if os.getenv("CIO_BOT_ENGINE"):
             return False
+        if getattr(runtime, "_routing_fallback", False):
+            return False   # direct emergency fallback after selector failure
         service = getattr(runtime, "_service", None)
-        if service not in ("openai", "claude"):
+        if service not in ("openai", "claude", "codex"):
             return False   # unknown transport: not ours to second-guess
         links = [l for l in (models.bot_chat_chain() or []) if isinstance(l, dict)]
         if any(l.get("service") == service and _link_usable(l) for l in links):
@@ -127,21 +131,16 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
     (locked decision D5). ``models.bot_chat_link()`` resolves the identical
     chain, so the two can no longer disagree on which chain is in effect.
     Walked in order. Per link:
-      1. ``service == "nim"`` → skip. Bot chat is claude+openai only — 44 tools
-         is too wide a surface for a weak tool-caller.
+      1. ``service == "nim"`` → skip. Bot chat supports claude, the metered
+         OpenAI API, and ChatGPT-authenticated Codex; its wide tool surface is
+         not routed to NIM.
       2. the service is limit-latched → skip.
       3. the service is over its configured daily budget → skip.
-      4. ``service == "openai"`` → skip (logged). No OpenAIRuntime exists yet
-         (Step 12+); silently answering on Claude while claiming to honour an
-         openai link would be the same attribution dishonesty R4 exists to
-         prevent, so the walk continues to the next link instead.
-    The first ``claude`` (or otherwise unrecognized) link surviving all four
-    decides the runtime. *resume* and *on_session_id* are forwarded to it
-    unchanged — same constructor arguments ``cio.bot._agent()`` has always
-    passed.
+      4. ``openai`` builds OpenAIRuntime; ``codex`` builds the ChatGPT-
+         subscription CodexRuntime; ``claude`` builds ClaudeRuntime.
+    The first supported link surviving these checks decides the runtime.
 
-    ``CIO_BOT_ENGINE=claude`` forces ClaudeRuntime and skips chain resolution
-    entirely. Any other value is logged and ignored (Step 12+ adds ``openai``).
+    ``CIO_BOT_ENGINE=claude|openai|codex`` is a debugging override.
 
     Never raises. A chat that cannot answer is worse than one that answers over
     budget, so budget/latch are advisory here: a missing chain, an unknown
@@ -170,6 +169,15 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
             log.exception("select_runtime: could not build OpenAIRuntime; falling through")
             return None
 
+    def _codex(link: dict) -> BotRuntime | None:
+        """Build the ChatGPT-subscription runtime lazily."""
+        try:
+            from .agent_codex import CodexRuntime
+            return CodexRuntime(link, chat_id=chat_id, on_session_id=on_session_id)
+        except Exception:
+            log.exception("select_runtime: could not build CodexRuntime; falling through")
+            return None
+
     override = os.getenv("CIO_BOT_ENGINE")
     if override:
         if override == "claude":
@@ -190,7 +198,20 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
             log.warning("CIO_BOT_ENGINE=openai but the chain has no usable openai "
                         "link; using Claude")
             return _claude()
-        log.warning("CIO_BOT_ENGINE=%r not recognized (claude|openai); ignoring", override)
+        if override == "codex":
+            try:
+                link = next((l for l in (models.bot_chat_chain() or [])
+                             if isinstance(l, dict) and l.get("service") == "codex"), None)
+            except Exception:
+                log.exception("CIO_BOT_ENGINE=codex: chain lookup failed")
+                link = None
+            runtime = _codex(link) if link else None
+            if runtime is not None:
+                return runtime
+            log.warning("CIO_BOT_ENGINE=codex but the chain has no codex link; using Claude")
+            return _claude()
+        log.warning("CIO_BOT_ENGINE=%r not recognized (claude|openai|codex); ignoring",
+                    override)
 
     try:
         chain = models.bot_chat_chain() or []
@@ -206,7 +227,8 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
             service = link.get("service")
 
             if service == "nim":
-                log.info("select_runtime: nim link skipped (bot chat is claude+openai only)")
+                log.info("select_runtime: nim link skipped (bot chat supports codex, "
+                         "openai, and claude only)")
                 continue
             if engine.is_latched(service):
                 log.info("select_runtime: %s limit-latched; falling through", service)
@@ -228,6 +250,12 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
                 if runtime is not None:
                     return runtime
                 continue    # construction failed; try the next link
+
+            if service == "codex":
+                runtime = _codex(link)
+                if runtime is not None:
+                    return runtime
+                continue
 
             # service == "claude", or any value we don't recognize: Claude is
             # the safe default for the first link that survives the skips.

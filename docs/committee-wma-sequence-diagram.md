@@ -32,7 +32,7 @@ sequenceDiagram
     participant WEB as Web / Firecrawl<br/>(cio.web)
     participant BUNDLE as Bundle<br/>(committee.bundle)
     participant ENGINE as Engine<br/>(committee.engine)
-    participant LLM as LLM Backend<br/>(NIM / Claude / OpenAI)
+    participant LLM as LLM Backend<br/>(Codex / NIM / Claude / OpenAI)
     participant REPORT as Report<br/>(watchlist_monitor.report)
     participant BOT as Bot / Deliver
 
@@ -173,13 +173,13 @@ sequenceDiagram
     ENGINE->>LLM: ask_role MODERATOR_SYSTEM
     LLM-->>ENGINE: consensus yaml
 
-    note over ENGINE: Step 5 — CIO (serial, premium chain: Claude→OpenAI→NIM)
+    note over ENGINE: Step 5 — CIO (serial, premium chain: Codex→OpenAI→NIM)
     ENGINE->>MEM: recall_block("cio", symbol)
     MEM-->>ENGINE: cio memory block
-    ENGINE->>LLM: ask_role CIO_SYSTEM (Claude first, premium chain)
-    alt Claude returns text
+    ENGINE->>LLM: ask_role CIO_SYSTEM (Codex first, premium chain)
+    alt Codex returns text
         LLM-->>ENGINE: cio yaml
-    else Claude empty or over budget
+    else Codex empty or over budget
         ENGINE->>LLM: ask_role OpenAI fallback (premium link 2)
         LLM-->>ENGINE: cio yaml
     end
@@ -222,9 +222,9 @@ full transcript so each may revise or hold. Memory writes (`sanitize → save_no
 
 ## Single ask_role Chain Fallback Sequence
 
-Example uses `role_key="cio"` → **premium chain** (Claude → OpenAI → NIM). The walk
-mechanism is identical for all roles; `standard` (specialists) starts with OpenAI and
-`translation` (translator) starts with Claude Sonnet.
+Example uses `role_key="cio"` → **premium chain** (Codex → OpenAI → NIM). The walk
+mechanism is identical for all roles; `standard` (specialists) also starts with Codex,
+while `translation` (translator) starts with the OpenAI API.
 
 ```mermaid
 sequenceDiagram
@@ -233,26 +233,26 @@ sequenceDiagram
     participant AR as ask_role<br/>(engine.py)
     participant USAGE as usage.py<br/>(token budget)
     participant TRANS as transcript.py<br/>(capture)
-    participant CLAUDE as Claude SDK<br/>(claude-opus-4-8)
-    participant OPENAI as OpenAI API<br/>(gpt-5.5)
+    participant CODEX as Codex app-server<br/>(gpt-5.6-luna, max)
+    participant OPENAI as OpenAI API<br/>(gpt-5.6-terra)
     participant NIM as NIM API<br/>(kimi-k2.6)
 
     CALLER->>AR: ask_role(system, user, role_key="cio")
-    AR->>AR: resolve_chain("cio") → premium chain [Claude, OpenAI, NIM]
-    AR->>USAGE: over_budget("claude", 200000)?
+    AR->>AR: resolve_chain("cio") → premium chain [Codex, OpenAI, NIM]
+    AR->>USAGE: over_budget("codex", none)?
     USAGE-->>AR: False
 
-    AR->>CLAUDE: ClaudeSDKClient.connect + query
-    CLAUDE-->>AR: AssistantMessage stream
+    AR->>CODEX: thread/start + turn/start (effort=max)
+    CODEX-->>AR: ephemeral thread response
     AR->>AR: _is_limit_notice? → False
 
-    AR->>USAGE: record("claude", tokens)
+    AR->>USAGE: record("codex", tokens)
     AR->>TRANS: record(role_key, service, model, prompts, response, tokens)
     AR-->>CALLER: text (non-empty)
 
-    note over AR: If Claude returned empty or over budget:
+    note over AR: If Codex returned empty or over budget:
 
-    AR->>USAGE: over_budget("openai", 200000)?
+    AR->>USAGE: over_budget("openai", 120000)?
     USAGE-->>AR: False
     AR->>OPENAI: POST /chat/completions
     OPENAI-->>AR: 200 response

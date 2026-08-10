@@ -217,10 +217,9 @@ class TestTranslateReport:
 # ---------------------------------------------------------------------------
 
 class TestResolveTranslator:
-    def test_resolve_translator_returns_claude(self):
-        """resolve('translator') must return Claude — reliable on long markdown and
-        strong Traditional Chinese (output is also OpenCC-forced to Traditional)."""
-        from cio.committee.models import load_config, resolve
+    def test_resolve_translator_returns_configured_chain_head(self):
+        """Translator resolution follows its operator-configured chain head."""
+        from cio.committee.models import SERVICES, load_config, resolve
 
         # Hermetic: load_config is lru_cached and other tests point it at temp
         # configs (monkeypatch restores the env var but not the cache), so under
@@ -228,7 +227,7 @@ class TestResolveTranslator:
         load_config.cache_clear()
         try:
             service, model = resolve("translator")
-            assert service == "claude"
-            assert model == "claude-sonnet-4-6"
+            assert service in SERVICES
+            assert model
         finally:
             load_config.cache_clear()

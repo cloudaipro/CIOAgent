@@ -186,10 +186,10 @@ stateDiagram-v2
     state "Step 5 — CIO Decision" as CIOStep {
         [*] --> RecallCIOMemory
         RecallCIOMemory --> CIOChainCall
-        state "Chain Fallback (premium: Claude→OpenAI→NIM)" as CIOChainCall {
-            [*] --> TryClaude
-            TryClaude --> CIODone : non-empty text
-            TryClaude --> TryOpenAI : empty or over budget
+        state "Chain Fallback (premium: Codex→OpenAI→NIM)" as CIOChainCall {
+            [*] --> TryCodex
+            TryCodex --> CIODone : non-empty text
+            TryCodex --> TryOpenAI : empty or over budget
             TryOpenAI --> CIODone : non-empty text
             TryOpenAI --> TryNIM : empty or over budget
             TryNIM --> CIODone : text

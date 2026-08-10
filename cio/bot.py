@@ -37,6 +37,7 @@ from telegram.ext import (
 from . import alpha, charts, memory, recall, richmsg, scheduler, watchlist
 from .agent import CIOAgent
 from .bot_runtime import BotRuntime, reselect_needed, select_runtime
+from .committee import engine as committee_engine
 
 load_dotenv()
 from .logsetup import configure_logging
@@ -172,8 +173,10 @@ def _agent(chat_id: int) -> BotRuntime:
             # R2: a routing bug must never take the bot down — degrade to the
             # same direct construction this call site used before Step 11.
             log.exception("select_runtime failed for chat %s; using CIOAgent directly", chat_id)
-            _agents[chat_id] = CIOAgent(
+            fallback = CIOAgent(
                 resume=resume, on_session_id=on_session_id, chat_id=chat_id)
+            fallback._routing_fallback = True
+            _agents[chat_id] = fallback
     return _agents[chat_id]
 
 
@@ -235,7 +238,8 @@ def _is_transport_error(exc: BaseException) -> bool:
         if e is None:
             continue
         if type(e).__name__ in ("CLIConnectionError", "CLINotFoundError",
-                                "ProcessError", "ClaudeSDKError"):
+                                "ProcessError", "ClaudeSDKError",
+                                "CodexAppServerError"):
             return True
         # The SDK's message reader re-raises a dead CLI as a bare Exception, so
         # the text is all we get to go on.
@@ -785,6 +789,7 @@ async def _post_shutdown(app: Application) -> None:
     sched = app.bot_data.get("scheduler")
     if sched:
         sched.shutdown(wait=False)
+    await committee_engine.close_codex_backend()
 
 
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

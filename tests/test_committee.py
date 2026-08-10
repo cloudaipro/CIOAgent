@@ -1336,7 +1336,8 @@ class TestModelsConfig:
         from cio.committee.models import resolve, resolve_chain
         head = resolve_chain("nonexistent_role_xyz")[0]
         assert resolve("nonexistent_role_xyz") == (head["service"], head["model"])
-        assert head["service"] in ("claude", "openai", "nim")
+        from cio.committee.models import SERVICES
+        assert head["service"] in SERVICES
 
     def test_missing_file_uses_builtin_defaults(self, tmp_path):
         """Missing config file → built-in defaults, no crash."""

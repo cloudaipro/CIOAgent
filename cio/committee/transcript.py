@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS committee_transcript (
     run_id        TEXT,                       -- one committee run (groups calls)
     symbol        TEXT,
     role_key      TEXT,                       -- specialist/moderator/cio/debate role
-    service       TEXT,                       -- openai | claude | nim
+    service       TEXT,                       -- codex | openai | claude | nim
     model         TEXT,
     system_prompt TEXT,                       -- content SENT (system)
     user_prompt   TEXT,                       -- content SENT (user)

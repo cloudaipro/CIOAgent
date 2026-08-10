@@ -10,10 +10,12 @@ optional **Traditional Chinese** version). Every trading morning a scheduled
 **Watchlist Monitoring Agent** (`/briefing`) delivers a pre-market briefing on your
 watchlist.
 
-The conversational agent runs on your **Claude Pro subscription** via `claude-agent-sdk`
-— **no ANTHROPIC_API_KEY needed** (the `claude` CLI must be installed and logged in). The
-committee's agents are pluggable across three model backends — **Claude**, **NVIDIA NIM**,
-and **OpenAI** — and every agent runs a **named daily-token-budget fallback chain** so any
+The conversational agent can run on either your **ChatGPT subscription** through the
+logged-in Codex CLI, your **Claude Pro subscription** through `claude-agent-sdk`, or the
+metered OpenAI API. Subscription routes need no provider API key; their respective CLI
+must be installed and logged in. The committee's agents are pluggable across four model
+backends — **Codex**, **Claude**, **NVIDIA NIM**, and **OpenAI** — and every agent runs a
+**named daily-token-budget fallback chain** so any
 backend outage or budget exhaustion degrades gracefully instead of silencing a role.
 
 ## Architecture
@@ -21,7 +23,8 @@ backend outage or budget exhaustion degrades gracefully instead of silencing a r
 ```
 Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
                   │
-                  ├─► cio/agent.py      Claude agent (Pro auth) + 44 in-process MCP tools
+                  ├─► cio/agent.py      Claude-compatible runtime + 44 in-process CIO tools
+                  │     cio/agent_codex.py  ChatGPT-authenticated Codex app-server runtime
                   │     cio/portfolio.py  pandas/SQLite: cost basis, P&L, valuation
                   │     cio/watchlist.py  named symbol lists (one active) + CSV import + prices
                   │     cio/charts.py     matplotlib → PNG (incl. /watchlist quote-board)
@@ -40,6 +43,7 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   ├─► cio/committee/*   investment committee pipeline:
                   │     bundle → 9 specialists → debate → consensus → CIO → report
                   │     models.py  named-chain router: every agent references a reusable fallback chain
+                  │     engine.py  shared Codex/OpenAI/Claude/NIM one-shot dispatcher
                   │     agent_memory.py  isolated per-agent memory (committee.db, WAL) + dedup
                   │     note_sanitizer.py  LLM figures-sanitizer (salvage) + sanitizer_log.py audit
                   │     render_pdf.py / translate.py  PDF + 繁體中文
@@ -165,13 +169,14 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   semantic check (embedding distance) collapses paraphrases, so an agent re-deriving the
   same lesson reinforces one note instead of spawning twins.
 - **Model services** (`config/committee_models.yaml`): every agent references a
-  **named fallback chain** — an ordered 3-link list of `{service, model, daily_limit?}`.
-  Three built-in settings ship: `premium` (Claude Opus head → OpenAI → NIM, used by CIO
-  and WMA), `standard` (OpenAI head → Claude Opus → NIM, used by all 9 specialists and
-  moderator), and `translation` (Claude Sonnet head → OpenAI mini → NIM, used by the
-  translator). `ask_role` walks the chain, skips any link whose daily token budget is
-  spent, and falls through on error/empty. New settings can be added from the dashboard
-  **Configure** page; per-agent assignment is a dropdown — no text editor needed.
+  **named fallback chain** — an ordered 3-link list of `{service, model, daily_limit?,
+  reasoning_effort?}`. The current `premium` and `standard` settings start with the
+  ChatGPT-subscription Codex route (`gpt-5.6-luna`, `max` thinking), then the metered
+  OpenAI API (`gpt-5.6-terra`, 120k daily), then NIM. `translation` currently uses the
+  OpenAI API followed by NIM fallbacks. `ask_role` walks the chain, skips any link whose
+  daily token budget is spent, and falls through on error/empty. New settings can be
+  added from the dashboard **Configure** page; per-agent assignment is a dropdown — no
+  text editor needed.
 - **Output-token caps** are configurable per backend (env overrides yaml):
   `CIO_OPENAI_MAX_TOKENS` / `nim.max_tokens` `CIO_NIM_MAX_TOKENS` (default 2048), and the
   OpenAI param name `CIO_OPENAI_TOKEN_PARAM` (gpt-5.x = `max_completion_tokens`, older
@@ -224,9 +229,10 @@ what deserves a deeper look.
 - **On demand**: `/briefing` (active watchlist) or `/briefing NVDA MU` (specific symbols);
   add `zh` for a **Traditional Chinese** briefing. CLI: `python -m cio.watchlist_monitor [SYMBOL…] [zh]`.
 - **Model chain** (`config/committee_models.yaml`, role `wma`): uses the `premium` named
-  chain — Claude Opus `claude-opus-4-8` (daily 200k) → OpenAI `gpt-5.5-2026-04-23`
-  (daily 200k) → NVIDIA NIM `kimi-k2.6` (last resort) — the same fallback machinery as
-  the CIO.
+  chain — Codex `gpt-5.6-luna` (`max`) → OpenAI `gpt-5.6-terra` (daily 120k) → NVIDIA
+  NIM `kimi-k2.6` (last resort) — the same fallback machinery as the CIO. Codex is
+  invoked through one shared app-server process with a separate ephemeral thread for
+  each assessment.
 
 ## Alpha Hunter (`/alpha`)
 
@@ -347,8 +353,15 @@ In `.env`:
   **Set this**: unset means the bot answers anyone who finds it. Send `/start` to read
   your chat id (the bot echoes it), then add it here.
 - `NVIDIA_API_KEY` — required for committee agents on NIM (`build.nvidia.com`).
-- `OPENAI_API_KEY` — used by `standard` chain (specialists) as head link and by `premium`
-  chain (CIO/WMA) as the second link; absent → those links are skipped, next link used.
+- `OPENAI_API_KEY` — used by the current `standard` and `premium` chains as the second
+  link, and by `translation` as its head link; absent → those links are skipped, next
+  link used.
+- `CIO_BOT_ENGINE=codex` — optional debugging override that forces the ChatGPT-subscription
+  bot-chat runtime. Normal operation follows the `bot_chat` fallback chain instead.
+- `CIO_CODEX_HOME` — optional Codex authentication directory when it differs from `HOME`;
+  `CIO_CODEX_BIN` selects a non-default CLI path.
+- `CIO_CODEX_REASONING_EFFORT` — temporary process-wide Codex override (`low`, `medium`,
+  `high`, `xhigh`, `max`, or `ultra`); chain settings are preferred for normal operation.
 - `CIO_FIRECRAWL_URL` — web search/scrape endpoint (defaults to a self-hosted
   `http://localhost:3002`, no key); set `FIRECRAWL_API_KEY` for Firecrawl cloud.
   Tune with `CIO_WEB_MAX_CHARS` (per-result cap, 6000) and `CIO_WEB_TIMEOUT` (45s).
@@ -365,6 +378,26 @@ In `.env`:
 
 The committee report PDF needs WeasyPrint's system libraries (pango/cairo/gdk-pixbuf/
 harfbuzz) — already present on most Linux desktops.
+
+### Use ChatGPT Plus for cio.bot agents
+
+ChatGPT Plus is not an OpenAI API credit balance, so cio.bot does not send the Plus login
+token to `api.openai.com`. The `codex` route starts OpenAI's Codex app-server and requires it
+to report a ChatGPT-authenticated account before a turn can run.
+
+```bash
+npm install -g @openai/codex   # skip when `codex --version` already works
+codex login                    # choose ChatGPT sign-in
+codex --version
+```
+
+Run those commands as the same OS user and with the same `HOME`/`CODEX_HOME` used by the
+systemd service. Codex links can be assigned to bot chat, committee roles, moderator/CIO,
+translation, and watchlist monitoring. The current chains use `gpt-5.6-luna` at `max`
+thinking. Dashboard → Configure can select `low`, `medium`,
+`high`, `extra high` (`xhigh`), `max`, or `ultra`; availability depends on the model.
+Details and diagnostics:
+**[docs/OPENAI-SUBSCRIPTION.md](docs/OPENAI-SUBSCRIPTION.md)**.
 
 ## Use (in Telegram)
 
@@ -463,7 +496,7 @@ Memory / Committee / Playbooks / Econ-events pages. Every mutation POSTs then re
 
 Pages:
 
-- **Token usage** — OpenAI / Claude / NIM tokens per service per UTC day (from `committee.db`).
+- **Token usage** — Codex / OpenAI / Claude / NIM tokens per service per UTC day (from `committee.db`).
 - **Telegram** — conversation history **grouped by local day**, with a day selector at the
   top (click a day to view only it) and a per-day **delete** button.
 - **Subscribers** — chats opted in to the daily digest + 06:00 watchlist briefing
@@ -519,14 +552,10 @@ Pages:
   Saves round-trip the YAML (comments preserved via `ruamel.yaml`) and clears the config
   cache so edits apply to the next run.
   **General bot chat fallback chain** — a dropdown to pick the named fallback chain the
-  conversational Telegram agent (`CIOAgent`) uses; the bot applies that chain's first
-  Claude-service link as its SDK model, persisted to `data/dashboard_settings.json` so
-  it takes effect on the next session roll. *In progress on the
-  `feat/configure-bot-chat-fallback-chain` branch* — check it out to try:
-
-  ```bash
-  git checkout feat/configure-bot-chat-fallback-chain
-  ```
+  conversational Telegram agent uses. Codex, OpenAI, and Claude links select their
+  corresponding whole-turn runtime; NIM links are skipped for bot chat because it has
+  no compatible tool-calling runtime. The selected Codex link also exposes its thinking
+  level (`low`, `medium`, `high`, `xhigh`, `max`, or `ultra`).
 
 Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:
 

@@ -23,18 +23,18 @@ setting **by name**:
 
 ```yaml
 chains:
-  premium:                                  # paid head → subscription → cheap
-  - {service: openai, model: gpt-5.5-2026-04-23}
-  - {service: claude, model: claude-opus-4-8}
+  premium:                                  # subscription head → API → cheap
+  - {service: codex, model: gpt-5.6-luna, reasoning_effort: max}
+  - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   standard:                                 # subscription head → paid → cheap
-  - {service: claude, model: claude-opus-4-8}
-  - {service: openai, model: gpt-5.5-2026-04-23}
+  - {service: codex, model: gpt-5.6-luna, reasoning_effort: max}
+  - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
-  translation:                              # sonnet head (long-markdown TC)
-  - {service: claude, model: claude-sonnet-4-6}
-  - {service: claude, model: claude-opus-4-8}
+  translation:                              # API head (long-markdown TC)
+  - {service: openai, model: gpt-5.4-mini-2026-03-17}
   - {service: nim, model: moonshotai/kimi-k2.6}
+  - {service: nim, model: minimaxai/minimax-m2.7}
 defaults: {chain: standard}
 agents:
   market: {chain: standard}
@@ -55,7 +55,7 @@ agents:
 
 `engine.ask_role(system, user, role_key=…)` is the single LLM entry point for the
 entire system: every feature that needs a model answer funnels through this one
-function — no caller talks to a backend (OpenAI / Claude SDK / NIM) directly.
+function — no caller talks to a backend (Codex / OpenAI / Claude SDK / NIM) directly.
 That is why implementing the chain walk once, inside `ask_role`, automatically
 gave the fallback mechanism to all agents:
 
@@ -88,11 +88,13 @@ flowchart TD
     RC --> WALK["Walk links in order. Per link:<br>1. usage.over_budget(service, daily_limit)? -> skip link<br>2. _dispatch to the link's backend<br>3. usage.record(service, tokens)<br>4. non-empty text -> RETURN; empty -> next link"]
 
     subgraph BACKENDS["Backends (_dispatch)"]
+        CDX["_ask_codex<br>ChatGPT subscription<br>ephemeral app-server thread"]
         OAI["_ask_openai<br>OpenAI API"]
         CLA["_ask_claude<br>claude-agent-sdk"]
         NIM["_ask_nim<br>NVIDIA NIM"]
     end
 
+    WALK --> CDX
     WALK --> OAI
     WALK --> CLA
     WALK --> NIM
@@ -110,6 +112,8 @@ role's named chain and walks it. It falls through a link when:
 2. the backend returns empty — missing API key, API error, timeout, or a
    rate/session-limit notice (`_is_limit_notice`).
 
+Codex links also carry optional `reasoning_effort`; it is passed to each turn.
+Parallel agents share one app-server process but receive separate ephemeral threads.
 Tokens of every attempt are recorded per service per local day (`usage.record`).
 `""` is returned only when every link is exhausted. Budget accounting is
 **per service**, so an over-budget `openai` is skipped in *every* chain that
@@ -185,8 +189,8 @@ the repo yaml assert only the MECHANISM (named resolution, structure,
 3-link shape); all content/budget semantics run against pinned temp configs.
 
 ### A. Config resolution (`tests/test_fallback_chain.py`)
-- repo yaml: cio→`premium` (openai/claude/nim), specialists→`standard` (claude head,
-  3 links), translator→`translation` (sonnet head), unknown role→defaults chain,
+- repo yaml: cio→`premium` (codex/openai/nim), specialists→`standard` (codex head,
+  3 links), translator→`translation` (OpenAI head), unknown role→defaults chain,
   `resolve()` == chain head, `chain_names()` complete — **pass**
 - temp yaml: named lookup with limits, unknown chain name → defaults fallback,
   legacy inline chain, legacy `{service, model}` agent, legacy defaults,

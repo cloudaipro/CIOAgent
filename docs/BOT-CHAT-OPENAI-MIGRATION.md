@@ -1,8 +1,24 @@
 # Bot Chat → OpenAI Agents SDK — Migration Plan
 
-*Status: PLAN (not built). Owner decisions locked 2026-07-27.*
-*Scope: the general Telegram bot chat only (`cio/agent.py::CIOAgent`). Committee, WMA and
-Alpha Hunter transports are untouched.*
+*Status: BUILT. OpenAI API runtime completed 2026-07; ChatGPT-subscription Codex
+runtime added 2026-08-09.*
+*Original scope: general Telegram bot chat. A 2026-08-09 follow-up also added the
+ChatGPT-subscription Codex backend to the shared committee/WMA agent dispatcher.*
+
+> 2026-08-09 addendum: sections below describe the original two-runtime migration.
+> Bot chat now has a third whole-turn runtime, `CodexRuntime` (`cio/agent_codex.py`),
+> hosted by Codex app-server and authenticated with `codex login`. It reuses the same
+> CIO handlers through app-server dynamic tools. `openai` remains the API-key service;
+> `codex` is the separately attributed ChatGPT-subscription service. See
+> `docs/OPENAI-SUBSCRIPTION.md` for the operational contract.
+>
+> Follow-up: `committee.engine.ask_role` now dispatches `service: codex` through
+> app-server as isolated, tool-free, ephemeral turns. This covers specialists,
+> debate, moderator, CIO, WMA, macro snapshots, note sanitization, and translation.
+>
+> The historical examples below describe the original OpenAI API/Claude migration. For
+> current chain order, Codex thinking levels, authentication, and agent coverage, use
+> `docs/OPENAI-SUBSCRIPTION.md` and `config/committee_models.yaml`.
 
 ---
 

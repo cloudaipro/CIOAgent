@@ -2,7 +2,8 @@
 engine.py — Committee orchestration engine.
 
 Single LLM entry point: ask_role (monkeypatchable for tests).
-Supports two backends: claude-agent-sdk ("claude") and NVIDIA NIM ("nim").
+Supports ChatGPT-authenticated Codex, the OpenAI API, claude-agent-sdk, and
+NVIDIA NIM.
 Round-1 specialists, debate cross-exam pairs, and round-3 revisions run in
 parallel by default (CIO_PARALLEL=on); moderator + CIO stay serial.
 """
@@ -82,6 +83,22 @@ capture_call = _capture
 
 PARALLEL = os.getenv("CIO_PARALLEL", "on").lower() not in ("off", "0", "false", "no")
 MAX_CONC = int(os.getenv("CIO_MAX_CONCURRENCY", "8"))
+
+
+# The committee's one-shot Codex calls share one app-server process while each
+# call gets its own ephemeral thread.  This preserves role isolation and avoids
+# spawning one CLI process per parallel specialist.
+_CODEX_CLIENT = None
+_CODEX_CLIENT_LOOP: asyncio.AbstractEventLoop | None = None
+_CODEX_CLIENT_LOCK: asyncio.Lock | None = None
+
+_CODEX_ONESHOT_DEVELOPER_INSTRUCTIONS = """
+You are serving as one analytical agent inside cio.bot. Follow the supplied
+base instructions and answer only the user's one-shot prompt. Do not inspect
+files, run shell commands, modify the workspace, or call tools. The prompt
+already contains the evidence you should analyze. Return only the requested
+answer, preserving any required YAML or Markdown format.
+""".strip()
 
 
 async def _gather_bounded(coros, parallel: bool) -> list:
@@ -202,6 +219,76 @@ async def _ask_openai(system_prompt: str, user_prompt: str, model: str | None = 
         log.warning("_ask_openai failed: %s", e)
         return ("", 0)
 
+
+# ---------------------------------------------------------------------------
+# Codex backend (ChatGPT subscription via app-server)
+# ---------------------------------------------------------------------------
+
+async def _codex_client():
+    """Return the event loop's shared, initialized one-shot app-server client."""
+    global _CODEX_CLIENT, _CODEX_CLIENT_LOOP, _CODEX_CLIENT_LOCK
+    loop = asyncio.get_running_loop()
+    if _CODEX_CLIENT_LOOP is not loop:
+        _CODEX_CLIENT = None
+        _CODEX_CLIENT_LOOP = loop
+        _CODEX_CLIENT_LOCK = asyncio.Lock()
+    assert _CODEX_CLIENT_LOCK is not None
+    async with _CODEX_CLIENT_LOCK:
+        if _CODEX_CLIENT is None:
+            from ..agent_codex import CodexAppServer
+            _CODEX_CLIENT = CodexAppServer(tools=[])
+        await _CODEX_CLIENT.start()
+        return _CODEX_CLIENT
+
+
+async def close_codex_backend() -> None:
+    """Close the shared one-shot Codex process during graceful bot shutdown."""
+    global _CODEX_CLIENT, _CODEX_CLIENT_LOOP, _CODEX_CLIENT_LOCK
+    client, _CODEX_CLIENT = _CODEX_CLIENT, None
+    _CODEX_CLIENT_LOOP = None
+    _CODEX_CLIENT_LOCK = None
+    if client is not None:
+        await client.close()
+
+
+async def _ask_codex(
+    system_prompt: str,
+    user_prompt: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> tuple[str, int]:
+    """One-shot query billed through the account authenticated by ``codex login``."""
+    from .. import context
+
+    effective_model = model
+    if str(effective_model).lower() in ("default", "subscription-default"):
+        effective_model = None
+    effort = os.getenv("CIO_CODEX_REASONING_EFFORT") or reasoning_effort
+    effort = str(effort).strip().lower() if effort else None
+    if effort in ("default", "auto", "none"):
+        effort = None
+
+    try:
+        client = await _codex_client()
+        thread_id = await client.start_thread(
+            model=effective_model,
+            instructions=system_prompt,
+            developer_instructions=_CODEX_ONESHOT_DEVELOPER_INSTRUCTIONS,
+            ephemeral=True,
+        )
+        text, tokens = await client.run_turn(thread_id, user_prompt, effort=effort)
+        text = (text or "").strip()
+        if _is_limit_notice(text):
+            log.warning("_ask_codex hit a limit notice; treating as empty")
+            _latch("codex")
+            return ("", 0)
+        if tokens <= 0:
+            tokens = context.count_tokens(system_prompt + user_prompt + text)
+        return (text, tokens)
+    except Exception as exc:
+        log.warning("_ask_codex failed: %s", exc)
+        _latch("codex")
+        return ("", 0)
 
 # ---------------------------------------------------------------------------
 # Claude backend
@@ -429,13 +516,20 @@ async def _dispatch(
     system_prompt: str,
     user_prompt: str,
     model: str | None,
+    reasoning_effort: str | None = None,
 ) -> tuple[str, int]:
     """Route one call to the correct backend; return (text, tokens)."""
     if service == "openai":
         return await _ask_openai(system_prompt, user_prompt, model)
     if service == "nim":
         return await _ask_nim(system_prompt, user_prompt, model)
-    return await _ask_claude(system_prompt, user_prompt, model)
+    if service == "codex":
+        return await _ask_codex(
+            system_prompt, user_prompt, model, reasoning_effort=reasoning_effort)
+    if service == "claude":
+        return await _ask_claude(system_prompt, user_prompt, model)
+    log.warning("unknown model service %r; returning empty", service)
+    return ("", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +542,7 @@ async def ask_role(
     role_key: str | None = None,
     service: str | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> str:
     """
     Route one LLM call to the correct backend, with chain-aware fallback for CIO.
@@ -474,7 +569,14 @@ async def ask_role(
         effective_model = model if model is not None else resolved_model
         log.info("agent %s → %s:%s (explicit)", role_key or "?", service,
                  effective_model or "(default)")
-        text, tok = await _dispatch(service, system_prompt, user_prompt, effective_model)
+        if reasoning_effort is None and role_key is not None:
+            for link in _resolve_chain(role_key):
+                if (link.get("service") == service
+                        and (model is None or link.get("model") == effective_model)):
+                    reasoning_effort = link.get("reasoning_effort")
+                    break
+        text, tok = await _dispatch(
+            service, system_prompt, user_prompt, effective_model, reasoning_effort)
         _usage.record(service, tok)
         _capture(service, effective_model, system_prompt, user_prompt, text, tok, role_key)
         return text
@@ -496,6 +598,7 @@ async def ask_role(
     for link in chain:
         svc = link["service"]
         mdl = link.get("model")
+        effort = link.get("reasoning_effort")
         limit = link.get("daily_limit")  # None means no cap
 
         if _latched(svc):
@@ -506,8 +609,9 @@ async def ask_role(
             log.info("budget: %s at daily limit; falling through", svc)
             continue
 
-        log.info("agent %s → %s:%s", role_key, svc, mdl or "(default)")
-        text, tok = await _dispatch(svc, system_prompt, user_prompt, mdl)
+        effort_log = f" (thinking={effort})" if svc == "codex" and effort else ""
+        log.info("agent %s → %s:%s%s", role_key, svc, mdl or "(default)", effort_log)
+        text, tok = await _dispatch(svc, system_prompt, user_prompt, mdl, effort)
         _usage.record(svc, tok)
         _capture(svc, mdl, system_prompt, user_prompt, text, tok, role_key)
 

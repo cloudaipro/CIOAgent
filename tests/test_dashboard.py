@@ -91,18 +91,24 @@ def test_render_configure_named_chains():
                 {"service": "nim", "model": "n1"},
             ],
             "standard": [{"service": "claude", "model": "c1"}],
+            "bot_chat": [{"service": "codex", "model": "gpt-x",
+                          "reasoning_effort": "max"}],
         },
         "defaults": {"chain": "standard"},
         "agents": {"market": {"chain": "standard"}, "cio": {"chain": "premium"},
                    "legacyboi": {"service": "claude", "model": "x"}},
     }
-    sugg = {"claude": ["c1"], "openai": ["g1"], "nim": ["n1"]}
-    html = views.render_configure(cfg, 1, ["claude", "nim", "openai"], sugg)
+    sugg = {"claude": ["c1"], "openai": ["g1"], "nim": ["n1"],
+            "codex": ["gpt-x"]}
+    html = views.render_configure(cfg, 1, ["claude", "nim", "openai", "codex"], sugg)
     # chain editor
     assert "chainlink:premium:0:service" in html
     assert "chainlink:premium:2:daily_limit" in html
     assert "chain_del:premium" in html
     assert "chain_add" in html
+    assert "chainlink:bot_chat:0:reasoning_effort" in html
+    assert "value='max' selected" in html
+    assert "Thinking (Codex)" in html
     # per-agent chain dropdowns incl. defaults
     assert "defaults:chain" in html
     assert "agent:market:chain" in html

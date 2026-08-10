@@ -129,6 +129,13 @@ class TestSelectRuntimeChainWalk:
         # must NOT have been reached.
         assert "every bot_chat link was skipped" not in caplog.text
 
+    def test_codex_subscription_link_is_honoured(self, monkeypatch):
+        _set_chain(monkeypatch, [{"service": "codex", "model": "default"}])
+        rt = bot_runtime.select_runtime(chat_id=118)
+        assert type(rt).__name__ == "CodexRuntime"
+        assert rt._service == "codex"
+        assert rt._model is None
+
     def test_openai_runtime_receives_every_openai_link_from_here_on(self, monkeypatch):
         """FallbackModel walks per model call, so it must get the openai links
         BEHIND the selected one too — otherwise a rate limit on the head has
@@ -274,6 +281,15 @@ class TestEngineOverride:
         rt = bot_runtime.select_runtime(chat_id=117)
         assert isinstance(rt, bot_runtime.ClaudeRuntime)
         assert "no usable openai link" in caplog.text
+
+    def test_codex_override_forces_subscription_runtime(self, monkeypatch):
+        monkeypatch.setenv("CIO_BOT_ENGINE", "codex")
+        _set_chain(monkeypatch, [
+            {"service": "openai", "model": "gpt-test"},
+            {"service": "codex", "model": "default"},
+        ])
+        rt = bot_runtime.select_runtime(chat_id=119)
+        assert type(rt).__name__ == "CodexRuntime"
 
 
 # ---------------------------------------------------------------------------

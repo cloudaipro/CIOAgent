@@ -1,6 +1,7 @@
 # Per-agent model routing for the investment committee.
 # service: "claude" = claude-agent-sdk (subscription, no key) | "nim" = NVIDIA NIM (needs NVIDIA_API_KEY)
 #          "openai" = OpenAI API (needs OPENAI_API_KEY)
+#          "codex" = OpenAI via ChatGPT subscription (`codex login`, no API key)
 #
 # chains: named fallback-chain settings. Each setting is an ordered list of
 # 3 links {service, model, daily_limit?}; ask_role walks them in order and
@@ -8,16 +9,16 @@
 # (key missing / API error / limit notice). Add/edit/remove settings here or
 # from the dashboard Configure tab.
 chains:
-  # premium: paid head -> subscription -> cheap last resort (cio, wma).
+  # premium: ChatGPT subscription -> metered API -> cheap last resort (cio, wma).
   premium:
+  - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
-  - {service: claude, model: claude-opus-5}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # standard: subscription head (same primary the specialists always used),
   # degrading to paid then cheap.
   standard:
-  - {service: openai, model: gpt-5.6-terra}
-  - {service: claude, model: claude-opus-5, daily_limit: 120000}
+  - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
+  - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # translation: Claude sonnet head — reliable on long markdown + strong
   # Traditional Chinese. Output is ALSO post-converted with OpenCC s2twp
@@ -25,14 +26,15 @@ chains:
   # regardless of which backend answers.
   translation:
   - {service: openai, model: gpt-5.4-mini-2026-03-17}
-  - {service: claude, model: claude-sonnet-5}
   - {service: nim, model: moonshotai/kimi-k2.6}
-  # bot_chat: the general Telegram chat's chain. claude+openai only — no nim
-  # link (a 42-tool surface needs a strong tool-caller). Claude first preserves
-  # today's billing (chat runs on the subscription).
+  - {service: nim, model: minimaxai/minimax-m2.7}
+  # bot_chat: general Telegram chat. It supports codex+openai+claude; nim is skipped.
+  # The first link needs a strong tool-caller. Codex uses the
+  # logged-in ChatGPT subscription; metered OpenAI API and Claude are fallbacks.
   bot_chat:
+  - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
-  - {service: claude, model: claude-opus-5}
+  - {service: nim, model: moonshotai/kimi-k2.6}
 # defaults.chain: the setting used by any agent not listed below.
 defaults: {chain: premium}
 # agents.<key>.chain: name of the chain setting that agent uses.
@@ -79,3 +81,7 @@ model_catalog:
   - gpt-5.6-sol
   - gpt-5.5-2026-04-23
   - gpt-5.4-mini-2026-03-17
+  codex:
+  - gpt-5.6-sol
+  - gpt-5.6-terra
+  - gpt-5.6-luna

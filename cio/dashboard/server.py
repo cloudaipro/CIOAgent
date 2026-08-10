@@ -620,8 +620,21 @@ class _Handler(BaseHTTPRequestHandler):
                     mdl = f(f"chainlink:{cname}:{i}:model")
                     if svc:
                         link["service"] = svc
+                        if svc != "codex":
+                            link.pop("reasoning_effort", None)
                     if mdl:
                         link["model"] = mdl
+                    effort_key = f"chainlink:{cname}:{i}:reasoning_effort"
+                    if effort_key in form:
+                        effort = f(effort_key).strip().lower()
+                        if effort in ("", "default", "auto"):
+                            link.pop("reasoning_effort", None)
+                        elif effort not in models.CODEX_REASONING_EFFORTS:
+                            raise ValueError(
+                                f"bad Codex thinking level {effort!r}; choose "
+                                + ", ".join(models.CODEX_REASONING_EFFORTS))
+                        else:
+                            link["reasoning_effort"] = effort
                     # Only touch daily_limit when the field was actually posted:
                     # present+blank = clear; absent (partial POST) = leave as is.
                     dl_key = f"chainlink:{cname}:{i}:daily_limit"

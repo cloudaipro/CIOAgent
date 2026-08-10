@@ -8,10 +8,11 @@ research report. A scheduled **Watchlist Monitoring Agent** delivers a pre-marke
 briefing on the watchlist every trading morning. It runs 24/7 with a tiered,
 self-improving memory layer (MemCore).
 
-The conversational agent is built on `claude-agent-sdk` using **Claude Code Pro
-authentication — no `ANTHROPIC_API_KEY`**. Embeddings and search are fully local. The
-committee's agents are pluggable per-role across three backends — the **Claude
-subscription**, **NVIDIA NIM** (OpenAI-compatible), and the **OpenAI API** — and every
+The conversational agent supports the ChatGPT subscription through Codex app-server,
+Claude Code Pro through `claude-agent-sdk`, and the metered OpenAI API. Embeddings and
+search are fully local. The committee's agents are pluggable per-role across four
+backends — **Codex**, the **Claude subscription**, **NVIDIA NIM** (OpenAI-compatible),
+and the **OpenAI API** — and every
 agent runs a **named daily-token-budget fallback chain**, so a backend outage or budget
 exhaustion degrades gracefully instead of silencing a role. The
 final report is delivered as a **PDF**, with an on-request **Traditional Chinese** version.
@@ -356,18 +357,22 @@ text so it cannot leak into the report or debate transcript.
 ### 6.3 Model services (`models.py`, `config/committee_models.yaml`)
 Every call goes through `engine.ask_role(system, user, role_key)`, which resolves a
 per-agent **named fallback chain** from the config file (optional; missing → built-in
-defaults) and dispatches via `_dispatch` to one of three backends:
+defaults) and dispatches via `_dispatch` to one of four backends:
+- **`_ask_codex`** — ChatGPT subscription through Codex app-server. Committee-style
+  calls use a shared process with isolated ephemeral threads and no dynamic tools;
+  `reasoning_effort` is passed per Codex link.
 - **`_ask_claude`** — `claude-agent-sdk` one-shot (subscription, no key).
 - **`_ask_nim`** — NVIDIA NIM, OpenAI-compatible `chat/completions` via `httpx`, Bearer
   `NVIDIA_API_KEY`.
 - **`_ask_openai`** — OpenAI API via the `openai` SDK (`OPENAI_API_KEY`, default model
-  `gpt-5.5-2026-04-23`).
+`gpt-5.5-2026-04-23`).
 Each backend returns `(text, tokens)` — real usage from the API (`usage.total_tokens`,
 `AssistantMessage.usage`), estimated via `tiktoken` only when omitted. A missing key →
 `("", 0)` so the run degrades gracefully. Shipped default chains: 9 specialists +
-moderator → **`standard`** (OpenAI head → Claude Opus → NIM); CIO + WMA →
-**`premium`** (Claude Opus head → OpenAI → NIM); translator → **`translation`**
-(Claude Sonnet head → OpenAI mini → NIM). The resolved chain name and service/model are
+moderator → **`standard`** (Codex `gpt-5.6-luna` at `max` → OpenAI `gpt-5.6-terra`
+120k/day → NIM); CIO + WMA → **`premium`** with the same links; translator →
+**`translation`** (OpenAI `gpt-5.4-mini` → NIM `kimi-k2.6` → NIM `minimax-m2.7`).
+The resolved chain name, service/model, and Codex effort are
 logged per call (`agent <role> uses chain setting <name>; → <service>:<model>`).
 
 **Output-token caps are configurable per backend** (priority **env > yaml > default**,
@@ -396,9 +401,9 @@ whose **daily token use** (`usage.py`, per-service, `CIO_TZ`-local-day bucketed 
 
 | Name | Links | Used by |
 |---|---|---|
-| `premium` | Claude Opus 200k → OpenAI gpt-5.5 200k → NIM kimi | cio, wma |
-| `standard` | OpenAI gpt-5.5 200k → Claude Opus 200k → NIM kimi | all specialists, moderator, defaults |
-| `translation` | Claude Sonnet → OpenAI gpt-5.4-mini → NIM kimi | translator |
+| `premium` | Codex gpt-5.6-luna (`max`) → OpenAI gpt-5.6-terra (120k) → NIM kimi | cio, wma |
+| `standard` | Codex gpt-5.6-luna (`max`) → OpenAI gpt-5.6-terra (120k) → NIM kimi | all specialists, moderator, defaults |
+| `translation` | OpenAI gpt-5.4-mini → NIM kimi → NIM minimax | translator |
 
 Limits, models, order, and per-agent assignments are all editable in the yaml or from the
 dashboard **Configure** page. Budget counters reset at `CIO_TZ` midnight. Budget accounting
@@ -448,7 +453,7 @@ flowchart TD
     subgraph MS["monitor_watchlist — per security (bounded parallel)"]
         BD["bundle.gather_bundle<br/>price + fundamentals + 38 TA"]
         NW["web.search<br/>overnight headlines (Firecrawl)"]
-        BD --> ASK["engine.ask_role(role_key='wma')<br/>premium chain: Claude Opus → OpenAI → NIM"]
+        BD --> ASK["engine.ask_role(role_key='wma')<br/>premium chain: Codex max → OpenAI → NIM"]
         NW --> ASK
         ASK --> ASS["normalized assessment<br/>(PRD §7: status, conviction, rec,<br/>events, risks, catalysts, thesis Δ,<br/>external-risk score + sensitivities)"]
     end
@@ -495,9 +500,9 @@ auto-running the committee — keeping the daily briefing cheap and respecting t
 per-run cost ceiling.
 
 ### 7.3 Model chain
-The `wma` role uses the `premium` named chain, the same setting as the CIO: **Claude Opus**
-`claude-opus-4-8` (daily 200k) → **OpenAI** `gpt-5.5-2026-04-23` (daily 200k) → **NVIDIA
-NIM** `moonshotai/kimi-k2.6` (last resort), editable in `config/committee_models.yaml` or
+The `wma` role uses the `premium` named chain, the same setting as the CIO: **Codex**
+`gpt-5.6-luna` (`max`) → **OpenAI** `gpt-5.6-terra` (daily 120k) → **NVIDIA NIM**
+`moonshotai/kimi-k2.6` (last resort), editable in `config/committee_models.yaml` or
 from the dashboard Configure page. It runs through the identical `ask_role` budget/fallback
 machinery as the committee (§6.4).
 
@@ -625,7 +630,10 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `TELEGRAM_BOT_TOKEN` | — | Bot token (required) |
 | `CIO_ALLOWED_CHATS` | unset (open) | Comma-separated chat ids allowed to use the bot — **set this** |
 | `NVIDIA_API_KEY` | — | NVIDIA NIM key (required for `service: nim` agents) |
-| `OPENAI_API_KEY` | — | OpenAI key (`standard` chain head, `premium` chain 2nd link; absent → those links skipped) |
+| `OPENAI_API_KEY` | — | OpenAI key (`standard`/`premium` chain 2nd link and `translation` head; absent → links skipped) |
+| `CIO_CODEX_BIN` | `codex` | Codex CLI executable used by the ChatGPT-subscription app-server transport |
+| `CIO_CODEX_HOME` | `HOME` | Optional Codex auth directory; points to the account used by `codex login` |
+| `CIO_CODEX_REASONING_EFFORT` | chain setting | Temporary Codex thinking-level override for all Codex turns |
 | `CIO_OPENAI_TOKEN_PARAM` | `max_completion_tokens` | OpenAI output-cap param name (`max_tokens` for older models); also `openai.token_param` in yaml |
 | `CIO_OPENAI_MAX_TOKENS` | `2048` | OpenAI output-cap value; also `openai.max_tokens` in yaml |
 | `CIO_NIM_MAX_TOKENS` | `2048` | NIM output-cap value; also `nim.max_tokens` in yaml |

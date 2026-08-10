@@ -274,6 +274,20 @@ agents: {}
         assert links[0] == {"service": "nim", "model": "claude-opus-4-8"}
         assert links[1]["daily_limit"] == 12        # str → int
 
+    def test_codex_reasoning_effort_is_normalized(self, tmp_path, monkeypatch):
+        self._write(tmp_path, monkeypatch, """
+chains:
+  chat:
+  - {service: codex, model: gpt-x, thinking_level: Max}
+  - {service: openai, model: gpt-y, reasoning_effort: high}
+defaults: {chain: chat}
+agents: {}
+""")
+        from cio.committee.models import chains
+        links = chains()["chat"]
+        assert links[0]["reasoning_effort"] == "max"
+        assert "reasoning_effort" not in links[1]  # Codex-only setting
+
 
 # ---------------------------------------------------------------------------
 # C. _ask_openai — monkeypatched AsyncOpenAI, no real network

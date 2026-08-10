@@ -171,10 +171,10 @@ flowchart TD
     MOD_PARSE --> CIO_CALL[CIO LLM call\nchain-aware fallback\nserial]
 
     CIO_CALL --> CHAIN{Budget\nexhausted?}
-    CHAIN -- "try Claude (link 1)" --> CLAUDE_CALL[claude-agent-sdk call\npremium chain link 1]
-    CLAUDE_CALL --> CLAUDE_OK{Non-empty?}
-    CLAUDE_OK -- yes --> CIO_DONE
-    CLAUDE_OK -- no --> CHAIN
+    CHAIN -- "try Codex (link 1)" --> CODEX_CALL[Codex app-server call\npremium chain link 1\nreasoning_effort=max]
+    CODEX_CALL --> CODEX_OK{Non-empty?}
+    CODEX_OK -- yes --> CIO_DONE
+    CODEX_OK -- no --> CHAIN
     CHAIN -- "try OpenAI (link 2)" --> OPENAI_CALL[OpenAI API call\npremium chain link 2]
     OPENAI_CALL --> OPENAI_OK{Non-empty?}
     OPENAI_OK -- yes --> CIO_DONE
@@ -216,18 +216,18 @@ committee route through it; tests monkeypatch this one function). Resolution ord
 
 1. **Explicit `service` argument** → single dispatch, no chain (legacy/override path).
 2. **`role_key` set** → `resolve_chain(role_key)` returns the role's **named 3-link chain**
-   from `committee_models.yaml`. Three shipped settings: `standard` (OpenAI → Claude →
-   NIM, used by all 9 specialists and moderator), `premium` (Claude → OpenAI → NIM,
-   used by CIO and WMA), `translation` (Claude Sonnet → OpenAI mini → NIM, used by
-   translator). Every role has a chain; none are single-service.
+   from `committee_models.yaml`. The current `standard` and `premium` settings start with
+   Codex (`gpt-5.6-luna`, `max`) → OpenAI API (`gpt-5.6-terra`) → NIM; `translation`
+   starts with OpenAI mini and then uses two NIM fallbacks. Every role has a chain; none
+   are single-service.
 3. **No `role_key`** → default to the Claude backend.
 
 For each chain link the loop applies two checks before accepting it:
 
 - **Budget gate** — `usage.over_budget(service, daily_limit)`. If the service has
   burned through its `daily_limit` tokens today, the link is skipped (logged) and the
-  next one is tried. The shipped `standard`/`premium` settings give 200k/day to their
-  first two links (OpenAI + Claude), with NIM as the uncapped last resort. Limits are
+  next one is tried. The shipped `standard`/`premium` settings give 120k/day to their
+  OpenAI API link; Codex and NIM are uncapped here, with NIM as the last resort. Limits are
   per-service across *all* chains that reference that service.
 - **Non-empty result** — an empty string means "key missing / API error / limit
   notice"; the loop falls through to the next link. A non-empty string is returned
@@ -251,7 +251,7 @@ flowchart LR
     ROLE_KEY -- no --> CLAUDE_DEFAULT[claude backend\ndefault]
     ROLE_KEY -- yes --> CHAIN_RESOLVE[resolve_chain\nfrom config]
 
-    CHAIN_RESOLVE --> LINK1["Link 1: OpenAI gpt-5.5<br/>(standard chain — specialists)<br/>Claude Opus (premium — CIO/WMA)"]
+    CHAIN_RESOLVE --> LINK1["Link 1: Codex gpt-5.6-luna (max)<br/>(standard + premium — committee/WMA roles)"]
     LINK1 --> BUDGET1{Over daily\nbudget?}
     BUDGET1 -- yes --> LINK2
     BUDGET1 -- no --> DISPATCH1[dispatch link 1 backend]
@@ -259,7 +259,7 @@ flowchart LR
     RESULT1 -- yes --> RETURN[Return text]
     RESULT1 -- no --> LINK2
 
-    LINK2["Link 2: Claude Opus<br/>(standard chain)<br/>OpenAI gpt-5.5 (premium)"]
+    LINK2["Link 2: OpenAI gpt-5.6-terra<br/>(standard + premium, daily 120k)"]
     LINK2 --> BUDGET2{Over daily\nbudget?}
     BUDGET2 -- yes --> LINK3
     BUDGET2 -- no --> DISPATCH2[dispatch link 2 backend]

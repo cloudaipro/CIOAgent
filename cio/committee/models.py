@@ -50,6 +50,11 @@ _BUILTIN: dict[str, Any] = {
             {"service": "claude", "model": "claude-opus-4-8"},
             {"service": "nim",    "model": "moonshotai/kimi-k2.6"},
         ],
+        "bot_chat": [
+            {"service": "codex",  "model": "default", "reasoning_effort": "high"},
+            {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+            {"service": "claude", "model": "claude-opus-4-8"},
+        ],
     },
     "defaults": {"chain": "standard"},
     "agents": {
@@ -66,6 +71,7 @@ _BUILTIN: dict[str, Any] = {
         "cio":        {"chain": "premium"},
         "wma":        {"chain": "premium"},
         "translator": {"chain": "translation"},
+        "bot_chat":   {"chain": "bot_chat"},
     },
     "nim": {
         "base_url": "https://integrate.api.nvidia.com/v1",
@@ -81,7 +87,12 @@ _BUILTIN: dict[str, Any] = {
 _REPO_CONFIG = Path(__file__).parent.parent.parent / "config" / "committee_models.yaml"
 
 # Services the dashboard Configure tab offers in its service combo box.
-SERVICES = ("claude", "nim", "openai")
+SERVICES = ("claude", "nim", "openai", "codex")
+
+# Values currently advertised across Codex subscription models. Availability is
+# model-specific (newer models add max/ultra), so app-server remains the final
+# validator for the selected model.
+CODEX_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 # Fallback model catalog per service for the Configure tab. The live catalog is
 # read from ``model_catalog:`` in committee_models.yaml (editable via the dashboard);
@@ -99,6 +110,10 @@ MODEL_SUGGESTIONS: dict[str, list[str]] = {
         "meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1",
     ],
     "openai": ["gpt-5.5-2026-04-23", "gpt-5.1", "gpt-5", "o4-mini", "gpt-4.1"],
+    # ``default`` is interpreted by CodexRuntime as the subscription account's
+    # current default. This avoids pinning a model name that may not be enabled
+    # for every ChatGPT plan.
+    "codex": ["default"],
 }
 
 
@@ -258,8 +273,14 @@ def _normalize_links(raw) -> list[dict]:
         if not isinstance(link, dict):
             continue
         svc = link.get("service") or "claude"
-        mdl = link.get("model") or "claude-opus-4-8"
+        mdl = link.get("model")
+        if not mdl:
+            mdl = "default" if str(svc) == "codex" else "claude-opus-4-8"
         entry: dict = {"service": str(svc), "model": mdl}
+        effort = (link.get("reasoning_effort") or link.get("thinking_level")
+                  or link.get("effort"))
+        if effort and str(svc) == "codex":
+            entry["reasoning_effort"] = str(effort).strip().lower()
         if "daily_limit" in link and link["daily_limit"] is not None:
             try:
                 entry["daily_limit"] = int(link["daily_limit"])

@@ -1712,6 +1712,19 @@ def _model_select(name: str, current, service, catalog) -> str:
     return f"<select class='mdl' name='{esc(name)}'>{cells}</select>"
 
 
+def _codex_effort_select(name: str, current, service) -> str:
+    """Render model reasoning effort for Codex; other transports ignore it."""
+    levels = ("", "low", "medium", "high", "xhigh", "max", "ultra")
+    labels = {"": "default", "xhigh": "extra high"}
+    cells = "".join(
+        f"<option value='{esc(level)}'{' selected' if level == (current or '') else ''}>"
+        f"{esc(labels.get(level, level))}</option>"
+        for level in levels
+    )
+    disabled = " disabled" if service != "codex" else ""
+    return f"<select class='effort' name='{esc(name)}'{disabled}>{cells}</select>"
+
+
 # JS: dependent dropdown. When a service select changes, rebuild the model select in
 # the same row from that service's catalog (kept in window.__cat), preserving the
 # current pick if it still exists, else selecting the first model.
@@ -1740,6 +1753,7 @@ def _configure_js(catalog: dict) -> str:
         "sel.addEventListener('change',function(){"
         "var tr=sel.closest('tr');if(!tr)return;"
         "var m=tr.querySelector('select.mdl');if(!m)return;"
+        "var e=tr.querySelector('select.effort');if(e)e.disabled=sel.value!=='codex';"
         "var prev=m.value,list=(window.__cat[sel.value]||[]);"
         "m.innerHTML='';"
         "list.forEach(function(name){var o=document.createElement('option');"
@@ -1783,6 +1797,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
             f"<td class='num'>{i + 1}</td>"
             f"<td>{_svc_select(f'chainlink:{esc(cname)}:{i}:service', (link or {}).get('service'), services)}</td>"
             f"<td>{_model_select(f'chainlink:{esc(cname)}:{i}:model', (link or {}).get('model'), (link or {}).get('service'), model_suggestions)}</td>"
+            f"<td>{_codex_effort_select(f'chainlink:{esc(cname)}:{i}:reasoning_effort', (link or {}).get('reasoning_effort'), (link or {}).get('service'))}</td>"
             f"<td><input name='chainlink:{esc(cname)}:{i}:daily_limit' class='num' "
             f"value='{esc((link or {}).get('daily_limit') or '')}' "
             "placeholder='none' inputmode='numeric'></td>"
@@ -1794,7 +1809,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
             f"<label style='font-weight:normal;font-size:.85em;margin-left:10px'>"
             f"<input type='checkbox' name='chain_del:{esc(cname)}' value='1'> "
             "delete this setting</label></h3>"
-            "<table><tr><th>#</th><th>Service</th><th>Model</th>"
+            "<table><tr><th>#</th><th>Service</th><th>Model</th><th>Thinking (Codex)</th>"
             "<th>Daily token limit</th></tr>" + link_rows + "</table>"
         )
     chains_section = (
