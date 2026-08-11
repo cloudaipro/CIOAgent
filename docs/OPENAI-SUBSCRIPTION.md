@@ -24,10 +24,10 @@ Choose ChatGPT sign-in during login. Login must be performed as the OS user that
 cio.bot. For the supplied systemd unit that is `skchen`, with `HOME=/home/skchen`.
 If the service intentionally uses another auth directory, set `CIO_CODEX_HOME` to it.
 
-The default `bot_chat` chain in `config/committee_models.yaml` is:
+The current default `bot_chat` chain in `config/committee_models.yaml` is:
 
 ```yaml
-- {service: codex, model: gpt-5.6-luna, reasoning_effort: max}
+- {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
 - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
 - {service: nim, model: moonshotai/kimi-k2.6}
 ```
@@ -63,8 +63,9 @@ CIO_CODEX_REASONING_EFFORT=max .venv/bin/python -m cio.bot
 ```
 
 For systemd, add the equivalent `Environment=CIO_CODEX_REASONING_EFFORT=max`, then restart.
-Changing the dashboard/YAML setting takes effect when the chat runtime is rebuilt (normally
-after a bot restart or session reselection).
+Changing the dashboard/YAML setting invalidates the cached chat runtime and takes effect on
+the next chat message. The replacement starts a fresh transport transcript, so the bot
+notifies the user to restate anything important from the previous thread.
 
 ## Agent coverage
 

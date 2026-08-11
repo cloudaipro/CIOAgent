@@ -36,7 +36,7 @@ from telegram.ext import (
 
 from . import alpha, charts, memory, recall, richmsg, scheduler, watchlist
 from .agent import CIOAgent
-from .bot_runtime import BotRuntime, reselect_needed, select_runtime
+from .bot_runtime import BotRuntime, reselect_reason, select_runtime
 from .committee import engine as committee_engine
 
 load_dotenv()
@@ -106,9 +106,10 @@ _INLINE_MENU = InlineKeyboardMarkup(
      [InlineKeyboardButton("❓ Help", callback_data="cb:help")]],
 )
 
-# One conversational runtime per chat, created lazily. Selection happens once
-# per cached runtime (session start / roll) and is then pinned — locked
-# decision D4 (docs/BOT-CHAT-OPENAI-MIGRATION.md:132).
+# One conversational runtime per chat, created lazily. Selection is pinned for
+# transcript continuity, but the cache is invalidated when the effective
+# bot-chat route changes — a config edit must not leave a prewarmed runtime on
+# an old model or reasoning effort.
 _agents: dict[int, BotRuntime] = {}
 
 
@@ -141,26 +142,37 @@ _switch_notice: dict[int, str] = {}
 
 
 def _agent(chat_id: int) -> BotRuntime:
-    # D4 pins the runtime for the session, but the pin is chosen before the
-    # day's budget is spent: an openai-headed chain that crosses its daily
-    # limit mid-session strands the chat, because FallbackModel carries only
-    # openai links and nothing re-runs select_runtime. Evict in exactly that
-    # state (bot_runtime.reselect_needed) so the chain's next service is
-    # reachable without a bot restart. The new runtime starts a fresh
-    # transcript — the two SDKs cannot share one — so the user is told.
+    # D4 pins the runtime for transcript continuity. Evict when the route
+    # changes or when the pinned service becomes unusable. The replacement
+    # starts a fresh transport transcript — the SDKs cannot share one — so the
+    # user is told.
     pinned = _agents.get(chat_id)
-    if pinned is not None and reselect_needed(pinned):
-        log.warning("chat %s: pinned %s runtime can no longer answer "
-                    "(latched or over budget); re-selecting from the chain",
-                    chat_id, getattr(pinned, "_service", "?"))
+    reason = reselect_reason(pinned) if pinned is not None else None
+    if pinned is not None and reason:
+        if reason == "configuration_changed":
+            log.warning("chat %s: pinned %s runtime is stale after a bot-chat "
+                        "configuration change; re-selecting",
+                        chat_id, getattr(pinned, "_service", "?"))
+        else:
+            log.warning("chat %s: pinned %s runtime can no longer answer "
+                        "(latched or over budget); re-selecting from the chain",
+                        chat_id, getattr(pinned, "_service", "?"))
         _agents.pop(chat_id, None)
         _close_detached(pinned)
-        _switch_notice[chat_id] = (
-            "⚠️ My previous backend hit its daily limit, so I've switched to the "
-            "next one in the chain. It keeps its own transcript, so it may not "
-            "have this thread's recent history — re-state anything I need. "
-            "Saved data and reports are unaffected."
-        )
+        if reason == "configuration_changed":
+            _switch_notice[chat_id] = (
+                "⚙️ The chat configuration changed, so I've rebuilt the backend "
+                "using the new route. It has its own transcript, so re-state "
+                "anything important from the previous thread. Saved data and "
+                "reports are unaffected."
+            )
+        else:
+            _switch_notice[chat_id] = (
+                "⚠️ My previous backend hit its daily limit, so I've switched to the "
+                "next one in the chain. It keeps its own transcript, so it may not "
+                "have this thread's recent history — re-state anything I need. "
+                "Saved data and reports are unaffected."
+            )
 
     if chat_id not in _agents:
         memory.touch_chat(chat_id)

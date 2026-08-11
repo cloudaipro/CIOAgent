@@ -171,7 +171,7 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
 - **Model services** (`config/committee_models.yaml`): every agent references a
   **named fallback chain** — an ordered 3-link list of `{service, model, daily_limit?,
   reasoning_effort?}`. The current `premium` and `standard` settings start with the
-  ChatGPT-subscription Codex route (`gpt-5.6-luna`, `max` thinking), then the metered
+  ChatGPT-subscription Codex route (`gpt-5.6-sol`, `medium` thinking), then the metered
   OpenAI API (`gpt-5.6-terra`, 120k daily), then NIM. `translation` currently uses the
   OpenAI API followed by NIM fallbacks. `ask_role` walks the chain, skips any link whose
   daily token budget is spent, and falls through on error/empty. New settings can be
@@ -229,7 +229,7 @@ what deserves a deeper look.
 - **On demand**: `/briefing` (active watchlist) or `/briefing NVDA MU` (specific symbols);
   add `zh` for a **Traditional Chinese** briefing. CLI: `python -m cio.watchlist_monitor [SYMBOL…] [zh]`.
 - **Model chain** (`config/committee_models.yaml`, role `wma`): uses the `premium` named
-  chain — Codex `gpt-5.6-luna` (`max`) → OpenAI `gpt-5.6-terra` (daily 120k) → NVIDIA
+  chain — Codex `gpt-5.6-sol` (`medium`) → OpenAI `gpt-5.6-terra` (daily 120k) → NVIDIA
   NIM `kimi-k2.6` (last resort) — the same fallback machinery as the CIO. Codex is
   invoked through one shared app-server process with a separate ephemeral thread for
   each assessment.
@@ -362,6 +362,10 @@ In `.env`:
   `CIO_CODEX_BIN` selects a non-default CLI path.
 - `CIO_CODEX_REASONING_EFFORT` — temporary process-wide Codex override (`low`, `medium`,
   `high`, `xhigh`, `max`, or `ultra`); chain settings are preferred for normal operation.
+- `CODEX_TURN_TIMEOUT` — local maximum seconds to wait for one Codex turn (default `600`).
+  On expiry, cio.bot sends `turn/interrupt` and reports structured timeout diagnostics.
+- `CODEX_INTERRUPT_TIMEOUT` — seconds allowed for the interrupt request and completion
+  settlement (default `10`).
 - `CIO_FIRECRAWL_URL` — web search/scrape endpoint (defaults to a self-hosted
   `http://localhost:3002`, no key); set `FIRECRAWL_API_KEY` for Firecrawl cloud.
   Tune with `CIO_WEB_MAX_CHARS` (per-result cap, 6000) and `CIO_WEB_TIMEOUT` (45s).
@@ -393,7 +397,7 @@ codex --version
 
 Run those commands as the same OS user and with the same `HOME`/`CODEX_HOME` used by the
 systemd service. Codex links can be assigned to bot chat, committee roles, moderator/CIO,
-translation, and watchlist monitoring. The current chains use `gpt-5.6-luna` at `max`
+translation, and watchlist monitoring. The current chains use `gpt-5.6-sol` at `medium`
 thinking. Dashboard → Configure can select `low`, `medium`,
 `high`, `extra high` (`xhigh`), `max`, or `ultra`; availability depends on the model.
 Details and diagnostics:

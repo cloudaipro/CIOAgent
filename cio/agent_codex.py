@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ CODEX_BIN = _env("CODEX_BIN", "codex")
 CODEX_CWD = _env("CODEX_CWD", "/tmp")
 CODEX_START_TIMEOUT = float(_env("CODEX_START_TIMEOUT", "20"))
 CODEX_TURN_TIMEOUT = float(_env("CODEX_TURN_TIMEOUT", "600"))
+CODEX_INTERRUPT_TIMEOUT = float(_env("CODEX_INTERRUPT_TIMEOUT", "10"))
 
 _UPLOAD_PATH_RE = re.compile(r"(/\S+?\.(?:png|jpe?g|gif|webp))", re.I)
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -46,6 +48,46 @@ Telegram user.
 
 class CodexAppServerError(RuntimeError):
     """A protocol, process, authentication, or turn failure."""
+
+
+class CodexTurnTimeout(CodexAppServerError):
+    """A local turn deadline expired; interruption was attempted."""
+
+    def __init__(self, *, thread_id: str, turn_id: str, model: str | None,
+                 effort: str | None, timeout: float, elapsed: float,
+                 interrupt_sent: bool, settled: bool,
+                 interrupt_error: str | None = None):
+        self.thread_id = thread_id
+        self.turn_id = turn_id
+        self.model = model or "(default)"
+        self.effort = effort or "(default)"
+        self.timeout = timeout
+        self.elapsed = elapsed
+        self.interrupt_sent = interrupt_sent
+        self.settled = settled
+        self.interrupt_error = interrupt_error
+        details = (
+            f"elapsed={elapsed:.3f}s timeout={timeout:.3f}s "
+            f"model={self.model} effort={self.effort} "
+            f"thread_id={thread_id} turn_id={turn_id} "
+            f"interrupt_sent={interrupt_sent} settled={settled}"
+        )
+        if interrupt_error:
+            details += f" interrupt_error={interrupt_error}"
+        super().__init__(f"Codex turn timed out ({details})")
+
+    @property
+    def user_message(self) -> str:
+        if self.interrupt_sent and self.settled:
+            state = "The remote turn was interrupted"
+        elif self.interrupt_sent:
+            state = "An interrupt was sent, but the remote turn did not confirm settlement"
+        else:
+            state = "The remote turn could not be interrupted"
+        return (
+            f"Codex exceeded the {self.timeout:.0f}-second response limit. "
+            f"{state}; please retry with a narrower request."
+        )
 
 
 def _dynamic_tool_specs(tools=CIO_TOOLS) -> list[dict[str, Any]]:
@@ -89,6 +131,10 @@ class CodexAppServer:
         self._turn_waiters: dict[str, asyncio.Future] = {}
         self._completed_turns: dict[str, dict] = {}
         self._turn_usage: dict[str, int] = {}
+        # Turn completions and token updates can arrive after a local timeout.
+        # Keep those IDs out of the normal late-completion cache so an
+        # interrupted turn cannot be mistaken for a usable response later.
+        self._abandoned_turns: set[str] = set()
         self._next_id = 0
         self._write_lock = asyncio.Lock()
 
@@ -230,7 +276,7 @@ class CodexAppServer:
         if method == "thread/tokenUsage/updated":
             turn_id = params.get("turnId")
             last = ((params.get("tokenUsage") or {}).get("last") or {})
-            if turn_id:
+            if turn_id and turn_id not in self._abandoned_turns:
                 self._turn_usage[turn_id] = int(last.get("totalTokens") or 0)
             return
         if method != "turn/completed":
@@ -242,6 +288,8 @@ class CodexAppServer:
         waiter = self._turn_waiters.get(turn_id)
         if waiter is not None and not waiter.done():
             waiter.set_result(turn)
+        elif turn_id in self._abandoned_turns:
+            self._abandoned_turns.discard(turn_id)
         else:
             self._completed_turns[turn_id] = turn
 
@@ -275,8 +323,16 @@ class CodexAppServer:
         })
         return response["thread"]["id"]
 
+    async def interrupt_turn(self, thread_id: str, turn_id: str) -> None:
+        """Ask app-server to stop a still-running turn."""
+        await self._request("turn/interrupt", {
+            "threadId": thread_id,
+            "turnId": turn_id,
+        })
+
     async def run_turn(self, thread_id: str, prompt: str,
-                       effort: str | None = None) -> tuple[str, int]:
+                       effort: str | None = None,
+                       model: str | None = None) -> tuple[str, int]:
         params = {
             "threadId": thread_id,
             "input": _turn_input(prompt),
@@ -287,14 +343,73 @@ class CodexAppServer:
             params["effort"] = effort
         response = await self._request("turn/start", params)
         turn_id = response["turn"]["id"]
+        started = time.monotonic()
+        log.info("Codex turn started: model=%s effort=%s thread_id=%s turn_id=%s "
+                 "timeout=%.3fs",
+                 model or "(default)", effort or "(default)", thread_id, turn_id,
+                 CODEX_TURN_TIMEOUT)
         turn = self._completed_turns.pop(turn_id, None)
         if turn is None:
             waiter = asyncio.get_running_loop().create_future()
             self._turn_waiters[turn_id] = waiter
+            abandoned = False
+            settled = False
             try:
-                turn = await asyncio.wait_for(waiter, timeout=CODEX_TURN_TIMEOUT)
+                # Shield the waiter so timeout cancellation does not destroy the
+                # future while we send turn/interrupt and await settlement.
+                turn = await asyncio.wait_for(
+                    asyncio.shield(waiter), timeout=CODEX_TURN_TIMEOUT)
+            except asyncio.TimeoutError as timeout_error:
+                elapsed = time.monotonic() - started
+                abandoned = True
+                self._abandoned_turns.add(turn_id)
+                interrupt_sent = False
+                interrupt_error = None
+                try:
+                    await asyncio.wait_for(
+                        self.interrupt_turn(thread_id, turn_id),
+                        timeout=CODEX_INTERRUPT_TIMEOUT)
+                    interrupt_sent = True
+                except Exception as exc:
+                    interrupt_error = f"{type(exc).__name__}: {exc}"
+                    log.warning(
+                        "Codex turn interrupt failed: thread_id=%s turn_id=%s "
+                        "error=%s", thread_id, turn_id, interrupt_error)
+                if interrupt_sent:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(waiter), timeout=CODEX_INTERRUPT_TIMEOUT)
+                        settled = True
+                    except asyncio.TimeoutError:
+                        log.warning(
+                            "Codex turn did not report completion after interrupt: "
+                            "thread_id=%s turn_id=%s", thread_id, turn_id)
+                    except Exception as exc:
+                        settled = True
+                        log.info(
+                            "Codex turn ended while settling interrupt: "
+                            "thread_id=%s turn_id=%s error=%s",
+                            thread_id, turn_id, f"{type(exc).__name__}: {exc}")
+                raise CodexTurnTimeout(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    model=model,
+                    effort=effort,
+                    timeout=CODEX_TURN_TIMEOUT,
+                    elapsed=elapsed,
+                    interrupt_sent=interrupt_sent,
+                    settled=settled,
+                    interrupt_error=interrupt_error,
+                ) from timeout_error
             finally:
                 self._turn_waiters.pop(turn_id, None)
+                self._turn_usage.pop(turn_id, None)
+                # If the completion/error arrived during the settlement grace
+                # period, it was consumed by the waiter. Otherwise retain the
+                # marker so a later notification is discarded rather than
+                # reintroduced into the normal completion cache.
+                if abandoned and settled:
+                    self._abandoned_turns.discard(turn_id)
         if turn.get("status") != "completed":
             error = turn.get("error") or turn.get("status")
             raise CodexAppServerError(f"Codex turn failed: {error}")
@@ -324,6 +439,9 @@ class CodexAppServer:
         if cancelled:
             await asyncio.gather(*cancelled, return_exceptions=True)
         self._reader_task = self._stderr_task = None
+        self._abandoned_turns.clear()
+        self._completed_turns.clear()
+        self._turn_usage.clear()
 
 
 class CodexRuntime(BaseRuntime):
@@ -380,7 +498,29 @@ class CodexRuntime(BaseRuntime):
         assert self._client is not None and self._session_id is not None
         try:
             text, tokens = await self._client.run_turn(
-                self._session_id, prompt, effort=self._reasoning_effort)
+                self._session_id, prompt, effort=self._reasoning_effort,
+                model=self._model)
+        except CodexTurnTimeout as exc:
+            log.warning("CodexRuntime turn timeout: %s", exc)
+            # A local deadline does not prove that Codex is unavailable.  The
+            # remote turn was interrupted (or its transport was reset), so do
+            # not latch a healthy backend for the next message.
+            if not exc.settled:
+                # An acknowledged interrupt normally produces turn/completed.
+                # If it does not, do not reuse a thread that may still have an
+                # active remote turn: terminate that app-server and force the
+                # next message through a fresh client/thread.
+                stale_client = self._client
+                self._client = None
+                self._session_id = None
+                self._resume = None
+                if stale_client is not None:
+                    try:
+                        await stale_client.close()
+                    except Exception:
+                        log.warning("CodexRuntime: could not reset unsettled timed-out turn",
+                                    exc_info=True)
+            text, tokens = exc.user_message, 0
         except Exception as exc:
             log.warning("CodexRuntime turn failed: %s", exc, exc_info=True)
             from .committee import engine

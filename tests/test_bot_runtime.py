@@ -517,6 +517,22 @@ def _budget_db(monkeypatch, tmp_path, service, spent):
 
 
 class TestReselectNeeded:
+    def test_true_when_bot_chat_configuration_changes(self, monkeypatch):
+        old_chain = [{
+            "service": "codex", "model": "gpt-5.6-luna",
+            "reasoning_effort": "max",
+        }]
+        new_chain = [{
+            "service": "codex", "model": "gpt-5.6-sol",
+            "reasoning_effort": "medium",
+        }]
+        runtime = _FakeRuntime("codex")
+        runtime._bot_chat_config_fingerprint = bot_runtime._routing_fingerprint(old_chain)
+        _set_chain(monkeypatch, new_chain)
+
+        assert bot_runtime.reselect_needed(runtime) is True
+        assert bot_runtime.reselect_reason(runtime) == "configuration_changed"
+
     def test_false_while_the_pinned_service_can_still_answer(self, monkeypatch, tmp_path):
         _budget_db(monkeypatch, tmp_path, "openai", 1)   # not the real day's usage
         _set_chain(monkeypatch, [
@@ -621,6 +637,28 @@ class TestAgentEviction:
         assert second is not first
         assert isinstance(second, bot_runtime.ClaudeRuntime)
         assert 9101 in bot_mod._switch_notice
+
+    def test_configuration_change_rebuilds_codex_runtime(self, monkeypatch):
+        import cio.bot as bot_mod
+        _set_chain(monkeypatch, [{
+            "service": "codex", "model": "gpt-5.6-luna",
+            "reasoning_effort": "max",
+        }])
+        first = bot_mod._agent(9103)
+        assert type(first).__name__ == "CodexRuntime"
+        assert first._model == "gpt-5.6-luna"
+        assert first._reasoning_effort == "max"
+
+        _set_chain(monkeypatch, [{
+            "service": "codex", "model": "gpt-5.6-sol",
+            "reasoning_effort": "medium",
+        }])
+        second = bot_mod._agent(9103)
+
+        assert second is not first
+        assert second._model == "gpt-5.6-sol"
+        assert second._reasoning_effort == "medium"
+        assert "configuration changed" in bot_mod._switch_notice[9103]
 
     def test_healthy_runtime_is_still_pinned(self, monkeypatch):
         """D4 is intact: no eviction while the pinned service can answer, and

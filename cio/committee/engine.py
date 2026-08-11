@@ -276,7 +276,8 @@ async def _ask_codex(
             developer_instructions=_CODEX_ONESHOT_DEVELOPER_INSTRUCTIONS,
             ephemeral=True,
         )
-        text, tokens = await client.run_turn(thread_id, user_prompt, effort=effort)
+        text, tokens = await client.run_turn(
+            thread_id, user_prompt, effort=effort, model=effective_model)
         text = (text or "").strip()
         if _is_limit_notice(text):
             log.warning("_ask_codex hit a limit notice; treating as empty")
@@ -286,6 +287,13 @@ async def _ask_codex(
             tokens = context.count_tokens(system_prompt + user_prompt + text)
         return (text, tokens)
     except Exception as exc:
+        from ..agent_codex import CodexTurnTimeout
+        if isinstance(exc, CodexTurnTimeout):
+            log.warning("_ask_codex turn timeout: %s", exc)
+            # A turn deadline is a bounded request failure, not evidence that
+            # the authenticated Codex backend is unavailable. Leave the
+            # service unlatched so the next call can try it again.
+            return ("", 0)
         log.warning("_ask_codex failed: %s", exc)
         _latch("codex")
         return ("", 0)

@@ -507,8 +507,8 @@ def bot_chat_link() -> dict | None:
       - the selected chain still resolves to no links at all (config
         unreadable and the yaml fallback also failed).
 
-    The bot path reads this fresh on every client construction, so the setting
-    takes effect on the next natural session roll with no restart.
+    The bot path reads this fresh when it validates its cached runtime, so the
+    setting takes effect on the next chat message with no restart.
     """
     # Env lock: if the operator has set CIO_MODEL/CFO_MODEL, that wins.
     if os.getenv("CIO_MODEL") or os.getenv("CFO_MODEL"):

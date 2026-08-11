@@ -4,9 +4,11 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 import cio.agent as agent
 import cio.agent_codex as agent_codex
-from cio.agent_codex import CodexAppServer, CodexRuntime
+from cio.agent_codex import CodexAppServer, CodexRuntime, CodexTurnTimeout
 
 
 def _run(coro):
@@ -23,7 +25,7 @@ class _FakeClient:
         self.starts.append((model, instructions, resume))
         return "codex-thread-2" if len(self.starts) > 1 else "codex-thread-1"
 
-    async def run_turn(self, thread_id, prompt, effort=None):
+    async def run_turn(self, thread_id, prompt, effort=None, model=None):
         self.turns.append((thread_id, prompt, effort))
         return "hello from subscription", 17
 
@@ -152,6 +154,124 @@ def test_turn_completion_extracts_last_agent_message():
     assert seen["effort"] == "high"
 
 
+def test_turn_timeout_interrupts_remote_turn_and_preserves_diagnostics(monkeypatch):
+    server = CodexAppServer([])
+    monkeypatch.setattr(agent_codex, "CODEX_TURN_TIMEOUT", 0.01)
+    monkeypatch.setattr(agent_codex, "CODEX_INTERRUPT_TIMEOUT", 0.05)
+    calls = []
+
+    async def request(method, params):
+        calls.append((method, params))
+        if method == "turn/start":
+            return {"turn": {"id": "turn-timeout"}}
+        assert method == "turn/interrupt"
+        # Simulate app-server acknowledging the interrupt by completing the
+        # turn notification while the client is in its settlement grace period.
+        asyncio.get_running_loop().call_soon(
+            server._handle_notification, "turn/completed", {
+                "turn": {"id": "turn-timeout", "status": "interrupted"}
+            })
+        return {}
+
+    server._request = request
+    with pytest.raises(CodexTurnTimeout) as raised:
+        _run(server.run_turn("thread-timeout", "slow request", effort="max",
+                             model="gpt-5.6-luna"))
+
+    error = raised.value
+    assert calls == [
+        ("turn/start", {"threadId": "thread-timeout",
+                         "input": [{"type": "text", "text": "slow request"}],
+                         "effort": "max"}),
+        ("turn/interrupt", {"threadId": "thread-timeout", "turnId": "turn-timeout"}),
+    ]
+    assert error.thread_id == "thread-timeout"
+    assert error.turn_id == "turn-timeout"
+    assert error.model == "gpt-5.6-luna"
+    assert error.effort == "max"
+    assert error.interrupt_sent is True
+    assert error.settled is True
+    assert "thread_id=thread-timeout" in str(error)
+    assert "turn_id=turn-timeout" in str(error)
+    assert "gpt-5.6-luna" in str(error)
+    assert "max" in str(error)
+    assert "OpenAI subscription runtime error" not in error.user_message
+    assert server._completed_turns == {}
+    assert server._abandoned_turns == set()
+
+
+def test_late_completion_after_timeout_is_discarded(monkeypatch):
+    server = CodexAppServer([])
+    monkeypatch.setattr(agent_codex, "CODEX_TURN_TIMEOUT", 0.01)
+    monkeypatch.setattr(agent_codex, "CODEX_INTERRUPT_TIMEOUT", 0.01)
+
+    async def request(method, params):
+        if method == "turn/start":
+            return {"turn": {"id": "turn-late"}}
+        assert method == "turn/interrupt"
+        return {}
+
+    server._request = request
+    with pytest.raises(CodexTurnTimeout) as raised:
+        _run(server.run_turn("thread-late", "slow request", model="gpt-test"))
+
+    assert raised.value.interrupt_sent is True
+    assert raised.value.settled is False
+    server._handle_notification("thread/tokenUsage/updated", {
+        "turnId": "turn-late", "tokenUsage": {"last": {"totalTokens": 999}}
+    })
+    server._handle_notification("turn/completed", {
+        "turn": {"id": "turn-late", "status": "completed",
+                  "items": [{"type": "agentMessage", "text": "late"}]}
+    })
+    assert server._turn_usage == {}
+    assert server._completed_turns == {}
+    assert server._abandoned_turns == set()
+
+
+def test_runtime_timeout_is_user_facing_and_does_not_latch_codex(monkeypatch, tmp_path):
+    runtime, client = _runtime(monkeypatch, tmp_path, model="gpt-test",
+                               reasoning_effort="medium")
+    from cio.committee import engine
+    latched = []
+
+    async def timeout(*args, **kwargs):
+        raise CodexTurnTimeout(
+            thread_id="codex-thread-1", turn_id="turn-timeout",
+            model="gpt-test", effort="medium", timeout=600, elapsed=600.1,
+            interrupt_sent=True, settled=True)
+
+    monkeypatch.setattr(client, "run_turn", timeout)
+    monkeypatch.setattr(engine, "latch", lambda service: latched.append(service))
+    _run(runtime._ensure())
+    text, images = _run(runtime._run_query("slow request"))
+
+    assert images == []
+    assert "exceeded the 600-second response limit" in text
+    assert "OpenAI subscription runtime error" not in text
+    assert latched == []
+
+
+def test_unsettled_timeout_resets_the_codex_transport(monkeypatch, tmp_path):
+    runtime, client = _runtime(monkeypatch, tmp_path, model="gpt-test",
+                               reasoning_effort="medium")
+
+    async def timeout(*args, **kwargs):
+        raise CodexTurnTimeout(
+            thread_id="codex-thread-1", turn_id="turn-timeout",
+            model="gpt-test", effort="medium", timeout=600, elapsed=600.1,
+            interrupt_sent=True, settled=False)
+
+    monkeypatch.setattr(client, "run_turn", timeout)
+    _run(runtime._ensure())
+    text, _ = _run(runtime._run_query("slow request"))
+
+    assert client.closed is True
+    assert runtime._client is None
+    assert runtime._session_id is None
+    assert "did not confirm settlement" in text
+
+
 def test_one_shot_thread_is_ephemeral_and_has_no_dynamic_tools():
     server = CodexAppServer([])
     seen = {}
@@ -193,7 +313,7 @@ def test_committee_codex_backend_passes_model_effort_and_prompt(monkeypatch):
             self.starts.append(kwargs)
             return "committee-thread"
 
-        async def run_turn(self, thread_id, prompt, effort=None):
+        async def run_turn(self, thread_id, prompt, effort=None, model=None):
             self.turns.append((thread_id, prompt, effort))
             return "committee answer", 123
 
