@@ -53,7 +53,7 @@ flowchart TD
     CTX --> MEM
     COMM --> STK
     COMM --> AMEM["committee/agent_memory.py<br/>per-agent MemCore"]
-    COMM --> MODELS["committee/models.py + engine.ask_role<br/>named-chain router: every agent → 3-link fallback chain"]
+    COMM --> MODELS["committee/models.py + engine.ask_role<br/>named-chain router: every agent → 4-link fallback chain"]
     COMM --> PDF["committee/render_pdf.py + translate.py<br/>PDF + 繁體中文"]
     AMEM --> CDB[("data/committee.db<br/>WAL: per-agent memory + token_usage")]
     PORT --> DB[("cio/db.py<br/>data/cio.db")]
@@ -357,13 +357,15 @@ text so it cannot leak into the report or debate transcript.
 ### 6.3 Model services (`models.py`, `config/committee_models.yaml`)
 Every call goes through `engine.ask_role(system, user, role_key)`, which resolves a
 per-agent **named fallback chain** from the config file (optional; missing → built-in
-defaults) and dispatches via `_dispatch` to one of four backends:
+defaults) and dispatches via `_dispatch` to one of five backends:
 - **`_ask_codex`** — ChatGPT subscription through Codex app-server. Committee-style
   calls use a shared process with isolated ephemeral threads and no dynamic tools;
   `reasoning_effort` is passed per Codex link.
 - **`_ask_claude`** — `claude-agent-sdk` one-shot (subscription, no key).
 - **`_ask_nim`** — NVIDIA NIM, OpenAI-compatible `chat/completions` via `httpx`, Bearer
   `NVIDIA_API_KEY`.
+- **`_ask_muse`** — local Muse Glimmer, OpenAI-compatible `chat/completions` via
+  `httpx`; per-link reasoning effort defaults to `xhigh`.
 - **`_ask_openai`** — OpenAI API via the `openai` SDK (`OPENAI_API_KEY`, default model
 `gpt-5.5-2026-04-23`).
 Each backend returns `(text, tokens)` — real usage from the API (`usage.total_tokens`,

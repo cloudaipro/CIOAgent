@@ -1712,16 +1712,17 @@ def _model_select(name: str, current, service, catalog) -> str:
     return f"<select class='mdl' name='{esc(name)}'>{cells}</select>"
 
 
-def _codex_effort_select(name: str, current, service) -> str:
-    """Render model reasoning effort for Codex; other transports ignore it."""
+def _reasoning_effort_select(name: str, current, service) -> str:
+    """Render reasoning effort for Codex and Muse model links."""
     levels = ("", "low", "medium", "high", "xhigh", "max", "ultra")
     labels = {"": "default", "xhigh": "extra high"}
     cells = "".join(
-        f"<option value='{esc(level)}'{' selected' if level == (current or '') else ''}>"
+        f"<option value='{esc(level)}'{' selected' if level == (current or '') else ''}"
+        f"{' disabled' if service == 'muse' and level in ('max', 'ultra') else ''}>"
         f"{esc(labels.get(level, level))}</option>"
         for level in levels
     )
-    disabled = " disabled" if service != "codex" else ""
+    disabled = " disabled" if service not in ("codex", "muse") else ""
     return f"<select class='effort' name='{esc(name)}'{disabled}>{cells}</select>"
 
 
@@ -1753,7 +1754,9 @@ def _configure_js(catalog: dict) -> str:
         "sel.addEventListener('change',function(){"
         "var tr=sel.closest('tr');if(!tr)return;"
         "var m=tr.querySelector('select.mdl');if(!m)return;"
-        "var e=tr.querySelector('select.effort');if(e)e.disabled=sel.value!=='codex';"
+        "var e=tr.querySelector('select.effort');if(e){e.disabled=!['codex','muse'].includes(sel.value);"
+        "Array.from(e.options).forEach(function(o){o.disabled=sel.value==='muse'&&['max','ultra'].includes(o.value);});"
+        "if(sel.value==='muse'&&['max','ultra'].includes(e.value))e.value='';}"
         "var prev=m.value,list=(window.__cat[sel.value]||[]);"
         "m.innerHTML='';"
         "list.forEach(function(name){var o=document.createElement('option');"
@@ -1797,7 +1800,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
             f"<td class='num'>{i + 1}</td>"
             f"<td>{_svc_select(f'chainlink:{esc(cname)}:{i}:service', (link or {}).get('service'), services)}</td>"
             f"<td>{_model_select(f'chainlink:{esc(cname)}:{i}:model', (link or {}).get('model'), (link or {}).get('service'), model_suggestions)}</td>"
-            f"<td>{_codex_effort_select(f'chainlink:{esc(cname)}:{i}:reasoning_effort', (link or {}).get('reasoning_effort'), (link or {}).get('service'))}</td>"
+            f"<td>{_reasoning_effort_select(f'chainlink:{esc(cname)}:{i}:reasoning_effort', (link or {}).get('reasoning_effort'), (link or {}).get('service'))}</td>"
             f"<td><input name='chainlink:{esc(cname)}:{i}:daily_limit' class='num' "
             f"value='{esc((link or {}).get('daily_limit') or '')}' "
             "placeholder='none' inputmode='numeric'></td>"
@@ -1809,7 +1812,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
             f"<label style='font-weight:normal;font-size:.85em;margin-left:10px'>"
             f"<input type='checkbox' name='chain_del:{esc(cname)}' value='1'> "
             "delete this setting</label></h3>"
-            "<table><tr><th>#</th><th>Service</th><th>Model</th><th>Thinking (Codex)</th>"
+            "<table><tr><th>#</th><th>Service</th><th>Model</th><th>Reasoning effort</th>"
             "<th>Daily token limit</th></tr>" + link_rows + "</table>"
         )
     chains_section = (
@@ -1820,7 +1823,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
         "setting to each agent below. A setting in use by an agent cannot be deleted.</p>"
         + "".join(chain_blocks)
         + "<p><input name='chain_add' placeholder='new setting name (e.g. cheap)' "
-        "pattern='[A-Za-z0-9_-]+'> <span class='hint'>added on save with a 3-link "
+        "pattern='[A-Za-z0-9_-]+'> <span class='hint'>added on save with a 4-link "
         "template (claude → openai → nim); edit it after.</span></p>"
     )
 
@@ -1867,7 +1870,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
             # to something the bot cannot host yet (only claude runs today).
             label = f"{resolved_bot_link.get('service')}:{resolved_bot_link.get('model')}"
             chain_note = f"(from chain &ldquo;{esc(bot_chat_chain or '')}&rdquo;)"
-            if resolved_bot_link.get("service") == "claude":
+            if resolved_bot_link.get("service") in ("claude", "openai", "codex", "muse"):
                 cur_hint = f"Current link: <strong>{esc(label)}</strong> {chain_note}."
             else:
                 resolved_service = esc(resolved_bot_link.get("service") or "")
@@ -1899,6 +1902,7 @@ def render_configure(cfg, level: int, services, model_suggestions,
                 f"placeholder='{esc(ph)}'>")
     nim = cfg.get("nim") or {}
     oa = cfg.get("openai") or {}
+    muse = cfg.get("muse") or {}
     cl = cfg.get("claude") or {}
     providers = (
         "<details><summary>Provider connection settings</summary>"
@@ -1912,6 +1916,13 @@ def render_configure(cfg, level: int, services, model_suggestions,
         f"<tr><td>api_key_env</td><td>{_txt('provider:openai:api_key_env', oa.get('api_key_env'))}</td></tr>"
         f"<tr><td>token_param</td><td>{_txt('provider:openai:token_param', oa.get('token_param'), 'max_completion_tokens')}</td></tr>"
         f"<tr><td>max_tokens</td><td>{_txt('provider:openai:max_tokens', oa.get('max_tokens'), 'output cap')}</td></tr>"
+        "</table>"
+        "<table><tr><th>Muse Glimmer (local)</th><th>Value</th></tr>"
+        f"<tr><td>base_url</td><td>{_txt('provider:muse:base_url', muse.get('base_url'), 'http://127.0.0.1:8001/v1')}</td></tr>"
+        f"<tr><td>api_key_env</td><td>{_txt('provider:muse:api_key_env', muse.get('api_key_env'), 'CIO_MUSE_API_KEY (optional)')}</td></tr>"
+        f"<tr><td>max_tokens</td><td>{_txt('provider:muse:max_tokens', muse.get('max_tokens'), 'output cap')}</td></tr>"
+        f"<tr><td>timeout</td><td>{_txt('provider:muse:timeout', muse.get('timeout'), 'seconds')}</td></tr>"
+        f"<tr><td>reasoning_strength</td><td>{_txt('provider:muse:reasoning_strength', muse.get('reasoning_strength'), 'low|medium|high|xhigh')}</td></tr>"
         "</table>"
         "<table><tr><th>Claude</th><th>Value</th></tr>"
         f"<tr><td>max_thinking_tokens</td><td>{_txt('provider:claude:max_thinking_tokens', cl.get('max_thinking_tokens'), 'blank = SDK default')}</td></tr>"

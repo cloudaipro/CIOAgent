@@ -2,8 +2,8 @@
 engine.py — Committee orchestration engine.
 
 Single LLM entry point: ask_role (monkeypatchable for tests).
-Supports ChatGPT-authenticated Codex, the OpenAI API, claude-agent-sdk, and
-NVIDIA NIM.
+Supports ChatGPT-authenticated Codex, the OpenAI API, claude-agent-sdk,
+NVIDIA NIM, and locally served Muse Glimmer.
 Round-1 specialists, debate cross-exam pairs, and round-3 revisions run in
 parallel by default (CIO_PARALLEL=on); moderator + CIO stay serial.
 """
@@ -31,6 +31,8 @@ from .models import (
     resolve as _resolve_model,
     nim_settings,
     openai_settings,
+    muse_settings,
+    muse_reasoning_effort,
     claude_settings,
     resolve_chain as _resolve_chain,
     resolve_chain_name as _resolve_chain_name,
@@ -516,6 +518,76 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
 
 
 # ---------------------------------------------------------------------------
+# Muse Glimmer backend (local OpenAI-compatible server)
+# ---------------------------------------------------------------------------
+
+async def _ask_muse(system_prompt: str, user_prompt: str,
+                    model: str | None = None,
+                    reasoning_effort: str | None = None) -> tuple[str, int]:
+    """One-shot query to a local UD-Q4_K_XL or NVFP4 Muse deployment.
+
+    llama-server and vLLM expose the same ``/v1/chat/completions`` contract,
+    so CIOAgent does not need to know which 4-bit representation is loaded.
+    A local server normally needs no key; ``CIO_MUSE_API_KEY`` can secure a
+    remotely hosted endpoint. Transport failures return empty for normal chain
+    fallback, matching every other committee backend.
+    """
+    import httpx
+
+    settings = muse_settings()
+    effective_model = model or "muse-glimmer-30b-ud-q4-k-xl"
+    url = settings["base_url"].rstrip("/") + "/chat/completions"
+    strength = muse_reasoning_effort(reasoning_effort)
+    system = system_prompt
+    if "reasoning strength:" not in system.lower():
+        system = f"{system_prompt.rstrip()}\n\nReasoning strength: {strength}."
+    payload = {
+        "model": effective_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 64,
+        "max_tokens": settings["max_output_tokens"],
+        "stream": False,
+    }
+    headers = {"Accept": "application/json"}
+    key = os.getenv(settings["api_key_env"])
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=settings["timeout"]) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+        if not resp.is_success:
+            log.warning("_ask_muse: HTTP %d (model=%s) — %s",
+                        resp.status_code, effective_model, resp.text[:200])
+            return ("", 0)
+        data = resp.json()
+        choice = data["choices"][0]
+        msg = choice.get("message") or {}
+        text = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        if not text:
+            log.warning("_ask_muse: empty content (finish_reason=%s)",
+                        choice.get("finish_reason"))
+            return ("", 0)
+        tok = 0
+        try:
+            tok = int(data["usage"]["total_tokens"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        if tok <= 0:
+            from cio.context import count_tokens
+            tok = count_tokens(system + user_prompt + text)
+        return (text, tok)
+    except Exception as exc:
+        log.warning("_ask_muse failed: %s (%s)", exc or repr(exc), type(exc).__name__)
+        return ("", 0)
+
+
+# ---------------------------------------------------------------------------
 # _dispatch — low-level backend router
 # ---------------------------------------------------------------------------
 
@@ -531,6 +603,9 @@ async def _dispatch(
         return await _ask_openai(system_prompt, user_prompt, model)
     if service == "nim":
         return await _ask_nim(system_prompt, user_prompt, model)
+    if service == "muse":
+        return await _ask_muse(
+            system_prompt, user_prompt, model, reasoning_effort=reasoning_effort)
     if service == "codex":
         return await _ask_codex(
             system_prompt, user_prompt, model, reasoning_effort=reasoning_effort)

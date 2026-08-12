@@ -93,14 +93,17 @@ def test_render_configure_named_chains():
             "standard": [{"service": "claude", "model": "c1"}],
             "bot_chat": [{"service": "codex", "model": "gpt-x",
                           "reasoning_effort": "max"}],
+            "muse_chat": [{"service": "muse", "model": "muse-local",
+                           "reasoning_effort": "xhigh"}],
         },
         "defaults": {"chain": "standard"},
         "agents": {"market": {"chain": "standard"}, "cio": {"chain": "premium"},
                    "legacyboi": {"service": "claude", "model": "x"}},
     }
     sugg = {"claude": ["c1"], "openai": ["g1"], "nim": ["n1"],
-            "codex": ["gpt-x"]}
-    html = views.render_configure(cfg, 1, ["claude", "nim", "openai", "codex"], sugg)
+            "codex": ["gpt-x"], "muse": ["muse-local"]}
+    html = views.render_configure(
+        cfg, 1, ["claude", "nim", "openai", "codex", "muse"], sugg)
     # chain editor
     assert "chainlink:premium:0:service" in html
     assert "chainlink:premium:2:daily_limit" in html
@@ -108,7 +111,8 @@ def test_render_configure_named_chains():
     assert "chain_add" in html
     assert "chainlink:bot_chat:0:reasoning_effort" in html
     assert "value='max' selected" in html
-    assert "Thinking (Codex)" in html
+    assert "value='xhigh' selected" in html
+    assert "Reasoning effort" in html
     # per-agent chain dropdowns incl. defaults
     assert "defaults:chain" in html
     assert "agent:market:chain" in html
@@ -332,7 +336,8 @@ def test_configure_post_named_chain_roundtrip(live, monkeypatch, tmp_path):
     assert saved["chains"]["premium"][1]["daily_limit"] == 555
     assert "spare" not in saved["chains"]            # deleted
     assert "premium" in saved["chains"]              # delete refused (in use)
-    assert len(saved["chains"]["newone"]) == 3       # template links
+    assert len(saved["chains"]["newone"]) == 4       # template links include Muse
+    assert saved["chains"]["newone"][2]["service"] == "muse"
     assert saved["agents"]["market"]["chain"] == "newone"
     assert saved["defaults"]["chain"] == "premium"
 
@@ -413,6 +418,33 @@ def test_configure_blank_daily_limit_clears(live, monkeypatch, tmp_path):
 
     saved = _yaml.safe_load(p.read_text(encoding="utf-8"))
     assert "daily_limit" not in saved["chains"]["premium"][0]
+    _models.load_config.cache_clear()
+
+
+def test_configure_saves_muse_reasoning_effort(live, monkeypatch, tmp_path):
+    import yaml as _yaml
+    from cio.committee import models as _models
+
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        "chains:\n  chat:\n  - {service: muse, model: muse-local}\n"
+        "defaults: {chain: chat}\nagents: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CIO_MODELS_CONFIG", str(p))
+    _models.load_config.cache_clear()
+
+    status, response = _post(live, "/configure", {
+        "form_kind": "models",
+        "chainlink:chat:0:service": "muse",
+        "chainlink:chat:0:model": "muse-local",
+        "chainlink:chat:0:reasoning_effort": "xhigh",
+    })
+
+    assert status == 303
+    assert "err=1" not in response.getheader("Location", "")
+    saved = _yaml.safe_load(p.read_text(encoding="utf-8"))
+    assert saved["chains"]["chat"][0]["reasoning_effort"] == "xhigh"
     _models.load_config.cache_clear()
 
 

@@ -112,14 +112,15 @@ class TestResolveChain:
     # MECHANISM (named resolution, structure) — never specific operator picks.
     # Content semantics are pinned in TestNamedChainConfig / TestChainSelection.
 
-    def test_cio_resolves_to_named_setting_with_three_links(self):
+    def test_cio_resolves_to_named_setting_with_muse_link(self):
         """cio resolves to a NAMED chain setting whose links match chains()."""
         from cio.committee.models import resolve_chain, resolve_chain_name, chains, SERVICES
         name = resolve_chain_name("cio")
         chain = resolve_chain("cio")
         assert name is not None
         assert chain == chains()[name]
-        assert len(chain) == 3
+        assert len(chain) == 4
+        assert any(link["service"] == "muse" for link in chain)
         assert all(link["service"] in SERVICES and link["model"] for link in chain)
 
     def test_specialist_uses_named_chain(self):
@@ -140,13 +141,14 @@ class TestResolveChain:
         assert resolve_chain("xyz_unknown") == chains()[default_name]
 
     def test_translator_uses_named_chain(self):
-        """translator routes through a named 3-link setting too."""
+        """translator routes through a named setting that includes Muse."""
         from cio.committee.models import resolve_chain, resolve_chain_name, chains
         name = resolve_chain_name("translator")
         assert name is not None
         chain = resolve_chain("translator")
         assert chain == chains()[name]
-        assert len(chain) == 3
+        assert len(chain) == 4
+        assert any(link["service"] == "muse" for link in chain)
 
     def test_resolve_returns_chain_head(self):
         """resolve(role) == (service, model) of the chain's first link."""
@@ -286,7 +288,22 @@ agents: {}
         from cio.committee.models import chains
         links = chains()["chat"]
         assert links[0]["reasoning_effort"] == "max"
-        assert "reasoning_effort" not in links[1]  # Codex-only setting
+        assert "reasoning_effort" not in links[1]  # unsupported by OpenAI links
+
+    def test_muse_reasoning_effort_is_normalized(self, tmp_path, monkeypatch):
+        from cio.committee import models
+
+        cfg = tmp_path / "models.yaml"
+        cfg.write_text(
+            "chains:\n  standard:\n"
+            "  - {service: muse, model: muse-local, reasoning_effort: xhigh}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CIO_MODELS_CONFIG", str(cfg))
+        models.load_config.cache_clear()
+
+        assert models.chains()["standard"][0]["reasoning_effort"] == "xhigh"
+        models.load_config.cache_clear()
 
 
 # ---------------------------------------------------------------------------

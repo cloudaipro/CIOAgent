@@ -169,11 +169,11 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   semantic check (embedding distance) collapses paraphrases, so an agent re-deriving the
   same lesson reinforces one note instead of spawning twins.
 - **Model services** (`config/committee_models.yaml`): every agent references a
-  **named fallback chain** — an ordered 3-link list of `{service, model, daily_limit?,
-  reasoning_effort?}`. The current `premium` and `standard` settings start with the
-  ChatGPT-subscription Codex route (`gpt-5.6-sol`, `medium` thinking), then the metered
-  OpenAI API (`gpt-5.6-terra`, 120k daily), then NIM. `translation` currently uses the
-  OpenAI API followed by NIM fallbacks. `ask_role` walks the chain, skips any link whose
+  **named fallback chain** — an ordered 4-link list of `{service, model, daily_limit?,
+  reasoning_effort?}`. The current `premium` and `standard` settings start with local
+  Muse Glimmer 30B UD-Q4_K_XL (`xhigh` reasoning), then the ChatGPT-subscription
+  Codex route, metered OpenAI API, and NIM.
+  `translation` also includes Muse before its NIM fallbacks. `ask_role` walks the chain, skips any link whose
   daily token budget is spent, and falls through on error/empty. New settings can be
   added from the dashboard **Configure** page; per-agent assignment is a dropdown — no
   text editor needed.
@@ -556,9 +556,10 @@ Pages:
   Saves round-trip the YAML (comments preserved via `ruamel.yaml`) and clears the config
   cache so edits apply to the next run.
   **General bot chat fallback chain** — a dropdown to pick the named fallback chain the
-  conversational Telegram agent uses. Codex, OpenAI, and Claude links select their
-  corresponding whole-turn runtime; NIM links are skipped for bot chat because it has
-  no compatible tool-calling runtime. The selected Codex link also exposes its thinking
+  conversational Telegram agent uses. Codex, OpenAI, Muse Glimmer, and Claude links select
+  their corresponding whole-turn runtime; NIM links are skipped for bot chat because it has
+  no compatible tool-calling runtime. Muse supports local 4-bit `UD-Q4_K_XL` and `NVFP4`
+  deployments; see [the Muse provider guide](docs/MUSE-GLIMMER.md). The selected Codex link also exposes its thinking
   level (`low`, `medium`, `high`, `xhigh`, `max`, or `ultra`).
 
 Capture is on by default. One knob, `CIO_CAPTURE_LEVEL` (default `1`), tunes scope:

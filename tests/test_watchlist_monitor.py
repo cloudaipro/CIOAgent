@@ -267,8 +267,8 @@ def test_briefing_summary(patch_ask):
 # model chain config
 # ---------------------------------------------------------------------------
 
-def test_wma_chain_resolves_three_links():
-    """wma resolves to a NAMED 3-link chain (same setting machinery as cio).
+def test_wma_chain_includes_muse_link():
+    """wma resolves to a named chain with Muse (same setting machinery as cio).
     Link order/models are operator-tunable from the dashboard — assert the
     mechanism, not the operator's current picks."""
     from cio.committee.models import (SERVICES, chains, load_config, resolve_chain,
@@ -278,7 +278,8 @@ def test_wma_chain_resolves_three_links():
     chain = resolve_chain("wma")
     assert name is not None
     assert chain == chains()[name]
-    assert len(chain) == 3
+    assert len(chain) == 4
+    assert any(link["service"] == "muse" for link in chain)
     assert all(link["service"] in SERVICES and link["model"]
                for link in chain)
     load_config.cache_clear()

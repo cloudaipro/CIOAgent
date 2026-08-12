@@ -1312,8 +1312,8 @@ class TestModelsConfig:
         from cio.committee.models import load_config
         load_config.cache_clear()
 
-    def test_resolve_chain_cio_returns_three_links(self):
-        """cio resolves to a NAMED 3-link chain setting. Link order / models /
+    def test_resolve_chain_cio_includes_muse_link(self):
+        """cio resolves to a named chain setting that includes Muse. Link order / models /
         daily_limits are operator-tunable from the dashboard, so only the
         mechanism + structure is asserted (content pinned in test_fallback_chain
         on a temp yaml)."""
@@ -1322,7 +1322,8 @@ class TestModelsConfig:
         chain = resolve_chain("cio")
         assert name is not None
         assert chain == chains()[name]
-        assert len(chain) == 3
+        assert len(chain) == 4
+        assert any(link["service"] == "muse" for link in chain)
         assert all(link["service"] in SERVICES for link in chain)
 
     def test_resolve_market_returns_chain_head(self):

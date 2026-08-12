@@ -620,7 +620,7 @@ class _Handler(BaseHTTPRequestHandler):
                     mdl = f(f"chainlink:{cname}:{i}:model")
                     if svc:
                         link["service"] = svc
-                        if svc != "codex":
+                        if svc not in ("codex", "muse"):
                             link.pop("reasoning_effort", None)
                     if mdl:
                         link["model"] = mdl
@@ -629,11 +629,15 @@ class _Handler(BaseHTTPRequestHandler):
                         effort = f(effort_key).strip().lower()
                         if effort in ("", "default", "auto"):
                             link.pop("reasoning_effort", None)
-                        elif effort not in models.CODEX_REASONING_EFFORTS:
-                            raise ValueError(
-                                f"bad Codex thinking level {effort!r}; choose "
-                                + ", ".join(models.CODEX_REASONING_EFFORTS))
                         else:
+                            service = str(link.get("service") or "")
+                            allowed = (models.MUSE_REASONING_EFFORTS
+                                       if service == "muse"
+                                       else models.CODEX_REASONING_EFFORTS)
+                            if effort not in allowed:
+                                raise ValueError(
+                                    f"bad {service or 'model'} reasoning level "
+                                    f"{effort!r}; choose " + ", ".join(allowed))
                             link["reasoning_effort"] = effort
                     # Only touch daily_limit when the field was actually posted:
                     # present+blank = clear; absent (partial POST) = leave as is.
@@ -645,7 +649,7 @@ class _Handler(BaseHTTPRequestHandler):
                         elif "daily_limit" in link:
                             del link["daily_limit"]
 
-            # --- add a new chain setting (3-link template, edit after) ---
+            # --- add a new chain setting (4-link template, edit after) ---
             new_name = f("chain_add")
             if new_name:
                 if not all(c.isalnum() or c in "-_" for c in new_name):
@@ -697,6 +701,8 @@ class _Handler(BaseHTTPRequestHandler):
             for prov, fields in (
                 ("nim", ("base_url", "api_key_env", "max_tokens")),
                 ("openai", ("base_url", "api_key_env", "token_param", "max_tokens")),
+                ("muse", ("base_url", "api_key_env", "max_tokens", "timeout",
+                          "reasoning_strength")),
                 ("claude", ("max_thinking_tokens",)),
             ):
                 node = doc.get(prov)
@@ -711,7 +717,8 @@ class _Handler(BaseHTTPRequestHandler):
                         if field in ("max_tokens", "max_thinking_tokens") and field in node:
                             del node[field]  # blank cap → drop, fall back to default
                         continue
-                    node[field] = int(val) if field in ("max_tokens", "max_thinking_tokens") else val
+                    node[field] = int(val) if field in (
+                        "max_tokens", "max_thinking_tokens", "timeout") else val
 
             # Model catalog: rebuild each service's list from its surviving rows
             # (blank row = removed) plus any newly-added names (comma/newline split).

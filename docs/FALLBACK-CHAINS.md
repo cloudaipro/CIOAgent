@@ -26,13 +26,16 @@ chains:
   premium:                                  # subscription head → API → cheap
   - {service: codex, model: gpt-5.6-luna, reasoning_effort: max}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl}
   - {service: nim, model: moonshotai/kimi-k2.6}
   standard:                                 # subscription head → paid → cheap
   - {service: codex, model: gpt-5.6-luna, reasoning_effort: max}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl}
   - {service: nim, model: moonshotai/kimi-k2.6}
   translation:                              # API head (long-markdown TC)
   - {service: openai, model: gpt-5.4-mini-2026-03-17}
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl}
   - {service: nim, model: moonshotai/kimi-k2.6}
   - {service: nim, model: minimaxai/minimax-m2.7}
 defaults: {chain: standard}
@@ -44,7 +47,7 @@ agents:
   translator: {chain: translation}
 ```
 
-* The operator can define **any number** of settings; each ships with 3 links
+* The operator can define **any number** of settings; each ships with 4 links
   (service + model, like the original cio/wma shape). Links accept an optional
   `daily_limit` (tokens/local-day for that service).
 * Default assignments preserve previous behaviour at the head of each chain:
@@ -55,7 +58,7 @@ agents:
 
 `engine.ask_role(system, user, role_key=…)` is the single LLM entry point for the
 entire system: every feature that needs a model answer funnels through this one
-function — no caller talks to a backend (Codex / OpenAI / Claude SDK / NIM) directly.
+function — no caller talks to a backend (Codex / OpenAI / Muse / Claude SDK / NIM) directly.
 That is why implementing the chain walk once, inside `ask_role`, automatically
 gave the fallback mechanism to all agents:
 
@@ -91,12 +94,14 @@ flowchart TD
         CDX["_ask_codex<br>ChatGPT subscription<br>ephemeral app-server thread"]
         OAI["_ask_openai<br>OpenAI API"]
         CLA["_ask_claude<br>claude-agent-sdk"]
+        MUSE["_ask_muse<br>local Muse Glimmer 4-bit"]
         NIM["_ask_nim<br>NVIDIA NIM"]
     end
 
     WALK --> CDX
     WALK --> OAI
     WALK --> CLA
+    WALK --> MUSE
     WALK --> NIM
 
     WALK --> RET["Answer from the first healthy link,<br>or empty string when all links exhausted"]
@@ -112,7 +117,9 @@ role's named chain and walks it. It falls through a link when:
 2. the backend returns empty — missing API key, API error, timeout, or a
    rate/session-limit notice (`_is_limit_notice`).
 
-Codex links also carry optional `reasoning_effort`; it is passed to each turn.
+Codex and Muse links can carry optional `reasoning_effort`; it is passed to
+each turn. Muse accepts `low`, `medium`, `high`, or `xhigh` and defaults to
+`xhigh`.
 Parallel agents share one app-server process but receive separate ephemeral threads.
 Tokens of every attempt are recorded per service per local day (`usage.record`).
 `""` is returned only when every link is exhausted. Budget accounting is
@@ -140,7 +147,7 @@ Never raises; never returns an empty list. `resolve(role)` now returns the chain
 | `chain_names()` | setting names in config order |
 | `resolve_chain_name(role)` | which named setting a role uses (`None` for legacy inline) |
 | `resolve_chain(role)` | the effective link list (see 2.3) |
-| `new_chain_links()` | 3-link template for settings created from the UI |
+| `new_chain_links()` | 4-link template for settings created from the UI |
 
 The built-in `_BUILTIN` defaults mirror the new yaml schema, so the system behaves
 identically with no config file at all.
@@ -153,7 +160,7 @@ Rewritten around named settings:
   (per link: service dropdown, model dropdown fed by the model catalog,
   daily token limit). Each setting has a *delete* checkbox; deletion is refused
   while any agent (or defaults) still references it. A text box adds a new
-  setting by name (letters/digits/`-`/`_`), created from the 3-link template.
+  setting by name (letters/digits/`-`/`_`), created from the 4-link template.
 * **Agents** section — one row per agent (defaults + market…moderator, cio, wma,
   translator) with a **chain dropdown**. An agent still on a legacy inline config
   shows a "(legacy inline — pick a chain to convert)" placeholder: leaving it
@@ -186,11 +193,11 @@ All tests offline (backends monkeypatched, temp SQLite, temp yaml via
 `CIO_MODELS_CONFIG`). Test policy: chain CONTENT (link order, models,
 daily_limit values) is operator-tunable from the dashboard, so tests that read
 the repo yaml assert only the MECHANISM (named resolution, structure,
-3-link shape); all content/budget semantics run against pinned temp configs.
+4-link shape); all content/budget semantics run against pinned temp configs.
 
 ### A. Config resolution (`tests/test_fallback_chain.py`)
-- repo yaml: cio→`premium` (codex/openai/nim), specialists→`standard` (codex head,
-  3 links), translator→`translation` (OpenAI head), unknown role→defaults chain,
+- repo yaml: cio→`premium` (codex/openai/muse/nim), specialists→`standard` (codex head,
+  4 links), translator→`translation` (OpenAI head), unknown role→defaults chain,
   `resolve()` == chain head, `chain_names()` complete — **pass**
 - temp yaml: named lookup with limits, unknown chain name → defaults fallback,
   legacy inline chain, legacy `{service, model}` agent, legacy defaults,
@@ -208,7 +215,7 @@ the repo yaml assert only the MECHANISM (named resolution, structure,
 ### D. Dashboard (`tests/test_dashboard.py`)
 - render: chain editor inputs, delete checkboxes, add box, per-agent dropdowns,
   legacy placeholder, old per-agent service widgets gone — **pass**
-- live HTTP POST round-trip: edit link model + limit, add setting (3-link
+- live HTTP POST round-trip: edit link model + limit, add setting (4-link
   template), reassign agent, delete unreferenced setting, **refuse** deleting a
   referenced setting, running process resolves new assignment immediately — **pass**
 - legacy conversion: picking a chain converts an inline agent (drops

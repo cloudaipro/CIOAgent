@@ -215,7 +215,7 @@ flowchart TD
 committee route through it; tests monkeypatch this one function). Resolution order:
 
 1. **Explicit `service` argument** → single dispatch, no chain (legacy/override path).
-2. **`role_key` set** → `resolve_chain(role_key)` returns the role's **named 3-link chain**
+2. **`role_key` set** → `resolve_chain(role_key)` returns the role's **named 4-link chain**
    from `committee_models.yaml`. The current `standard` and `premium` settings start with
    Codex (`gpt-5.6-luna`, `max`) → OpenAI API (`gpt-5.6-terra`) → NIM; `translation`
    starts with OpenAI mini and then uses two NIM fallbacks. Every role has a chain; none

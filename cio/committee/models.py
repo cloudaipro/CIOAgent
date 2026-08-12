@@ -4,7 +4,7 @@ models.py — Per-agent model service config loader for the investment committee
 Usage:
     from cio.committee.models import (
         load_config, resolve, resolve_chain, chains, chain_names, resolve_chain_name,
-        nim_settings, openai_settings,
+        nim_settings, openai_settings, muse_settings,
     )
 
 ``load_config`` is cached per (path, file mtime), so edits saved from the
@@ -35,6 +35,7 @@ _BUILTIN: dict[str, Any] = {
         "premium": [
             {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
             {"service": "claude", "model": "claude-opus-4-8",    "daily_limit": 200000},
+            {"service": "muse",   "model": "muse-glimmer-30b-ud-q4-k-xl", "reasoning_effort": "xhigh"},
             {"service": "nim",    "model": "moonshotai/kimi-k2.6"},  # last resort
         ],
         # standard: subscription head (same primary the specialists always
@@ -42,17 +43,20 @@ _BUILTIN: dict[str, Any] = {
         "standard": [
             {"service": "claude", "model": "claude-opus-4-8"},
             {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+            {"service": "muse",   "model": "muse-glimmer-30b-ud-q4-k-xl", "reasoning_effort": "xhigh"},
             {"service": "nim",    "model": "moonshotai/kimi-k2.6"},
         ],
         # translation: sonnet head (reliable long-markdown TC), opus backup.
         "translation": [
             {"service": "claude", "model": "claude-sonnet-4-6"},
             {"service": "claude", "model": "claude-opus-4-8"},
+            {"service": "muse",   "model": "muse-glimmer-30b-ud-q4-k-xl", "reasoning_effort": "xhigh"},
             {"service": "nim",    "model": "moonshotai/kimi-k2.6"},
         ],
         "bot_chat": [
             {"service": "codex",  "model": "default", "reasoning_effort": "high"},
             {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+            {"service": "muse",   "model": "muse-glimmer-30b-ud-q4-k-xl", "reasoning_effort": "xhigh"},
             {"service": "claude", "model": "claude-opus-4-8"},
         ],
     },
@@ -81,18 +85,26 @@ _BUILTIN: dict[str, Any] = {
         "base_url": "https://api.openai.com/v1",
         "api_key_env": "OPENAI_API_KEY",
     },
+    "muse": {
+        "base_url": "http://127.0.0.1:8001/v1",
+        "api_key_env": "CIO_MUSE_API_KEY",
+        "max_tokens": 20480,
+        "timeout": 300,
+        "reasoning_strength": "xhigh",
+    },
 }
 
 # Repo-relative config path (resolved once at module import)
 _REPO_CONFIG = Path(__file__).parent.parent.parent / "config" / "committee_models.yaml"
 
 # Services the dashboard Configure tab offers in its service combo box.
-SERVICES = ("claude", "nim", "openai", "codex")
+SERVICES = ("claude", "nim", "openai", "codex", "muse")
 
 # Values currently advertised across Codex subscription models. Availability is
 # model-specific (newer models add max/ultra), so app-server remains the final
 # validator for the selected model.
 CODEX_REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
+MUSE_REASONING_EFFORTS = ("low", "medium", "high", "xhigh")
 
 # Fallback model catalog per service for the Configure tab. The live catalog is
 # read from ``model_catalog:`` in committee_models.yaml (editable via the dashboard);
@@ -114,6 +126,9 @@ MODEL_SUGGESTIONS: dict[str, list[str]] = {
     # current default. This avoids pinning a model name that may not be enabled
     # for every ChatGPT plan.
     "codex": ["default"],
+    # Stable aliases recommended by docs/MUSE-GLIMMER.md. Point either alias at
+    # the matching local deployment; the wire protocol is identical.
+    "muse": ["muse-glimmer-30b-ud-q4-k-xl", "muse-glimmer-30b-nvfp4"],
 }
 
 
@@ -263,6 +278,40 @@ def openai_settings() -> dict:
     }
 
 
+def muse_reasoning_effort(reasoning_effort: str | None = None) -> str:
+    """Resolve Muse reasoning strength (env > chain link > provider > xhigh)."""
+    muse: dict = load_config().get("muse", {})
+    strength = str(
+        os.getenv("CIO_MUSE_REASONING_STRENGTH")
+        or reasoning_effort
+        or muse.get("reasoning_strength", "xhigh")
+    ).strip().lower()
+    if strength not in MUSE_REASONING_EFFORTS:
+        log.warning("bad Muse reasoning strength %r; using xhigh", strength)
+        return "xhigh"
+    return strength
+
+
+def muse_settings() -> dict:
+    """Return the local Muse Glimmer OpenAI-compatible endpoint settings.
+
+    ``CIO_MUSE_API_KEY`` is optional because llama-server and local vLLM
+    normally run without authentication. If it is unset, clients use the
+    harmless placeholder ``local`` required by the OpenAI Python client.
+    """
+    cfg = load_config()
+    muse: dict = cfg.get("muse", {})
+    return {
+        "base_url": os.getenv("CIO_MUSE_BASE_URL")
+        or muse.get("base_url", "http://127.0.0.1:8001/v1"),
+        "api_key_env": muse.get("api_key_env", "CIO_MUSE_API_KEY"),
+        "max_output_tokens": _int_setting(
+            "CIO_MUSE_MAX_TOKENS", muse.get("max_tokens"), 20480),
+        "timeout": _int_setting("CIO_MUSE_TIMEOUT", muse.get("timeout"), 300),
+        "reasoning_strength": muse_reasoning_effort(),
+    }
+
+
 def _normalize_links(raw) -> list[dict]:
     """Normalise a raw chain link list: each link gets service + model, and
     daily_limit only when set. Non-dict links are skipped. Never raises."""
@@ -279,8 +328,14 @@ def _normalize_links(raw) -> list[dict]:
         entry: dict = {"service": str(svc), "model": mdl}
         effort = (link.get("reasoning_effort") or link.get("thinking_level")
                   or link.get("effort"))
-        if effort and str(svc) == "codex":
-            entry["reasoning_effort"] = str(effort).strip().lower()
+        if effort and str(svc) in ("codex", "muse"):
+            normalized_effort = str(effort).strip().lower()
+            allowed = (CODEX_REASONING_EFFORTS if str(svc) == "codex"
+                       else MUSE_REASONING_EFFORTS)
+            if normalized_effort in allowed:
+                entry["reasoning_effort"] = normalized_effort
+            else:
+                log.warning("ignoring bad %s reasoning effort %r", svc, effort)
         if "daily_limit" in link and link["daily_limit"] is not None:
             try:
                 entry["daily_limit"] = int(link["daily_limit"])
@@ -377,11 +432,11 @@ def resolve_chain(role_key: str) -> list[dict]:
 
 
 def new_chain_links() -> list[dict]:
-    """Template links for a chain setting created from the Configure tab:
-    3 services (claude → openai → nim), editable after creation."""
+    """Template links for a chain setting created from the Configure tab."""
     return [
         {"service": "claude", "model": "claude-opus-4-8"},
         {"service": "openai", "model": "gpt-5.5-2026-04-23", "daily_limit": 200000},
+        {"service": "muse", "model": "muse-glimmer-30b-ud-q4-k-xl", "reasoning_effort": "xhigh"},
         {"service": "nim", "model": "moonshotai/kimi-k2.6"},
     ]
 

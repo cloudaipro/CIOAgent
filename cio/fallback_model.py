@@ -1,7 +1,7 @@
 """
-fallback_model.py — chain-walking Model for the OpenAI side of bot chat.
+fallback_model.py — chain-walking Model for OpenAI-compatible bot runtimes.
 
-FallbackModel wraps an ordered list of OpenAI fallback-chain links (the shape
+FallbackModel wraps an ordered list of same-service fallback-chain links (the shape
 ``cio.committee.models.bot_chat_chain()`` returns) behind a single
 ``agents.models.interface.Model``. The Agents SDK calls ``get_response`` once
 per model call within a turn, running tool calls *between* calls — so walking
@@ -10,11 +10,9 @@ never replays a tool that already fired: a fallback only changes which model
 answers the *next* call. See docs/BOT-CHAT-OPENAI-MIGRATION.md and
 handoff/ARCHITECT-BRIEF.md, Step 14.
 
-Standalone module: nothing imports this yet. cio/agent_openai.py (Step 15) is
-the first caller, and it is the one responsible for constructing a
-FallbackModel only when an openai link actually exists in the chosen chain.
+``cio.agent_openai`` constructs it for either hosted OpenAI or local Muse.
 
-Every link this class is constructed with has ``service == "openai"`` (see
+Every link this class is constructed with has the selected service (see
 FallbackModel.__init__) — a link's ``service`` is the same key
 ``cio.committee.engine``'s limit latch and ``cio.committee.usage``'s daily
 budget are keyed on, both reused unchanged here rather than reinvented.
@@ -54,10 +52,10 @@ _RERAISE = "reraise"    # do not try further links; the request itself is bad
 
 
 class FallbackModel(Model):
-    """A ``Model`` that walks an ordered list of OpenAI fallback-chain links.
+    """A ``Model`` that walks one provider's ordered fallback-chain links.
 
-    Construction filters *links* down to ``service == "openai"`` entries; a
-    chain with no OpenAI link is a wiring error, not a runtime condition to
+    Construction filters *links* down to the selected service (OpenAI by
+    default); a chain with no matching link is a wiring error, not a runtime condition to
     degrade from, so it raises ``ValueError`` immediately.
 
     Every ``get_response`` call re-walks the (already-filtered) chain from
@@ -73,13 +71,15 @@ class FallbackModel(Model):
     method never returns a synthetic or empty ``ModelResponse``.
     """
 
-    def __init__(self, links: list[dict], *, model_factory: ModelFactory | None = None) -> None:
+    def __init__(self, links: list[dict], *, model_factory: ModelFactory | None = None,
+                 service: str = "openai") -> None:
+        self._service = service
         self._links: list[dict] = [
             dict(link) for link in links
-            if isinstance(link, dict) and link.get("service") == "openai"
+            if isinstance(link, dict) and link.get("service") == service
         ]
         if not self._links:
-            raise ValueError("FallbackModel: no openai links in the given chain")
+            raise ValueError(f"FallbackModel: no {service} links in the given chain")
         self._model_factory: ModelFactory = model_factory or self._build_delegate
         self._delegates: dict[int, Model] = {}      # link index -> built Model (build/reuse)
         self._clients: dict[str, openai.AsyncOpenAI] = {}  # base_url -> client (Decision 7)
@@ -109,7 +109,8 @@ class FallbackModel(Model):
 
     # -- delegate construction (default model_factory) -----------------------
 
-    def _client_for(self, base_url: str, api_key_env: str) -> openai.AsyncOpenAI | None:
+    def _client_for(self, base_url: str, api_key_env: str,
+                    *, key_optional: bool = False) -> openai.AsyncOpenAI | None:
         """The cached AsyncOpenAI client for *base_url*, built lazily.
 
         One client per distinct base_url, not one per call (Decision 7).
@@ -121,9 +122,12 @@ class FallbackModel(Model):
             return client
         key = os.getenv(api_key_env)
         if not key:
-            log.warning("FallbackModel: %s is not set; skipping the openai link(s) at %s",
-                        api_key_env, base_url)
-            return None
+            if key_optional:
+                key = "local"
+            else:
+                log.warning("FallbackModel: %s is not set; skipping the %s link(s) at %s",
+                            api_key_env, self._service, base_url)
+                return None
         client = openai.AsyncOpenAI(api_key=key, base_url=base_url)
         self._clients[base_url] = client
         return client
@@ -149,6 +153,19 @@ class FallbackModel(Model):
         the item shape `SQLiteSession` persists are both Responses-shaped, and
         were being down-converted per call.
         """
+        if self._service == "muse":
+            settings = models.muse_settings()
+            client = self._client_for(settings["base_url"], settings["api_key_env"],
+                                      key_optional=True)
+            if client is None:
+                return None
+            # Local llama-server/vLLM deployments implement Chat Completions;
+            # unlike OpenAI's hosted path they are not assumed to implement
+            # the Responses API.
+            from agents import OpenAIChatCompletionsModel
+            return OpenAIChatCompletionsModel(
+                model=link["model"], openai_client=client)
+
         settings = models.openai_settings()
         client = self._client_for(settings["base_url"], settings["api_key_env"])
         if client is None:

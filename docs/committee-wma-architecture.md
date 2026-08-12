@@ -19,7 +19,7 @@ architecture is shaped by three principles:
    produced — **zero additional LLM calls**.
 
 The model strategy reflects #1: every committee role is assigned a **named fallback chain**
-— an ordered 3-link list of `{service, model, daily_limit?, reasoning_effort?}` defined once
+— an ordered 4-link list of `{service, model, daily_limit?, reasoning_effort?}` defined once
 in `config/committee_models.yaml` and referenced by name per agent. The current `standard`
 and `premium` settings start with ChatGPT-subscription Codex (`gpt-5.6-luna`, `max`), then
 the metered OpenAI API (`gpt-5.6-terra`, 120k/day), then NIM. `translation` starts with

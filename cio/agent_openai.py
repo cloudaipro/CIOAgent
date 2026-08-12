@@ -58,7 +58,7 @@ NO_OUTPUT_MESSAGE = (
 )
 
 
-def _model_settings() -> ModelSettings:
+def _model_settings(service: str = "openai") -> ModelSettings:
     """The per-turn `ModelSettings` for the OpenAI runtime.
 
     Read at agent-build time rather than at import, so an operator's config
@@ -87,7 +87,9 @@ def _model_settings() -> ModelSettings:
     """
     cap = None
     try:
-        cap = models.openai_settings().get("max_output_tokens")
+        settings = (models.muse_settings() if service == "muse"
+                    else models.openai_settings())
+        cap = settings.get("max_output_tokens")
     except Exception:
         log.warning("could not read the OpenAI output cap; this turn runs uncapped",
                     exc_info=True)
@@ -95,6 +97,9 @@ def _model_settings() -> ModelSettings:
     # max_output_tokens=0 and guarantee an empty turn.
     if not isinstance(cap, int) or cap <= 0:
         cap = None
+    if service == "muse":
+        return ModelSettings(temperature=1.0, top_p=0.95, max_tokens=cap,
+                             extra_body={"top_k": 64})
     return ModelSettings(store=False, max_tokens=cap)
 
 
@@ -160,14 +165,21 @@ class OpenAIRuntime(BaseRuntime):
     """
 
     def __init__(self, links: list[dict], model: str | None = None,
-                 chat_id: int | None = None, on_session_id=None):
+                 chat_id: int | None = None, on_session_id=None,
+                 service: str = "openai"):
         # "openai" is what Standing Rule R4 (usage.record / convlog.log_call
         # attribution) keys on -- it is the entire reason the hardcoded
         # "claude" literal was removed from BaseRuntime in Step 10. No SDK
         # session id exists yet at construction time (session_id=None); the
         # real one is reported through `_note_session` once `_ensure` builds it.
-        super().__init__(model, chat_id, on_session_id, "openai", None)
+        if model is None and links:
+            model = links[0].get("model")
+        super().__init__(model, chat_id, on_session_id, service, None)
         self._links = links
+        self._reasoning_effort = None
+        if service == "muse":
+            link_effort = links[0].get("reasoning_effort") if links else None
+            self._reasoning_effort = models.muse_reasoning_effort(link_effort)
         self._session: SQLiteSession | None = None
         self._agent: Agent | None = None
         # Built once and reused across agent rebuilds. FallbackModel caches an
@@ -185,15 +197,18 @@ class OpenAIRuntime(BaseRuntime):
         paths pick up the latest digest the same way. The FallbackModel is
         built once and carried across rebuilds (see `__init__`)."""
         prompt = context.compose_system_prompt(SYSTEM_PROMPT, self._chat_id)
+        if self._service == "muse":
+            prompt = (f"{prompt.rstrip()}\n\nReasoning strength: "
+                      f"{self._reasoning_effort}.")
         self._system_prompt = prompt
         if self._model_impl is None:
-            self._model_impl = FallbackModel(self._links)
+            self._model_impl = FallbackModel(self._links, service=self._service)
         return Agent(
             name="cio",
             instructions=prompt,
             tools=OPENAI_TOOLS,
             model=self._model_impl,
-            model_settings=_model_settings(),
+            model_settings=_model_settings(self._service),
         )
 
     async def _ensure(self) -> None:
@@ -270,7 +285,14 @@ class OpenAIRuntime(BaseRuntime):
             # empty output rather than this stand-in.
             log.warning("OpenAI turn produced no text after %d tokens; the output "
                         "cap is the usual cause", tokens)
-            text = NO_OUTPUT_MESSAGE
+            if self._service == "muse":
+                text = (
+                    "I ran out of output budget before I could answer. Raise "
+                    "`muse.max_tokens` in config/committee_models.yaml or "
+                    "`CIO_MUSE_MAX_TOKENS`, then ask again."
+                )
+            else:
+                text = NO_OUTPUT_MESSAGE
         images = list(_PENDING)
         _PENDING.clear()
         # Documents (committee PDF) are stashed on the instance, not returned,

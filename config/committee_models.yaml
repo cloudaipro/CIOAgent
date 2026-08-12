@@ -2,21 +2,24 @@
 # service: "claude" = claude-agent-sdk (subscription, no key) | "nim" = NVIDIA NIM (needs NVIDIA_API_KEY)
 #          "openai" = OpenAI API (needs OPENAI_API_KEY)
 #          "codex" = OpenAI via ChatGPT subscription (`codex login`, no API key)
+#          "muse" = local Muse Glimmer OpenAI-compatible server (no key by default)
 #
 # chains: named fallback-chain settings. Each setting is an ordered list of
-# 3 links {service, model, daily_limit?}; ask_role walks them in order and
+# links {service, model, daily_limit?, reasoning_effort?}; ask_role walks them in order and
 # falls through when a link is over its daily token budget or returns empty
 # (key missing / API error / limit notice). Add/edit/remove settings here or
 # from the dashboard Configure tab.
 chains:
   # premium: ChatGPT subscription -> metered API -> cheap last resort (cio, wma).
   premium:
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # standard: subscription head (same primary the specialists always used),
   # degrading to paid then cheap.
   standard:
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
@@ -26,12 +29,14 @@ chains:
   # regardless of which backend answers.
   translation:
   - {service: openai, model: gpt-5.4-mini-2026-03-17}
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: nim, model: moonshotai/kimi-k2.6}
   - {service: nim, model: minimaxai/minimax-m2.7}
-  # bot_chat: general Telegram chat. It supports codex+openai+claude; nim is skipped.
+  # bot_chat: general Telegram chat. It supports codex+openai+muse+claude; nim is skipped.
   # The first link needs a strong tool-caller. Codex uses the
   # logged-in ChatGPT subscription; metered OpenAI API and Claude are fallbacks.
   bot_chat:
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
@@ -63,6 +68,11 @@ nim: {base_url: "https://integrate.api.nvidia.com/v1", api_key_env: NVIDIA_API_K
 # token_param: gpt-5.x wants max_completion_tokens; older chat models want max_tokens.
 # max_tokens here is the output-cap VALUE. Env CIO_OPENAI_TOKEN_PARAM / CIO_OPENAI_MAX_TOKENS override.
 openai: {base_url: "https://api.openai.com/v1", api_key_env: OPENAI_API_KEY, token_param: max_completion_tokens, max_tokens: 20480}
+# Muse Glimmer is served locally through an OpenAI-compatible API. Both
+# UD-Q4_K_XL (llama-server) and NVFP4 deployments use this same provider seam.
+# CIO_MUSE_BASE_URL / CIO_MUSE_MAX_TOKENS / CIO_MUSE_TIMEOUT /
+# CIO_MUSE_REASONING_STRENGTH override these values. CIO_MUSE_API_KEY is optional.
+muse: {base_url: "http://127.0.0.1:8001/v1", api_key_env: CIO_MUSE_API_KEY, max_tokens: 20480, timeout: 300, reasoning_strength: xhigh}
 # model_catalog: per-service model-name suggestions for the dashboard Configure tab.
 # Maintained from the UI ("Manage model catalog"). Free text is always allowed; this
 # only seeds the dropdowns. Services omitted here fall back to built-in defaults.
@@ -85,3 +95,6 @@ model_catalog:
   - gpt-5.6-sol
   - gpt-5.6-terra
   - gpt-5.6-luna
+  muse:
+  - muse-glimmer-30b-ud-q4-k-xl
+  - muse-glimmer-30b-nvfp4
