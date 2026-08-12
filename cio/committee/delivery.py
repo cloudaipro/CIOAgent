@@ -27,6 +27,22 @@ def _safe_name(text: str, fallback: str = "report") -> str:
     return s or fallback
 
 
+def _collision_safe_path(path: Path, result) -> Path:
+    """Keep the familiar date-only name for the first run; never overwrite it."""
+    if not path.exists() and not path.with_suffix(".md").exists():
+        return path
+    as_of = str(getattr(result, "as_of", "") or "")
+    time_part = re.sub(r"\D", "", as_of[11:19]) or datetime.datetime.now().strftime("%H%M%S")
+    run_id = str(getattr(getattr(result, "tirf", None), "run_id", "") or "")[:12]
+    suffix = f"_{time_part}" + (f"_{run_id}" if run_id else "")
+    candidate = path.with_name(f"{path.stem}{suffix}{path.suffix}")
+    counter = 2
+    while candidate.exists() or candidate.with_suffix(".md").exists():
+        candidate = path.with_name(f"{path.stem}{suffix}_{counter}{path.suffix}")
+        counter += 1
+    return candidate
+
+
 @dataclass
 class CommitteeArtifact:
     """A finished committee run ready to hand to a transport (Telegram, agent).
@@ -80,7 +96,10 @@ async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
 
     reports_dir.mkdir(parents=True, exist_ok=True)
     report_title = f"Investment Committee Report: {sym}{lang_label}"
-    pdf_path = reports_dir / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.pdf"
+    pdf_path = _collision_safe_path(
+        reports_dir / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.pdf",
+        result,
+    )
     # Best-effort indicator-visualization chart for the dossier appendix.
     appendix_images = []
     try:
@@ -99,7 +118,7 @@ async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
         pdf_path.with_suffix(".md").write_text(md, encoding="utf-8")
     except Exception:
         log.exception("PDF render failed for %s; falling back to .md", sym)
-        md_path = reports_dir / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.md"
+        md_path = pdf_path.with_suffix(".md")
         md_path.write_text(md, encoding="utf-8")
         doc_path = md_path
 

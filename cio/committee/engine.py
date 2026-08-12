@@ -18,13 +18,12 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-import yaml
-
 from .bundle import gather_bundle, format_bundle
 from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
 from . import agent_memory
 from . import note_sanitizer
 from . import sanitizer_log
+from . import structured
 from . import transcript as _transcript
 from . import usage as _usage
 from .models import (
@@ -49,6 +48,13 @@ _RUN_SYMBOL: contextvars.ContextVar[str | None] = contextvars.ContextVar("cio_ru
 # agent's run_committee tool), or "cli". Set by the caller before run_committee;
 # propagates into the parallel role tasks like _RUN_ID does.
 _RUN_SOURCE: contextvars.ContextVar[str] = contextvars.ContextVar("cio_run_source", default="command")
+# A separate context variable preserves the long-standing ``ask_role`` call
+# signature, including its monkeypatch seam, while allowing provider adapters to
+# receive a schema during real structured committee calls.
+_RESPONSE_SCHEMA: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "cio_response_schema", default=None)
+_RESPONSE_SCHEMA_NAME: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "cio_response_schema_name", default="committee_output")
 
 
 def set_run_source(source: str) -> None:
@@ -99,7 +105,7 @@ You are serving as one analytical agent inside cio.bot. Follow the supplied
 base instructions and answer only the user's one-shot prompt. Do not inspect
 files, run shell commands, modify the workspace, or call tools. The prompt
 already contains the evidence you should analyze. Return only the requested
-answer, preserving any required YAML or Markdown format.
+answer, preserving any required JSON or Markdown format.
 """.strip()
 
 
@@ -177,7 +183,9 @@ is_latched = _latched
 # OpenAI backend
 # ---------------------------------------------------------------------------
 
-async def _ask_openai(system_prompt: str, user_prompt: str, model: str | None = None) -> tuple[str, int]:
+async def _ask_openai(system_prompt: str, user_prompt: str, model: str | None = None,
+                      response_schema: dict | None = None,
+                      schema_name: str = "committee_output") -> tuple[str, int]:
     """
     One-shot LLM query via OpenAI API.
 
@@ -202,13 +210,17 @@ async def _ask_openai(system_prompt: str, user_prompt: str, model: str | None = 
         # Output cap is configurable: gpt-5.x wants `max_completion_tokens` and only
         # accepts the default temperature (so no temperature override); older chat
         # models want `max_tokens`. Both name and value come from openai_settings().
+        request_kwargs = {settings["token_param"]: settings["max_output_tokens"]}
+        if response_schema is not None:
+            request_kwargs["response_format"] = structured.response_format(
+                response_schema, schema_name)
         resp = await client.chat.completions.create(
             model=effective_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            **{settings["token_param"]: settings["max_output_tokens"]},
+            **request_kwargs,
         )
         text = (resp.choices[0].message.content or "").strip()
         tok = resp.usage.total_tokens if resp.usage else 0
@@ -258,6 +270,7 @@ async def _ask_codex(
     user_prompt: str,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    response_schema: dict | None = None,
 ) -> tuple[str, int]:
     """One-shot query billed through the account authenticated by ``codex login``."""
     from .. import context
@@ -278,8 +291,10 @@ async def _ask_codex(
             developer_instructions=_CODEX_ONESHOT_DEVELOPER_INSTRUCTIONS,
             ephemeral=True,
         )
-        text, tokens = await client.run_turn(
-            thread_id, user_prompt, effort=effort, model=effective_model)
+        turn_kwargs = {"effort": effort, "model": effective_model}
+        if response_schema is not None:
+            turn_kwargs["output_schema"] = response_schema
+        text, tokens = await client.run_turn(thread_id, user_prompt, **turn_kwargs)
         text = (text or "").strip()
         if _is_limit_notice(text):
             log.warning("_ask_codex hit a limit notice; treating as empty")
@@ -304,7 +319,8 @@ async def _ask_codex(
 # Claude backend
 # ---------------------------------------------------------------------------
 
-async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = None) -> tuple[str, int]:
+async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = None,
+                      response_schema: dict | None = None) -> tuple[str, int]:
     """
     One-shot LLM query using the subscription claude-agent-sdk client.
 
@@ -317,6 +333,7 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
         ClaudeAgentOptions,
         ClaudeSDKClient,
         TextBlock,
+        ResultMessage,
     )
 
     resolved_model = model or os.getenv("CIO_MODEL") or None
@@ -333,6 +350,11 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
     max_thinking = claude_settings().get("max_thinking_tokens")
     if max_thinking is not None:
         opt_kwargs["max_thinking_tokens"] = max_thinking
+    if response_schema is not None:
+        opt_kwargs["output_format"] = {
+            "type": "json_schema",
+            "schema": response_schema,
+        }
 
     opts = ClaudeAgentOptions(**opt_kwargs)
 
@@ -341,6 +363,7 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
         await client.connect()
         await client.query(user_prompt)
         parts: list[str] = []
+        structured_output = None
         total_tokens = 0
         async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
@@ -354,8 +377,12 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
                         total_tokens += (getattr(u, "input_tokens", 0) or 0) + (getattr(u, "output_tokens", 0) or 0)
                 except Exception:
                     pass
+            elif isinstance(msg, ResultMessage) and msg.structured_output is not None:
+                structured_output = msg.structured_output
         await client.disconnect()
-        collected = "\n".join(parts).strip()
+        collected = (structured.canonical(structured_output)
+                     if isinstance(structured_output, dict)
+                     else "\n".join(parts).strip())
         if _is_limit_notice(collected):
             log.warning("_ask_claude hit a limit notice; treating as empty")
             _latch("claude")
@@ -374,7 +401,9 @@ async def _ask_claude(system_prompt: str, user_prompt: str, model: str | None = 
 # NIM backend (NVIDIA NIM, OpenAI-compatible via httpx)
 # ---------------------------------------------------------------------------
 
-async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = None) -> tuple[str, int]:
+async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = None,
+                   response_schema: dict | None = None,
+                   schema_name: str = "committee_output") -> tuple[str, int]:
     """
     One-shot LLM query via NVIDIA NIM (OpenAI-compatible REST API).
 
@@ -413,6 +442,9 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
         "max_tokens": settings["max_output_tokens"],
         "stream": False,
     }
+    if response_schema is not None:
+        payload["response_format"] = structured.response_format(
+            response_schema, schema_name)
     headers = {
         "Authorization": f"Bearer {key}",
         "Accept": "application/json",
@@ -523,7 +555,9 @@ async def _ask_nim(system_prompt: str, user_prompt: str, model: str | None = Non
 
 async def _ask_muse(system_prompt: str, user_prompt: str,
                     model: str | None = None,
-                    reasoning_effort: str | None = None) -> tuple[str, int]:
+                    reasoning_effort: str | None = None,
+                    response_schema: dict | None = None,
+                    schema_name: str = "committee_output") -> tuple[str, int]:
     """One-shot query to a local UD-Q4_K_XL or NVFP4 Muse deployment.
 
     llama-server and vLLM expose the same ``/v1/chat/completions`` contract,
@@ -553,6 +587,9 @@ async def _ask_muse(system_prompt: str, user_prompt: str,
         "max_tokens": settings["max_output_tokens"],
         "stream": False,
     }
+    if response_schema is not None:
+        payload["response_format"] = structured.response_format(
+            response_schema, schema_name)
     headers = {"Accept": "application/json"}
     key = os.getenv(settings["api_key_env"])
     if key:
@@ -597,19 +634,33 @@ async def _dispatch(
     user_prompt: str,
     model: str | None,
     reasoning_effort: str | None = None,
+    response_schema: dict | None = None,
+    schema_name: str = "committee_output",
 ) -> tuple[str, int]:
     """Route one call to the correct backend; return (text, tokens)."""
     if service == "openai":
+        if response_schema is not None:
+            return await _ask_openai(system_prompt, user_prompt, model,
+                                     response_schema, schema_name)
         return await _ask_openai(system_prompt, user_prompt, model)
     if service == "nim":
+        if response_schema is not None:
+            return await _ask_nim(system_prompt, user_prompt, model,
+                                  response_schema, schema_name)
         return await _ask_nim(system_prompt, user_prompt, model)
     if service == "muse":
-        return await _ask_muse(
-            system_prompt, user_prompt, model, reasoning_effort=reasoning_effort)
+        kwargs = {"reasoning_effort": reasoning_effort}
+        if response_schema is not None:
+            kwargs.update(response_schema=response_schema, schema_name=schema_name)
+        return await _ask_muse(system_prompt, user_prompt, model, **kwargs)
     if service == "codex":
-        return await _ask_codex(
-            system_prompt, user_prompt, model, reasoning_effort=reasoning_effort)
+        kwargs = {"reasoning_effort": reasoning_effort}
+        if response_schema is not None:
+            kwargs["response_schema"] = response_schema
+        return await _ask_codex(system_prompt, user_prompt, model, **kwargs)
     if service == "claude":
+        if response_schema is not None:
+            return await _ask_claude(system_prompt, user_prompt, model, response_schema)
         return await _ask_claude(system_prompt, user_prompt, model)
     log.warning("unknown model service %r; returning empty", service)
     return ("", 0)
@@ -637,12 +688,35 @@ async def ask_role(
          Iterates links in order:
            a. If the link is over its daily budget → skip (log).
            b. Else dispatch; record usage.
-           c. If text is non-empty → return it.
-           d. Empty result (key missing / API error) → try next link.
+           c. For structured calls, parse and validate non-empty text.
+           d. Empty or invalid result → retry/fall through to the next link.
       3. role_key is None → single dispatch to claude (no-key legacy path).
 
     Returns the assistant text, or "" when every link is exhausted.
     """
+    response_schema = _RESPONSE_SCHEMA.get()
+    schema_name = _RESPONSE_SCHEMA_NAME.get()
+    try:
+        structured_retries = (max(0, int(os.getenv("CIO_STRUCTURED_RETRIES", "1")))
+                              if response_schema is not None else 0)
+    except ValueError:
+        log.warning("invalid CIO_STRUCTURED_RETRIES; using 1")
+        structured_retries = 1 if response_schema is not None else 0
+
+    def _accepted(text: str, svc: str, attempt: int) -> str:
+        if not text or response_schema is None:
+            return text
+        value = structured.parse(text)
+        ok, detail = structured.validate(value, response_schema)
+        if ok:
+            return structured.canonical(value)
+        log.warning(
+            "structured output rejected: run=%s role=%s provider=%s attempt=%d/%d error=%s",
+            _RUN_ID.get() or "-", role_key or "?", svc, attempt + 1,
+            structured_retries + 1, detail,
+        )
+        return ""
+
     # --- Explicit service override: single dispatch, record, return. ---
     if service is not None:
         if model is None and role_key is not None:
@@ -658,19 +732,28 @@ async def ask_role(
                         and (model is None or link.get("model") == effective_model)):
                     reasoning_effort = link.get("reasoning_effort")
                     break
-        text, tok = await _dispatch(
-            service, system_prompt, user_prompt, effective_model, reasoning_effort)
-        _usage.record(service, tok)
-        _capture(service, effective_model, system_prompt, user_prompt, text, tok, role_key)
-        return text
+        for attempt in range(structured_retries + 1):
+            text, tok = await _dispatch(
+                service, system_prompt, user_prompt, effective_model, reasoning_effort,
+                response_schema, schema_name)
+            _usage.record(service, tok)
+            _capture(service, effective_model, system_prompt, user_prompt, text, tok, role_key)
+            accepted = _accepted(text, service, attempt)
+            if accepted:
+                return accepted
+            if not text:
+                break
+        return ""
 
     # --- No role_key: legacy path → claude ---
     if role_key is None:
         log.info("agent ? → claude:(default)")
-        text, tok = await _ask_claude(system_prompt, user_prompt, model)
+        text, tok = await _ask_claude(
+            system_prompt, user_prompt, model, response_schema) if response_schema else \
+            await _ask_claude(system_prompt, user_prompt, model)
         _usage.record("claude", tok)
         _capture("claude", model, system_prompt, user_prompt, text, tok, role_key)
-        return text
+        return _accepted(text, "claude", 0)
 
     # --- Chain-aware dispatch ---
     chain = _resolve_chain(role_key)
@@ -694,41 +777,61 @@ async def ask_role(
 
         effort_log = f" (thinking={effort})" if svc == "codex" and effort else ""
         log.info("agent %s → %s:%s%s", role_key, svc, mdl or "(default)", effort_log)
-        text, tok = await _dispatch(svc, system_prompt, user_prompt, mdl, effort)
-        _usage.record(svc, tok)
-        _capture(svc, mdl, system_prompt, user_prompt, text, tok, role_key)
-
-        if text:
-            return text
+        for attempt in range(structured_retries + 1):
+            text, tok = await _dispatch(
+                svc, system_prompt, user_prompt, mdl, effort,
+                response_schema, schema_name)
+            _usage.record(svc, tok)
+            _capture(svc, mdl, system_prompt, user_prompt, text, tok, role_key)
+            accepted = _accepted(text, svc, attempt)
+            if accepted:
+                return accepted
+            if not text:
+                break
         # Empty result (key absent / API error) → try next link.
-        log.info("agent %s: %s returned empty; falling through", role_key, svc)
+        log.info("agent %s: %s returned empty or invalid; falling through", role_key, svc)
 
     return ""
 
 
 # ---------------------------------------------------------------------------
-# YAML parsing — tolerant
+# Structured parsing — JSON first, legacy YAML compatible
 # ---------------------------------------------------------------------------
+
+async def ask_structured_role(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    role_key: str,
+    response_schema: dict,
+    schema_name: str,
+) -> str:
+    """Run ``ask_role`` with a provider-neutral structured-output contract.
+
+    Context variables keep legacy monkeypatches working: tests that replace
+    ``ask_role`` still receive its original arguments, while the real router
+    passes the schema to each provider and validates before accepting a link.
+    """
+    schema_token = _RESPONSE_SCHEMA.set(response_schema)
+    name_token = _RESPONSE_SCHEMA_NAME.set(schema_name)
+    try:
+        constrained_system = system_prompt.rstrip() + "\n\n" + structured.prompt_instruction(
+            response_schema)
+        return await ask_role(constrained_system, user_prompt, role_key=role_key)
+    finally:
+        _RESPONSE_SCHEMA.reset(schema_token)
+        _RESPONSE_SCHEMA_NAME.reset(name_token)
+
 
 def parse_yaml_block(text: str) -> dict:
     """
-    Extract the last ```yaml fenced block from *text* and parse it.
+    Parse native JSON, fenced JSON, or a legacy fenced YAML block from *text*.
 
-    On any parse error, or if no yaml block is found, returns {"_raw": text}.
+    On any parse error returns {"_raw": text}.  The historical function name is
+    retained because external callers and tests import it.
     Never raises.
     """
-    try:
-        import re
-        blocks = re.findall(r"```yaml\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-        if not blocks:
-            return {"_raw": text}
-        raw_yaml = blocks[-1].strip()
-        result = yaml.safe_load(raw_yaml)
-        if isinstance(result, dict):
-            return result
-        return {"_raw": text}
-    except Exception:
-        return {"_raw": text}
+    return structured.parse(text)
 
 
 # ---------------------------------------------------------------------------
@@ -762,7 +865,7 @@ async def _save_clean_note(role_key: str, note_val: str, symbol: str) -> None:
 
 async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
     """
-    Run one specialist and parse its yaml output.
+    Run one specialist and parse its schema-constrained JSON output.
 
     Returns a dict containing: key, title, vote, confidence, reason,
     plus all role-specific fields, and _raw for debugging.
@@ -782,12 +885,25 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
     if mem:
         system_prompt += "\n\n" + mem
 
-    raw = await ask_role(system_prompt, user_prompt, role_key=role["key"])
+    raw = await ask_structured_role(
+        system_prompt, user_prompt,
+        role_key=role["key"],
+        response_schema=structured.specialist_schema(role["key"]),
+        schema_name=f"committee_{role['key']}",
+    )
+    if not raw:
+        raise RuntimeError(
+            f"all providers failed structured-output validation for {role['key']}")
     parsed = parse_yaml_block(raw)
 
-    # Strip memory_note from _raw so it never propagates to the report renderer
-    import re as _re
-    raw_clean = _re.sub(r"\nmemory_note:.*", "", raw)
+    # Strip memory_note from _raw so it never propagates to downstream renderers.
+    # Keep the regex only for legacy YAML test doubles/stored responses.
+    if isinstance(parsed, dict) and "_raw" not in parsed:
+        raw_view = {k: v for k, v in parsed.items() if k != "memory_note"}
+        raw_clean = structured.canonical(raw_view)
+    else:
+        import re as _re
+        raw_clean = _re.sub(r"\nmemory_note:.*", "", raw)
 
     result = {
         "key": role["key"],
@@ -796,7 +912,7 @@ async def run_specialist(role: dict, bundle_text: str, symbol: str) -> dict:
         "confidence": parsed.get("confidence", 50),
         "reason": parsed.get("reason", parsed.get("_raw", "")),
         "_raw": raw_clean,
-        # Full parsed yaml — TIRF (cio.committee.tirf) reads evidence/assumptions/
+        # Full parsed object — TIRF reads evidence/assumptions/
         # reasoning/counterarguments/sources from here without a second LLM call.
         "_parsed": parsed,
     }
@@ -1000,7 +1116,11 @@ async def run_committee(
         f"Required output fields: committee_recommendation, agreement_score, "
         f"majority_view, minority_view, key_disagreements"
     )
-    mod_raw = await ask_role(MODERATOR_SYSTEM, moderator_prompt, role_key="moderator")
+    mod_raw = await ask_structured_role(
+        MODERATOR_SYSTEM, moderator_prompt,
+        role_key="moderator", response_schema=structured.MODERATOR_SCHEMA,
+        schema_name="committee_moderator",
+    )
     consensus = parse_yaml_block(mod_raw)
 
     # Step 5 — CIO (serial; uses config for model/service)
@@ -1018,7 +1138,11 @@ async def run_committee(
     cio_system = CIO_SYSTEM + "\n\n" + note_sanitizer.FIGURE_RULE
     if cio_mem:
         cio_system += "\n\n" + cio_mem
-    cio_raw = await ask_role(cio_system, cio_prompt, role_key="cio")
+    cio_raw = await ask_structured_role(
+        cio_system, cio_prompt,
+        role_key="cio", response_schema=structured.CIO_SCHEMA,
+        schema_name="committee_cio",
+    )
     cio = parse_yaml_block(cio_raw)
 
     # Save CIO's durable takeaway (LLM-sanitized, then regex-firewalled)

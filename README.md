@@ -177,6 +177,12 @@ research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** v
   daily token budget is spent, and falls through on error/empty. New settings can be
   added from the dashboard **Configure** page; per-agent assignment is a dropdown — no
   text editor needed.
+- **Validated structured decisions**: specialists, debate revisions, Moderator,
+  and CIO share provider-neutral JSON Schemas. OpenAI, Codex app-server, Claude
+  Agent SDK, NVIDIA NIM, and Muse/llama.cpp receive the schema through their
+  native structured-output interface. Invalid or incomplete output is retried
+  once and then falls through to the next model instead of silently becoming
+  HOLD/50 or `_Insufficient data._`.
 - **Output-token caps** are configurable per backend (env overrides yaml):
   `CIO_OPENAI_MAX_TOKENS` / `nim.max_tokens` `CIO_NIM_MAX_TOKENS` (default 2048), and the
   OpenAI param name `CIO_OPENAI_TOKEN_PARAM` (gpt-5.x = `max_completion_tokens`, older

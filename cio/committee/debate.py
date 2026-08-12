@@ -39,6 +39,15 @@ from cio.committee.engine import (  # noqa: E402
 
 _ORIG_ASK_ROLE = ask_role
 
+_DEBATE_OUTPUT_OVERRIDE = """
+
+DEBATE CROSS-EXAM OUTPUT OVERRIDE (applies only to this request):
+The supplied debate response schema replaces the specialist role's normal
+schema. Put only one plain-prose response of at most 120 words in its `text`
+field. Do not add specialist fields such as vote, confidence, evidence,
+assumptions, reasoning, counterarguments, sources, or memory_note.
+""".strip()
+
 
 async def _ask(*args, **kwargs) -> str:
     """Dispatch one LLM call, honouring both monkeypatch seams.
@@ -50,6 +59,48 @@ async def _ask(*args, **kwargs) -> str:
     if local is not None and local is not _ORIG_ASK_ROLE:
         return await local(*args, **kwargs)
     return await _engine.ask_role(*args, **kwargs)
+
+
+async def _ask_structured(system_prompt: str, user_prompt: str, *, role_key: str,
+                          response_schema: dict, schema_name: str) -> str:
+    """Structured equivalent of _ask that preserves both test patch seams."""
+    local = globals().get("ask_role")
+    if local is not None and local is not _ORIG_ASK_ROLE:
+        return await local(system_prompt, user_prompt, role_key=role_key)
+    return await _engine.ask_structured_role(
+        system_prompt, user_prompt, role_key=role_key,
+        response_schema=response_schema, schema_name=schema_name)
+
+
+def _debate_system(system_prompt: str) -> str:
+    """Override the specialist's normal schema with the debate text schema."""
+    base = str(system_prompt or "").rstrip()
+    return f"{base}\n\n{_DEBATE_OUTPUT_OVERRIDE}" if base else _DEBATE_OUTPUT_OVERRIDE
+
+
+def _normalize_debate_text(value: object) -> str:
+    """Keep accidental specialist JSON out of free-text debate transcripts.
+
+    Some local models prioritize the specialist system contract over the
+    cross-exam user instruction. If that happens, the specialist ``reason`` is
+    the actual rebuttal; retain it and discard the unrelated envelope.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        from . import structured
+        parsed = structured.parse(text)
+        if isinstance(parsed, dict) and "_raw" not in parsed:
+            for key in ("text", "reason"):
+                prose = parsed.get(key)
+                if isinstance(prose, str) and prose.strip():
+                    if key == "reason":
+                        log.warning("Debate call returned specialist JSON; using its reason field")
+                    return prose.strip()
+    except Exception:
+        pass
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -175,9 +226,16 @@ async def run_cross_exam(
             f"  Reason: {target.get('reason', '')}\n\n"
             f"DATA SUMMARY:\n{bundle_text}\n\n"
             f"Deliver a pointed rebuttal (≤120 words) citing DATA where possible. "
-            f"Free text — no yaml needed."
+            f"Put only that prose in the supplied JSON `text` field; no YAML needed."
         )
-        challenge = await _ask(_sys(challenger), challenge_prompt, role_key=challenger.get("key"))
+        from . import structured
+        challenge = await _ask_structured(
+            _debate_system(_sys(challenger)), challenge_prompt,
+            role_key=challenger.get("key"),
+            response_schema=structured.DEBATE_TEXT_SCHEMA,
+            schema_name="committee_debate_challenge",
+        )
+        challenge = _normalize_debate_text(challenge)
     except Exception as e:
         log.warning("Challenge call failed (%s→%s): %s", challenger.get("key"), target.get("key"), e)
         challenge = ""
@@ -187,9 +245,17 @@ async def run_cross_exam(
             f"Symbol under analysis: {symbol}\n\n"
             f"Your opposing committee member ({challenger['title']}) has challenged your position:\n\n"
             f"{challenge}\n\n"
-            f"Defend or concede (≤120 words). Free text — no yaml needed."
+            f"Defend or concede (≤120 words). Put only that prose in the supplied "
+            f"JSON `text` field; no YAML needed."
         )
-        response = await _ask(_sys(target), response_prompt, role_key=target.get("key"))
+        from . import structured
+        response = await _ask_structured(
+            _debate_system(_sys(target)), response_prompt,
+            role_key=target.get("key"),
+            response_schema=structured.DEBATE_TEXT_SCHEMA,
+            schema_name="committee_debate_response",
+        )
+        response = _normalize_debate_text(response)
     except Exception as e:
         log.warning("Response call failed (%s defends): %s", target.get("key"), e)
         response = ""
@@ -205,7 +271,7 @@ async def run_cross_exam(
 
 
 # ---------------------------------------------------------------------------
-# Round 3 — revision (yaml vote contract, same shape as Round 1)
+# Round 3 — revision (structured JSON contract, same shape as Round 1)
 # ---------------------------------------------------------------------------
 
 async def revise_opinion(
@@ -231,12 +297,18 @@ async def revise_opinion(
         f"  Confidence: {round1_opinion.get('confidence', 50)}\n"
         f"  Reason: {round1_opinion.get('reason', '')}\n\n"
         f"Having seen the full committee debate, you may revise your position or hold it. "
-        f"Output your FINAL position using the same yaml contract as Round 1.\n"
+        f"Output your FINAL position using the same JSON contract as Round 1.\n"
         f"Required output fields: {fields_list}, vote, confidence, reason"
     )
 
     try:
-        raw = await _ask(role["system_prompt"], revision_prompt, role_key=role.get("key"))
+        from . import structured
+        role_key = role.get("key", "")
+        raw = await _ask_structured(
+            role["system_prompt"], revision_prompt, role_key=role_key,
+            response_schema=structured.specialist_schema(role_key),
+            schema_name=f"committee_{role_key}_revision",
+        )
     except Exception as e:
         log.warning("revise_opinion failed for %s: %s", role.get("key"), e)
         return round1_opinion

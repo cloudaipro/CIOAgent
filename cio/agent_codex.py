@@ -332,7 +332,8 @@ class CodexAppServer:
 
     async def run_turn(self, thread_id: str, prompt: str,
                        effort: str | None = None,
-                       model: str | None = None) -> tuple[str, int]:
+                       model: str | None = None,
+                       output_schema: dict | None = None) -> tuple[str, int]:
         params = {
             "threadId": thread_id,
             "input": _turn_input(prompt),
@@ -341,6 +342,10 @@ class CodexAppServer:
             # App-server calls this field `effort`. Values are advertised per
             # model; sending it per turn also updates subsequent turns.
             params["effort"] = effort
+        if output_schema is not None:
+            # Codex app-server's turn/start protocol constrains the final
+            # assistant message to this JSON Schema.
+            params["outputSchema"] = output_schema
         response = await self._request("turn/start", params)
         turn_id = response["turn"]["id"]
         started = time.monotonic()

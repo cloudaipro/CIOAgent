@@ -5,7 +5,7 @@ Data-only; no LLM calls.  Each role dict:
   key           — unique identifier
   title         — display name
   system_prompt — injected as system prompt for that specialist
-  fields        — YAML keys the role must emit in its yaml fence
+  fields        — JSON keys the role must emit in its structured response
 
 Every specialist also emits: vote (BUY|HOLD|SELL), confidence (0-100), reason.
 """
@@ -20,15 +20,16 @@ _MEMORY_NOTE_RULE = (
 
 # TIRF (Transparent Investment Research Framework) — every conclusion must be
 # backed by documented evidence, assumptions, reasoning, counterarguments, and
-# sources, emitted in the SAME yaml block (no extra LLM call). See docs/TIRF-PRD.md.
+# sources, emitted in the SAME JSON object (no extra LLM call). See docs/TIRF-PRD.md.
 _TIRF_RULE = (
-    "TRANSPARENCY (TIRF) — in the SAME yaml block, document your research so the "
+    "TRANSPARENCY (TIRF) — in the SAME JSON object, document your research so the "
     "committee can audit it:\n"
     "- evidence: a list of AT LEAST 3 items; each item has source, date "
     "(YYYY-MM-DD), finding, impact (positive|negative|neutral), relevance "
     "(direct|related|indirect), confidence (high|medium|low). Draw findings ONLY "
     "from the DATA block; do not invent figures.\n"
-    "- assumptions: a map of the explicit assumptions your view rests on "
+    "- assumptions: a list of objects with name, value, and confidence "
+    "(high|medium|low), covering the explicit assumptions your view rests on "
     "(no hidden assumptions).\n"
     "- reasoning: an ordered list of short steps forming the logical chain from "
     "evidence to your vote.\n"
@@ -42,7 +43,7 @@ _BASE_RULES = (
     "Do NOT invent or estimate specific figures that are not present in DATA. "
     "Macro conditions, news, and catalysts are qualitative judgment — "
     "label them explicitly as 'qualitative assessment'. "
-    "End your response with a single fenced ```yaml block containing "
+    "Return only the JSON object required by the supplied response schema, containing "
     "the specified fields plus vote (BUY|HOLD|SELL), confidence (0-100), reason, "
     "evidence, assumptions, reasoning, counterarguments, sources, "
     "and memory_note. " + _MEMORY_NOTE_RULE + "\n\n" + _TIRF_RULE
@@ -201,7 +202,7 @@ MODERATOR_SYSTEM = (
     "Intelligence specialist — macro impact, geopolitical impact, and commodity "
     "impact on the thesis — alongside fundamentals and valuation. "
     "Do NOT invent data; only reference what specialists stated. "
-    "End with a single fenced ```yaml block containing exactly: "
+    "Return only the JSON object required by the supplied response schema, containing exactly: "
     "committee_recommendation, agreement_score (0-100), majority_view, "
     "minority_view, key_disagreements."
 )
@@ -219,7 +220,7 @@ CIO_SYSTEM = (
     "thesis; geopolitical_risk_score (0-100) rates external geopolitical/commodity risk "
     "(higher = riskier); external_risk_adjustment is a short note on how these external "
     "factors nudged your recommendation (e.g. 'trimmed confidence on oil-shock risk'). "
-    "End with a single fenced ```yaml block containing exactly: "
+    "Return only the JSON object required by the supplied response schema, containing exactly: "
     "final_recommendation (one of: Strong Buy, Buy, Hold, Sell, Strong Sell), "
     "confidence_score (0-100), risk_rating, time_horizon, "
     "macro_alignment_score (0-100), geopolitical_risk_score (0-100), external_risk_adjustment, "

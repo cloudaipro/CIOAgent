@@ -1,5 +1,5 @@
 """
-extract.py — Parse TIRF deliverables out of a specialist's parsed yaml (PRD §5).
+extract.py — Parse TIRF deliverables out of a specialist's structured result (PRD §5).
 
 Tolerant by design: LLMs emit evidence/assumptions/reasoning/counterarguments/
 sources in many shapes (list-of-dicts, list-of-strings, maps, scalars). Every
@@ -130,7 +130,7 @@ def _sources(raw: Any) -> list[SourceRef]:
 
 
 def extract_specialist(parsed: dict, role_key: str = "", title: str = "") -> SpecialistResearch:
-    """Build a SpecialistResearch from one specialist's parsed yaml dict.
+    """Build a SpecialistResearch from one specialist's parsed result dict.
 
     ``parsed`` is the dict returned by engine.parse_yaml_block. Tolerant of
     {"_raw": ...} (failed yaml) — yields an empty research object with the vote
@@ -161,7 +161,7 @@ def extract_from_opinion(opinion: dict) -> SpecialistResearch:
     """Extract from an engine opinion dict that already carries ``_parsed`` (the raw
     yaml) — or fall back to reading the TIRF keys straight off the opinion.
 
-    run_specialist attaches the parsed yaml under ``_parsed`` so TIRF can read the
+    run_specialist attaches the parsed object under ``_parsed`` so TIRF can read the
     original deliverables without re-calling the model.
     """
     parsed = opinion.get("_parsed")

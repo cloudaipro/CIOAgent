@@ -3,6 +3,7 @@ httpx
 openai
 openai-agents            # OpenAI Agents SDK — chat runtime's OpenAI-side seam (cio/tool_bridge.py)
 pyyaml
+jsonschema>=4.20       # validate committee structured outputs after provider-side constrained decoding
 ruamel.yaml          # round-trip YAML for dashboard Configure tab (preserves comments); pyyaml is the fallback if absent
 python-telegram-bot>=22.0
 pandas>=2.0

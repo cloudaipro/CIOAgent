@@ -77,6 +77,28 @@ def _v(val: Any, default: str = "_Insufficient data._") -> str:
     return s if s else default
 
 
+def _debate_text(val: Any, default: str) -> str:
+    """Render prose from a debate value, including legacy accidental JSON.
+
+    Reports already persisted before the generation fix may contain a complete
+    specialist object where a rebuttal should be. Its ``reason`` is the intended
+    prose. Unknown JSON is fenced so it cannot corrupt Markdown structure.
+    """
+    text = _v(val, default)
+    try:
+        from . import structured
+        parsed = structured.parse(text)
+        if isinstance(parsed, dict) and "_raw" not in parsed:
+            for key in ("text", "reason"):
+                prose = parsed.get(key)
+                if isinstance(prose, str) and prose.strip():
+                    return prose.strip()
+            return f"```json\n{structured.canonical(parsed)}\n```"
+    except Exception:
+        pass
+    return text
+
+
 def _num(x: Any, default: str = "_Insufficient data._", pct: bool = False) -> str:
     """Render a number rounded to <=2 dp (trailing zeros stripped). Non-numeric → _v."""
     if x is None:
@@ -138,9 +160,9 @@ def _opinion_table(opinions: list[dict]) -> str:
         vote = _v(op.get("vote"), "?")
         conf = _v(op.get("confidence"), "?")
         reason = _v(op.get("reason"), "—")
-        # Truncate long reasons for table readability
-        if len(reason) > 200:
-            reason = reason[:197] + "..."
+        # Preserve the complete rationale in the canonical Markdown while
+        # keeping embedded pipes/newlines from corrupting the table structure.
+        reason = reason.replace("|", r"\|").replace("\r\n", "<br>").replace("\n", "<br>")
         title = _v(op.get("title"), op.get("key", "?"))
         rows.append(f"| {title} | {vote} | {conf} | {reason} |")
     return "\n".join(rows)
@@ -191,8 +213,8 @@ def _debate_section(debate_data: dict, round1_opinions: list[dict], final_opinio
             for ex in exchanges:
                 c_title = _v(ex.get("challenger_title"), "?")
                 t_title = _v(ex.get("target_title"), "?")
-                challenge = _v(ex.get("challenge"), "_No challenge recorded._")
-                response = _v(ex.get("response"), "_No response recorded._")
+                challenge = _debate_text(ex.get("challenge"), "_No challenge recorded._")
+                response = _debate_text(ex.get("response"), "_No response recorded._")
                 debate_lines.append(f"**{c_title} challenges {t_title}:**\n\n{challenge}\n")
                 debate_lines.append(f"**{t_title} responds:**\n\n{response}\n")
             parts.append("\n".join(debate_lines))

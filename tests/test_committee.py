@@ -685,6 +685,43 @@ class TestSelectDebatePairs:
         assert select_debate_pairs([_OP_BEAR, _OP_BULL], max_pairs=0) == []
 
 
+class TestCrossExamOutputContract:
+    def test_specialist_json_is_reduced_to_reason(self):
+        from cio.committee.debate import _normalize_debate_text
+        raw = '{"vote":"SELL","confidence":68,"reason":"Downside is underweighted.","evidence":[]}'
+        assert _normalize_debate_text(raw) == "Downside is underweighted."
+
+    def test_debate_system_overrides_specialist_json_contract(self):
+        from cio.committee.debate import _debate_system
+        prompt = _debate_system("Return only JSON matching the supplied schema.")
+        assert prompt.endswith("or memory_note.")
+        assert "DEBATE CROSS-EXAM OUTPUT OVERRIDE" in prompt
+        assert "plain-prose" in prompt
+
+    def test_run_cross_exam_sends_override_and_normalizes_json(self, monkeypatch):
+        seen_system_prompts = []
+
+        async def accidental_json(system_prompt, user_prompt, role_key=None, **kwargs):
+            seen_system_prompts.append(system_prompt)
+            if "pointed rebuttal" in user_prompt:
+                return '{"vote":"SELL","reason":"Downside is underweighted.","evidence":[]}'
+            return "I concede."
+
+        monkeypatch.setattr("cio.committee.debate.ask_role", accidental_json)
+        from cio.committee.debate import run_cross_exam
+        result = asyncio.run(run_cross_exam(
+            (_OP_RISK_SELL, _OP_VAL_HOLD), "DATA", "ABNB",
+            roles_by_key={
+                "risk": {"system_prompt": "Return only JSON."},
+                "valuation": {"system_prompt": "Return only JSON."},
+            },
+        ))
+        assert result["challenge"] == "Downside is underweighted."
+        assert result["response"] == "I concede."
+        assert len(seen_system_prompts) == 2
+        assert all("DEBATE CROSS-EXAM OUTPUT OVERRIDE" in prompt for prompt in seen_system_prompts)
+
+
 # ---------------------------------------------------------------------------
 # run_committee with debate ON (extended tests)
 # ---------------------------------------------------------------------------
@@ -888,6 +925,21 @@ class TestBuildReportDebate:
             build_report("EMPTY", empty_result)
         except Exception as e:
             pytest.fail(f"build_report raised {e} on missing debate field")
+
+    def test_accidental_specialist_json_renders_only_reason(self):
+        from cio.committee.report import _debate_section
+        debate = {
+            "skipped": False,
+            "exchanges": [{
+                "challenger_title": "Risk Management",
+                "target_title": "Valuation",
+                "challenge": '{"vote":"SELL","reason":"Downside is underweighted.","evidence":["x"]}',
+                "response": "I concede.",
+            }],
+        }
+        report = _debate_section(debate, [], [])
+        assert "Downside is underweighted." in report
+        assert '"evidence"' not in report
 
     def test_all_13_sections_still_present_with_debate(self, monkeypatch):
         """All 13 original section headers must still appear when debate ran."""

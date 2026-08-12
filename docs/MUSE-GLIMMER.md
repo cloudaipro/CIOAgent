@@ -16,6 +16,12 @@ and recommends temperature 1.0, top-p 0.95, and top-k 64. CIOAgent sends those
 sampling values for one-shot agent/subagent calls and adds the configured
 reasoning strength (`high` by default) to the system prompt.
 
+Committee decision calls use provider-neutral JSON Schemas. CIOAgent sends the
+schema through llama.cpp's OpenAI-compatible `response_format` field, validates
+the returned object again in Python, retries an invalid response once, and then
+falls through to the next configured provider. A non-empty but malformed model
+response is therefore never accepted as a successful committee result.
+
 ## UD-Q4_K_XL with llama-server
 
 This is the verified path for the local RTX 4090 (24 GB VRAM). Use a current
@@ -124,6 +130,12 @@ location:
   --port 8001
 ```
 
+`--jinja` is required for per-request structured output with Muse's reasoning
+chat template. Without it, llama-server can accept `response_format` without
+applying the response schema to the final answer. CIOAgent's validator detects
+that mismatch and falls through safely, but Muse itself is not constrained
+until the server is restarted with `--jinja`.
+
 The model weights remain 4-bit `UD-Q4_K_XL`. The `q8_0` settings above apply
 only to the runtime attention KV cache; they do not change the model to Q8.
 Q8 KV cache is the preferred quality/memory compromise. If model startup runs
@@ -178,7 +190,9 @@ muse:
 No API key is required for a normal localhost deployment. Set
 `CIO_MUSE_API_KEY` only when the server enforces bearer authentication.
 Environment overrides are `CIO_MUSE_BASE_URL`, `CIO_MUSE_MAX_TOKENS`,
-`CIO_MUSE_TIMEOUT`, and `CIO_MUSE_REASONING_STRENGTH`.
+`CIO_MUSE_TIMEOUT`, and `CIO_MUSE_REASONING_STRENGTH`. The provider-neutral
+`CIO_STRUCTURED_RETRIES` setting defaults to `1` and controls how many times an
+invalid structured response is retried before the fallback chain advances.
 
 Muse supports `low`, `medium`, `high`, and `xhigh` reasoning effort. The
 default is `xhigh`. Set it per fallback-chain link when different agents need
