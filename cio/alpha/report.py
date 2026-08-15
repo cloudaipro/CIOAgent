@@ -39,6 +39,8 @@ def format_telegram(result, meta: dict | None = None, max_show: int = 20) -> str
     if meta and meta.get("watchlist_name"):
         lines += ["", f"📋 Published watchlist *{meta['watchlist_name']}* (now active). "
                       f"Use /watchlist to see prices, or ask me to add/remove names."]
+    if meta and meta.get("reused"):
+        lines += ["", "♻️ Reused today's completed Alpha Hunter scan."]
     return "\n".join(lines)
 
 

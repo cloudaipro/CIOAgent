@@ -878,14 +878,16 @@ async def t_watchlist_activate(args):
 
 
 @tool("run_alpha_hunter",
-      "Run the Alpha Hunter funnel (Market→Sector→Quality→Earnings→Momentum→Ranking) "
-      "over the NASDAQ universe and publish a fresh watchlist named "
+      "Get today's Alpha Hunter funnel results "
+      "(Market→Sector→Quality→Earnings→Momentum→Ranking) over the NASDAQ "
+      "universe and publish a watchlist named "
       "Alpha-yyyy-mm-dd (set active) with every candidate scoring at/above the "
-      "configured Final-Score threshold. Deterministic, no model cost; it is "
-      "network-bound and can take a minute. Use when the user asks to 'run alpha "
-      "hunter', 'find me strong stocks', or 'generate a watchlist'.", {})
+      "configured Final-Score threshold. Reuses today's completed published run; "
+      "otherwise performs the network-bound scan. Deterministic, no model cost. Use "
+      "when the user asks to 'run alpha hunter', 'find me strong stocks', or "
+      "'generate a watchlist'.", {})
 async def t_run_alpha_hunter(args):
-    result, meta = await asyncio.to_thread(alpha.run_and_save)
+    result, meta = await asyncio.to_thread(alpha.reuse_today_or_run)
     return _text(alpha.report.format_telegram(result, meta))
 
 

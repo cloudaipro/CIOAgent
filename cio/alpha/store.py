@@ -150,9 +150,27 @@ def list_runs(limit: int = 20, db_path=db.DB_PATH) -> list[dict]:
 
 def latest_run(db_path=db.DB_PATH) -> dict | None:
     """The most recent run with its sectors + ranked candidates, or None."""
+    return latest_run_for_date(None, db_path=db_path)
+
+
+def latest_run_for_date(run_date: str | None, db_path=db.DB_PATH) -> dict | None:
+    """The newest completed run for *run_date*, including its candidates.
+
+    ``None`` preserves :func:`latest_run`'s all-dates behaviour.  A run is only
+    visible here after ``save_run`` has committed both the parent row and all
+    candidate rows, so callers can safely treat a returned snapshot as complete.
+    """
     conn = db.connect(db_path)
     try:
-        row = conn.execute("SELECT * FROM alpha_runs ORDER BY id DESC LIMIT 1").fetchone()
+        if run_date is None:
+            row = conn.execute(
+                "SELECT * FROM alpha_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM alpha_runs WHERE run_date = ? ORDER BY id DESC LIMIT 1",
+                (run_date,),
+            ).fetchone()
         if row is None:
             return None
         out = dict(row)

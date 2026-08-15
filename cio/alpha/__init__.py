@@ -6,6 +6,8 @@ See docs/ALPHA-HUNTER-PRD.md. Public entry: ``engine.run``.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 from .engine import run, AlphaResult
 from . import store, report, regime
 
@@ -23,4 +25,44 @@ def run_and_save(*, publish: bool = True, threshold: float | None = None,
     return result, meta
 
 
-__all__ = ["run", "run_and_save", "AlphaResult", "store", "report", "regime"]
+def reuse_today_or_run(*, publish: bool = True, threshold: float | None = None,
+                       db_path=None, **run_kw):
+    """Reuse today's newest completed published run, otherwise run the funnel.
+
+    This is the latency-bounded entry point for conversational tool calls.  The
+    explicit ``run_and_save`` entry point remains fresh-by-definition for the
+    dashboard and ``/alpha`` command.
+    """
+    from .. import db as _db
+    from .. import watchlist
+
+    path = db_path or _db.DB_PATH
+    today = datetime.now().strftime("%Y-%m-%d")
+    cached = store.latest_run_for_date(today, db_path=path)
+    # A published caller must not reuse a diagnostic publish=False run: doing so
+    # would claim a watchlist exists when none was created.
+    if cached is not None and (not publish or cached.get("watchlist_id")):
+        result = AlphaResult(
+            run_date=cached["run_date"],
+            regime={"status": cached.get("regime", "UNKNOWN"),
+                    "detail": cached.get("regime_detail", "")},
+            sectors=cached.get("sectors") or [],
+            candidates=cached.get("candidates") or [],
+            universe_size=int(cached.get("universe_size") or 0),
+        )
+        if publish:
+            # Preserve run_and_save's contract that the published list is active.
+            watchlist.set_active(int(cached["watchlist_id"]), db_path=path)
+        meta = {
+            "run_id": cached["id"],
+            "watchlist_id": cached.get("watchlist_id"),
+            "watchlist_name": cached.get("watchlist_name"),
+            "selected_count": len(result.candidates),
+            "reused": True,
+        }
+        return result, meta
+    return run_and_save(publish=publish, threshold=threshold, db_path=path, **run_kw)
+
+
+__all__ = ["run", "run_and_save", "reuse_today_or_run", "AlphaResult", "store",
+           "report", "regime"]

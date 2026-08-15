@@ -254,6 +254,26 @@ def test_latest_run_roundtrip(tmp_path):
     assert latest["candidates"][0]["sector"] == "SMH"
 
 
+def test_latest_run_for_date_returns_newest_matching_run(tmp_path):
+    dbf = tmp_path / "t.db"
+    store.save_run(_result(date="2026-06-11", candidates=[]), publish=False,
+                   db_path=dbf)
+    first = store.save_run(
+        _result(date="2026-06-12",
+                candidates=[{"rank": 1, "ticker": "AAA", "final": 90.0}]),
+        publish=False, threshold=0, db_path=dbf)
+    newest = store.save_run(
+        _result(date="2026-06-12",
+                candidates=[{"rank": 1, "ticker": "BBB", "final": 91.0}]),
+        publish=False, threshold=0, db_path=dbf)
+
+    got = store.latest_run_for_date("2026-06-12", db_path=dbf)
+    assert got["id"] == newest["run_id"]
+    assert got["id"] != first["run_id"]
+    assert [c["ticker"] for c in got["candidates"]] == ["BBB"]
+    assert store.latest_run_for_date("2026-06-13", db_path=dbf) is None
+
+
 # ---- run_and_save end to end -----------------------------------------------
 def test_run_and_save_end_to_end(tmp_path, monkeypatch):
     from cio import alpha as alpha_pkg
@@ -265,6 +285,44 @@ def test_run_and_save_end_to_end(tmp_path, monkeypatch):
     assert meta["watchlist_name"].startswith("Alpha-")
     wl = watchlist.find_by_name(meta["watchlist_name"], db_path=dbf)
     assert wl["is_active"] == 1 and "STRONG" in wl["symbols"]
+
+
+def test_reuse_today_or_run_uses_completed_published_run(tmp_path, monkeypatch):
+    from cio import alpha as alpha_pkg
+    today = alpha_pkg.datetime.now().strftime("%Y-%m-%d")
+    dbf = tmp_path / "t.db"
+    saved = store.save_run(
+        _result(date=today,
+                candidates=[{"rank": 1, "ticker": "CACHED", "final": 90.0,
+                             "momentum": 80, "trend": 100, "earnings": 90}]),
+        threshold=80, db_path=dbf)
+    monkeypatch.setattr(alpha_pkg, "run_and_save",
+                        lambda **kwargs: pytest.fail("fresh scan should not run"))
+
+    result, meta = alpha_pkg.reuse_today_or_run(db_path=dbf)
+
+    assert [c["ticker"] for c in result.candidates] == ["CACHED"]
+    assert meta["run_id"] == saved["run_id"]
+    assert meta["reused"] is True
+    assert "Reused today's completed" in alpha_pkg.report.format_telegram(result, meta)
+
+
+def test_reuse_today_or_run_scans_when_today_has_no_published_run(tmp_path, monkeypatch):
+    from cio import alpha as alpha_pkg
+    dbf = tmp_path / "t.db"
+    expected = _result(date="2026-06-12", candidates=[])
+    called = []
+
+    def fake_run_and_save(**kwargs):
+        called.append(kwargs)
+        return expected, {"run_id": 1}
+
+    monkeypatch.setattr(alpha_pkg, "run_and_save", fake_run_and_save)
+    result, meta = alpha_pkg.reuse_today_or_run(db_path=dbf)
+
+    assert result is expected
+    assert meta == {"run_id": 1}
+    assert called == [{"publish": True, "threshold": None, "db_path": dbf}]
 
 
 # ---- edge: universe --------------------------------------------------------
