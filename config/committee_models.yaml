@@ -12,15 +12,15 @@
 chains:
   # premium: ChatGPT subscription -> metered API -> cheap last resort (cio, wma).
   premium:
-  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # standard: subscription head (same primary the specialists always used),
   # degrading to paid then cheap.
   standard:
-  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
   # translation: Claude sonnet head — reliable on long markdown + strong
@@ -36,8 +36,8 @@ chains:
   # The first link needs a strong tool-caller. Codex uses the
   # logged-in ChatGPT subscription; metered OpenAI API and Claude are fallbacks.
   bot_chat:
-  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: codex, model: gpt-5.6-sol, reasoning_effort: medium}
+  - {service: muse, model: muse-glimmer-30b-ud-q4-k-xl, reasoning_effort: xhigh}
   - {service: openai, model: gpt-5.6-terra, daily_limit: 120000}
   - {service: nim, model: moonshotai/kimi-k2.6}
 # defaults.chain: the setting used by any agent not listed below.
