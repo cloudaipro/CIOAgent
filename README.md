@@ -21,7 +21,7 @@ backend outage or budget exhaustion degrades gracefully instead of silencing a r
 ## Architecture
 
 ```
-Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist
+Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /committee, /briefing, /watchlist, /swing
                   │
                   ├─► cio/agent.py      Claude-compatible runtime + 44 in-process CIO tools
                   │     cio/agent_codex.py  ChatGPT-authenticated Codex app-server runtime
@@ -52,9 +52,11 @@ Telegram  ──►  cio/bot.py        I/O + access gate; text, photos, CSV, /co
                   │     per-security assessment (bundle + web news + wma chain)
                   │     + one shared global macro/geopolitical snapshot → briefing PDF
                   │
-                  └─► cio/alpha/*       Alpha Hunter: deterministic 5-layer NASDAQ swing funnel
+                  ├─► cio/alpha/*       Alpha Hunter: deterministic 5-layer NASDAQ swing funnel
                         (regime → sector → quality → earnings → momentum → Top-20)
                         zero-LLM; publishes the Alpha-yyyy-mm-dd watchlist (active)
+                  └─► cio/swing.py       dedicated long-running Telegram swing scan;
+                                        worker job + status/cancel, outside Codex turns
 ```
 
 - **Cost basis**: average-cost method. Positions & P&L are *derived* from the
@@ -269,6 +271,11 @@ and offline-safe — same cost discipline as TIRF.
   `list_watchlists` / `watchlist_add` / `watchlist_remove` / `watchlist_activate` let
   you manage the published list conversationally ("add TSLA to the alpha list",
   "switch to Alpha-2026-06-12").
+- **Dedicated swing request**: `/swing` runs the scan in a background worker and
+  returns a Traditional-Chinese candidate report without entering a Codex turn.
+  `/swing refresh` forces a fresh run, `/swing en` returns English, and
+  `/swing_status` checks progress. The natural request **「今天有哪些適合進場做波段操作」**
+  is routed to the same command automatically; `/stop` cancels it cooperatively.
 - **Dashboard**: the **Alpha Hunter** tab (`/alpha`) has a **Run** button, a
   **selection-threshold** control (default 80), and shows the regime light, sector
   ranking, selected candidates, run history, and a link to the published list.

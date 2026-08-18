@@ -22,6 +22,10 @@ TOP_N = 20
 _LOOKBACK_DAYS = 400
 
 
+class ScanCancelled(Exception):
+    """Raised when a caller asks a long-running deterministic scan to stop."""
+
+
 @dataclass
 class AlphaResult:
     run_date: str
@@ -131,9 +135,11 @@ def _evaluate_ticker(symbol, *, fetch, fundamentals_fn, surprises_fn, recs_fn,
 
 
 def run(*, universe_path=None, fetch=None, fundamentals_fn=None,
-        surprises_fn=None, recs_fn=None, institutional_fn=None) -> AlphaResult:
+        surprises_fn=None, recs_fn=None, institutional_fn=None,
+        cancel_check=None) -> AlphaResult:
     """Execute the full funnel. All fetchers default to the live data layer; pass
-    your own for offline tests. Never raises — degrades to UNKNOWN/empty.
+    your own for offline tests. Data failures degrade to UNKNOWN/empty; an
+    explicit ``cancel_check`` may raise :class:`ScanCancelled`.
 
     *recs_fn* (symbol -> analyst-rec dict) feeds the coverage-density amplifier;
     defaults to ``finnhub.analyst_recs``. Pass ``recs_fn=lambda s: None`` to disable.
@@ -141,6 +147,11 @@ def run(*, universe_path=None, fetch=None, fundamentals_fn=None,
     signal; defaults to the EDGAR 13F aggregator when available, else None (no
     effect). Pass your own for offline tests.
     """
+    def _check_cancel() -> None:
+        if cancel_check is not None and cancel_check():
+            raise ScanCancelled("Alpha Hunter scan cancelled")
+
+    _check_cancel()
     if fetch is None:
         from ..stock import data as stockdata
         fetch = stockdata.load_or_download_stock_data
@@ -164,17 +175,20 @@ def run(*, universe_path=None, fetch=None, fundamentals_fn=None,
 
     # Layer 0 — fetch QQQ once; classify regime + derive its 3M/6M returns.
     qqq_close = regime._qqq_close(fetch)
+    _check_cancel()
     reg = regime.classify(qqq_close)
     qqq_r3 = metrics.ret_pct(qqq_close, metrics.BARS_3M) if qqq_close is not None else None
     qqq_r6 = metrics.ret_pct(qqq_close, metrics.BARS_6M) if qqq_close is not None else None
 
     # Layer 1 — sector ranking (reported context).
     sect = sectors.rank(fetch)
+    _check_cancel()
 
     # Layers 2-4 — per ticker.
     syms = universe.load(universe_path)
     candidates: list[dict] = []
     for sym in syms:
+        _check_cancel()
         cand = _evaluate_ticker(
             sym, fetch=fetch, fundamentals_fn=fundamentals_fn,
             surprises_fn=surprises_fn, recs_fn=recs_fn, institutional_fn=institutional_fn,

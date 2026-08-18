@@ -34,7 +34,7 @@ from telegram.ext import (
     filters,
 )
 
-from . import alpha, charts, memory, recall, richmsg, scheduler, watchlist
+from . import alpha, charts, memory, recall, richmsg, scheduler, swing, watchlist
 from .agent import CIOAgent
 from .bot_runtime import BotRuntime, reselect_reason, select_runtime
 from .committee import engine as committee_engine
@@ -58,6 +58,21 @@ ALLOWED_CHATS = {
 # Keep generated filenames inside their directory (no path traversal from a symbol).
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9.\-^=]")
 
+# High-value deterministic intents should not enter the general Codex loop. A
+# full Alpha scan can be network-bound for several minutes; the dedicated
+# /swing path runs it as a tracked worker job instead.
+_SWING_INTENT_RE = re.compile(
+    r"(?=.*(?:今天|今日|目前|現在))"
+    r"(?=.*(?:適合|适合|推薦|推荐|候選|候选))"
+    r"(?=.*(?:進場|进场|做波段|波段))"
+)
+
+
+def _is_swing_intent(text: str | None) -> bool:
+    """Return True for the common Chinese request for today's swing candidates."""
+    compact = re.sub(r"\s+", "", str(text or ""))
+    return bool(compact and _SWING_INTENT_RE.search(compact))
+
 
 def _safe_name(text: str, fallback: str = "report") -> str:
     s = _SAFE_NAME.sub("", str(text)).lstrip(".")[:24]
@@ -70,6 +85,8 @@ def _safe_name(text: str, fallback: str = "report") -> str:
 BOT_COMMANDS = [
     ("watchlist", "Latest watchlist prices"),
     ("alpha", "Run Alpha Hunter — new Alpha-yyyy-mm-dd watchlist"),
+    ("swing", "Today's swing-entry candidate scan"),
+    ("swing_status", "Check today's swing scan"),
     ("playbooks", "List saved playbooks you can ask me to run"),
     ("committee", "Investment committee on a symbol — /committee AAPL [zh]"),
     ("briefing", "Pre-market watchlist briefing — /briefing [SYMBOL…] [zh]"),
@@ -84,6 +101,7 @@ BOT_COMMANDS = [
 # "/", so emoji labels can't go here (they'd be sent as plain text to the agent).
 _REPLY_KEYBOARD = ReplyKeyboardMarkup(
     [["/watchlist", "/alpha"],
+     ["/swing"],
      ["/committee", "/briefing"],
      ["/playbooks"],
      ["/subscribe", "/unsubscribe"],
@@ -100,6 +118,7 @@ _REPLY_KEYBOARD = ReplyKeyboardMarkup(
 _INLINE_MENU = InlineKeyboardMarkup(
     [[InlineKeyboardButton("📋 Watchlist", callback_data="cb:watchlist"),
       InlineKeyboardButton("🔍 Alpha Hunter", callback_data="cb:alpha")],
+     [InlineKeyboardButton("📈 Swing scan", callback_data="cb:swing")],
      [InlineKeyboardButton("📒 Playbooks", callback_data="cb:playbooks")],
      [InlineKeyboardButton("🔔 Subscribe", callback_data="cb:subscribe"),
       InlineKeyboardButton("🔕 Unsubscribe", callback_data="cb:unsubscribe")],
@@ -387,6 +406,9 @@ def _help_text(chat_id: int) -> str:
         "• Upload a transactions CSV (txn_date,symbol,action,quantity,price,...) to import\n"
         "• Send a broker screenshot or receipt photo and I'll read it\n"
         "• /watchlist — latest prices for your active watchlist\n"
+        "• /swing [zh|en] [refresh] — background scan for today's swing candidates; "
+        "the Chinese request ‘今天有哪些適合進場做波段操作’ routes here automatically\n"
+        "• /swing_status — check the background scan; /stop cancels it\n"
         "• /playbooks — list saved playbooks, then ask me to run one "
         "(e.g. \"Run the monthly_red_events playbook\")\n"
         "• /subscribe — opt in to the daily portfolio digest AND the 06:00 "
@@ -476,6 +498,8 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await cmd_watchlist(update, ctx)
     elif action == "alpha":
         await cmd_alpha(update, ctx)
+    elif action == "swing":
+        await cmd_swing(update, ctx)
     elif action == "subscribe":
         await cmd_subscribe(update, ctx)
     elif action == "unsubscribe":
@@ -538,6 +562,134 @@ async def cmd_alpha(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text(_alpha_md, parse_mode="Markdown")
 
 
+def _parse_swing_args(args) -> tuple[str, bool, str | None]:
+    """Parse the deliberately small /swing surface: ``[zh|en] [refresh]``."""
+    language = "tc"
+    refresh = False
+    unknown: list[str] = []
+    for raw in args or []:
+        token = str(raw).strip().lower()
+        if token in {"zh", "tc", "繁中", "中文"}:
+            language = "tc"
+        elif token in {"en", "english"}:
+            language = "en"
+        elif token in {"refresh", "fresh", "force"}:
+            refresh = True
+        elif token:
+            unknown.append(str(raw))
+    if unknown:
+        return language, refresh, (
+            "Usage: /swing [zh|en] [refresh]\n"
+            "Default: Traditional Chinese; without refresh, a completed scan from "
+            "today is reused."
+        )
+    return language, refresh, None
+
+
+async def cmd_swing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the dedicated deterministic swing-candidate job.
+
+    This handler is registered ``block=False`` and never calls ``agent.ask``.
+    The potentially long Alpha scan therefore has no Codex turn deadline and
+    remains cancellable/observable through the normal Telegram job controls.
+    """
+    chat_id = update.effective_chat.id
+    language, refresh, usage = _parse_swing_args(getattr(ctx, "args", None))
+    if usage:
+        await update.effective_message.reply_text(usage)
+        return
+
+    task = asyncio.current_task()
+    if not _try_acquire(chat_id, task):
+        await update.effective_message.reply_text(_BUSY_MSG)
+        return
+
+    job = None
+    try:
+        job = swing.create_job(chat_id, language=language, refresh=refresh)
+        if language == "tc":
+            mode = "強制重新掃描" if refresh else "重用今天完成結果（若有）"
+            ack = (
+                f"📈 已啟動今日波段掃描（{mode}）。\n"
+                f"工作編號：{job.job_id}\n"
+                "這是獨立背景工作，不會佔用對話模型回合；完成後我會回傳候選名單。"
+                "可用 /swing_status 查詢，或用 /stop 取消。"
+            )
+        else:
+            mode = "fresh scan" if refresh else "today's scan (reuses a completed result)"
+            ack = (
+                f"📈 Started today's swing scan ({mode}).\n"
+                f"Job: {job.job_id}\n"
+                "This is an independent background job, not a Codex turn. "
+                "I'll send the candidates when it completes. Use /swing_status "
+                "to check or /stop to cancel."
+            )
+        await update.effective_message.reply_text(ack)
+        await update.effective_chat.send_action(ChatAction.TYPING)
+
+        # Do not wrap this in wait_for: the point of this path is to let a
+        # network-bound scan outlive the 600-second conversational turn limit.
+        await asyncio.to_thread(swing.execute, job.job_id)
+        finished = swing.get_job(job.job_id)
+        if finished is None:
+            await update.effective_message.reply_text("⚠️ Swing job state disappeared.")
+        elif finished.status == "completed":
+            text = swing.format_report(finished.result, finished.meta,
+                                       language=finished.language)
+            await _reply(update, text, [])
+        elif finished.status == "cancelled":
+            await update.effective_message.reply_text(
+                "🛑 波段掃描已取消。" if language == "tc" else "🛑 Swing scan cancelled."
+            )
+        else:
+            detail = finished.error or "unknown error"
+            await update.effective_message.reply_text(
+                (f"⚠️ 波段掃描失敗：{detail}" if language == "tc"
+                 else f"⚠️ Swing scan failed: {detail}")
+            )
+    except asyncio.CancelledError:
+        if job is not None:
+            # Set the event before returning so the worker stops between ticker
+            # steps even though cancelling a to_thread await cannot kill a Python
+            # thread already inside yfinance.
+            swing.cancel_job(job.job_id)
+        if task in _stopping:
+            _stopping.discard(task)
+            log.info("swing scan stopped by user for chat %s", chat_id)
+            try:
+                await update.effective_message.reply_text(
+                    "🛑 已停止波段掃描；已完成的資料不受影響。"
+                    if language == "tc" else
+                    "🛑 Swing scan stopped; already completed data is unchanged."
+                )
+            except Exception:
+                pass
+            return
+        raise
+    except Exception as exc:
+        log.exception("cmd_swing crashed unexpectedly")
+        if job is not None:
+            swing.cancel_job(job.job_id)
+        try:
+            await update.effective_message.reply_text(
+                f"⚠️ 波段掃描錯誤：{exc}" if language == "tc"
+                else f"⚠️ Swing scan error: {exc}"
+            )
+        except Exception:
+            pass
+    finally:
+        _untrack_task(chat_id, task)
+
+
+async def cmd_swing_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Report the dedicated swing job state without touching the agent runtime."""
+    args = {str(x).strip().lower() for x in (getattr(ctx, "args", None) or [])}
+    language = "en" if args & {"en", "english"} else "tc"
+    await update.effective_message.reply_text(
+        swing.status_text(update.effective_chat.id, language=language)
+    )
+
+
 async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancel the in-flight turn / committee run for THIS chat.
 
@@ -558,7 +710,13 @@ async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await _run(update, update.message.text)
+    text = update.message.text
+    if _is_swing_intent(text):
+        log.info("routing deterministic swing intent directly for chat %s",
+                 update.effective_chat.id)
+        await cmd_swing(update, ctx)
+        return
+    await _run(update, text)
 
 
 async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -842,6 +1000,8 @@ def main() -> None:
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
     app.add_handler(CommandHandler("watchlist", cmd_watchlist))
     app.add_handler(CommandHandler("alpha", cmd_alpha, block=False))
+    app.add_handler(CommandHandler("swing", cmd_swing, block=False))
+    app.add_handler(CommandHandler("swing_status", cmd_swing_status))
     app.add_handler(CommandHandler("playbooks", cmd_playbooks))
     app.add_handler(CommandHandler("stop", cmd_stop))
     # Long handlers run block=False so the dispatcher keeps reading updates while

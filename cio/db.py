@@ -98,6 +98,23 @@ CREATE TABLE IF NOT EXISTS alpha_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_alpha_cand_run ON alpha_candidates(run_id, rank);
 
+-- Telegram's dedicated swing-scan workflow.  The scan itself is deterministic
+-- and its financial result lives in alpha_runs/alpha_candidates; this small
+-- ledger only makes the long-running job observable and restart-safe.
+CREATE TABLE IF NOT EXISTS swing_jobs (
+    job_id      TEXT PRIMARY KEY,
+    chat_id     INTEGER NOT NULL,
+    language    TEXT NOT NULL DEFAULT 'tc',
+    refresh     INTEGER NOT NULL DEFAULT 0,
+    status      TEXT NOT NULL DEFAULT 'queued',
+    run_id      INTEGER,
+    error       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    started_at  TEXT,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_swing_jobs_chat ON swing_jobs(chat_id, created_at);
+
 -- Idempotency ledger for CSV imports. A redelivered Telegram upload (e.g. the
 -- process died mid-turn before acking, so Telegram replays the message) has
 -- identical bytes -> identical hash -> skipped, preventing duplicate rows from

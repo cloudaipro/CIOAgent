@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .engine import run, AlphaResult
+from .engine import run, AlphaResult, ScanCancelled
 from . import store, report, regime
 
 
@@ -20,6 +20,9 @@ def run_and_save(*, publish: bool = True, threshold: float | None = None,
     point the dashboard button, the /alpha command and the agent tool all call."""
     from .. import db as _db
     result = run(**run_kw)
+    cancel_check = run_kw.get("cancel_check")
+    if cancel_check is not None and cancel_check():
+        raise ScanCancelled("Alpha Hunter scan cancelled")
     meta = store.save_run(result, publish=publish, threshold=threshold,
                           db_path=db_path or _db.DB_PATH)
     return result, meta
@@ -37,11 +40,16 @@ def reuse_today_or_run(*, publish: bool = True, threshold: float | None = None,
     from .. import watchlist
 
     path = db_path or _db.DB_PATH
+    cancel_check = run_kw.get("cancel_check")
+    if cancel_check is not None and cancel_check():
+        raise ScanCancelled("Alpha Hunter scan cancelled")
     today = datetime.now().strftime("%Y-%m-%d")
     cached = store.latest_run_for_date(today, db_path=path)
     # A published caller must not reuse a diagnostic publish=False run: doing so
     # would claim a watchlist exists when none was created.
     if cached is not None and (not publish or cached.get("watchlist_id")):
+        if cancel_check is not None and cancel_check():
+            raise ScanCancelled("Alpha Hunter scan cancelled")
         result = AlphaResult(
             run_date=cached["run_date"],
             regime={"status": cached.get("regime", "UNKNOWN"),
@@ -64,5 +72,5 @@ def reuse_today_or_run(*, publish: bool = True, threshold: float | None = None,
     return run_and_save(publish=publish, threshold=threshold, db_path=path, **run_kw)
 
 
-__all__ = ["run", "run_and_save", "reuse_today_or_run", "AlphaResult", "store",
-           "report", "regime"]
+__all__ = ["run", "run_and_save", "reuse_today_or_run", "AlphaResult",
+           "ScanCancelled", "store", "report", "regime"]
