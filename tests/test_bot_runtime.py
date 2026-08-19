@@ -574,7 +574,7 @@ class TestReselectNeeded:
         assert bot_runtime.reselect_needed(_FakeRuntime("openai")) is False
 
     def test_false_when_the_only_alternative_is_nim(self, monkeypatch):
-        """Bot chat never routes to nim (44-tool surface), so a nim link does
+        """Bot chat never routes to nim (45-tool surface), so a nim link does
         not count as a usable alternative."""
         from cio.committee import engine
         engine.latch("openai")

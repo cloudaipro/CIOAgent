@@ -1,9 +1,11 @@
 # Dedicated swing-scan job
 
-The Telegram request **「今天有哪些適合進場做波段操作」** is a high-value,
-network-bound workflow and must not be handled inside a general Codex turn.
-The bot recognizes that intent and routes it to the same deterministic Alpha
-Hunter funnel as `/alpha`, through `cio/swing.py`.
+The Telegram request **「今天有哪些適合進場做波段操作」** is interpreted by
+the conversational LLM. When the LLM determines that the user is directly
+asking to start the scan, it calls the narrow `request_swing_scan` handoff tool;
+the Telegram bot then routes that handoff to the same tracked `/swing` workflow.
+There is deliberately no keyword/regex bypass: quoted requests, negations, and
+questions about earlier results remain normal conversation turns.
 
 ## Telegram
 
@@ -14,6 +16,12 @@ Hunter funnel as `/alpha`, through `cio/swing.py`.
 /swing_status          # inspect the active/last job
 /stop                  # cooperatively cancel the active scan
 ```
+
+The same job can therefore be invoked in exactly two ways:
+
+1. An explicit `/swing` command (or its Telegram button).
+2. A normal-language message that the LLM understands as a direct request to
+   start or refresh the swing scan.
 
 The default report is Traditional Chinese. The scan publishes/refreshes
 `Alpha-YYYY-MM-DD` and makes it the active watchlist, matching Alpha Hunter's

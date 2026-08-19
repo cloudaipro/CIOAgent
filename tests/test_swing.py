@@ -122,9 +122,9 @@ class _Chat:
 
 
 class _Message:
-    def __init__(self, chat):
+    def __init__(self, chat, text="今天有哪些適合進場做波段操作"):
         self.chat = chat
-        self.text = "今天有哪些適合進場做波段操作"
+        self.text = text
         self.replies: list[str] = []
 
     async def reply_text(self, text, **kwargs):
@@ -149,24 +149,82 @@ class _Ctx:
     args: list[str] = field(default_factory=list)
 
 
-def test_original_chinese_message_is_directly_routed_to_swing(monkeypatch):
+@pytest.mark.parametrize("text", [
+    "今天有哪些適合進場做波段操作",
+    (
+        "我沒有要你做波段掃描，我是問你問題：為什麼之前問你"
+        "「今天有哪些適合進場做波段操作」，你只推薦三支？"
+    ),
+    (
+        "為什麼我之前問你說「今天有哪些適合進場做波段操作」，或者要求你做 "
+        "swing refresh 的時候，你給我的推薦股票只有三支；但後來又能找其他股票？"
+    ),
+])
+def test_every_natural_language_message_reaches_the_agent(text, monkeypatch):
     import cio.bot as bot
 
-    called = []
+    prompts = []
 
-    async def fake_swing(update, ctx):
-        called.append((update, ctx))
+    async def fail_swing(update, ctx):
+        raise AssertionError("ordinary text must never call cmd_swing before the LLM")
 
-    async def fail_agent(update, prompt):
-        raise AssertionError("the Chinese swing request must bypass Codex")
+    async def fake_run(update, prompt):
+        prompts.append(prompt)
 
-    monkeypatch.setattr(bot, "cmd_swing", fake_swing)
-    monkeypatch.setattr(bot, "_run", fail_agent)
-    update = _Update()
+    monkeypatch.setattr(bot, "cmd_swing", fail_swing)
+    monkeypatch.setattr(bot, "_run", fake_run)
+    update = _Update(message=_Message(_Chat(), text))
     asyncio.run(bot.on_text(update, _Ctx()))
 
-    assert len(called) == 1
-    assert called[0][0] is update
+    assert prompts == [text]
+
+
+def test_llm_confirmed_handoff_invokes_cmd_swing(monkeypatch):
+    import cio.bot as bot
+
+    class _Agent:
+        session_id = "test-session"
+
+        async def ask(self, prompt):
+            assert prompt == "請強制重新掃描今天的波段候選"
+            return "I will hand this off.", [], []
+
+        def take_actions(self):
+            return [{"command": "swing", "language": "tc", "refresh": True}]
+
+    calls = []
+    logged = []
+
+    async def fake_swing(update, ctx):
+        calls.append(list(ctx.args))
+
+    monkeypatch.setattr(bot, "_agent", lambda chat_id: _Agent())
+    monkeypatch.setattr(bot, "cmd_swing", fake_swing)
+    monkeypatch.setattr(bot.memory, "log_turn", lambda *args: logged.append(args))
+    text = "請強制重新掃描今天的波段候選"
+    update = _Update(message=_Message(_Chat(), text))
+
+    asyncio.run(bot.on_text(update, _Ctx()))
+
+    assert calls == [["zh", "refresh"]]
+    assert logged and logged[0][2] == text
+    assert update.message.replies == []  # cmd_swing owns all user-visible replies
+
+
+def test_request_swing_scan_tool_records_a_narrow_handoff():
+    import cio.agent as agent
+
+    tool = next(t for t in agent.CIO_TOOLS if t.name == "request_swing_scan")
+    agent._PENDING_ACTIONS.clear()
+    try:
+        asyncio.run(tool.handler({"language": "en", "refresh": True}))
+        assert agent._PENDING_ACTIONS == [{
+            "command": "swing",
+            "language": "en",
+            "refresh": True,
+        }]
+    finally:
+        agent._PENDING_ACTIONS.clear()
 
 
 def test_swing_command_completes_without_constructing_an_agent(monkeypatch):

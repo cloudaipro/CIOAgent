@@ -145,7 +145,7 @@ class FallbackModel(Model):
             gpt-5.6-terra in /v1/chat/completions. To use function tools, use
             /v1/responses or set reasoning_effort to 'none'.
 
-        Since bot chat presents 44 tools, the model's tool-selection judgement
+        Since bot chat presents 45 tools, the model's tool-selection judgement
         is the thing we least want to switch off, so the other repair the API
         offers -- reasoning_effort='none' -- is the wrong trade here. Responses
         is also the native surface for what this path already produces: the

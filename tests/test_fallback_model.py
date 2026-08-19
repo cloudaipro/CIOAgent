@@ -401,7 +401,7 @@ class TestMissingApiKey:
 #
 #     Chat Completions cannot serve this path at all: gpt-5.6-terra rejects
 #     function tools there unless reasoning_effort is 'none', and bot chat
-#     presents 44 tools. That was found by a live call, not by these tests --
+#     presents 45 tools. That was found by a live call, not by these tests --
 #     so the point of the two below is narrow but real: keep a later edit from
 #     quietly putting the 400 back.
 # ---------------------------------------------------------------------------

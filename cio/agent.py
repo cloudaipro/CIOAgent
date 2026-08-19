@@ -55,9 +55,12 @@ def _ev(tool: str, symbol: str, configured: bool, **extra) -> None:
 # module global (not a contextvar) because the SDK runs MCP tool callbacks in a
 # separate task context. `_LOCK` serializes turns so this stays correct even if
 # two chats arrive at once. `_PENDING_DOCS` is the same idea for file documents
-# (e.g. the committee PDF) the bot sends via reply_document.
+# (e.g. the committee PDF) the bot sends via reply_document. `_PENDING_ACTIONS`
+# carries narrow UI handoffs (currently only the background /swing command) back
+# to cio.bot after the model has understood a natural-language request.
 _PENDING: list[str] = []
 _PENDING_DOCS: list[str] = []
+_PENDING_ACTIONS: list[dict] = []
 # Per-scope web-source registry, keyed by chat scope. web_search appends {url,title}
 # in order; the model cites results by their 1-based number ([1],[2]…) and ask()
 # appends a verified Sources: footer from this list. URLs never pass through model
@@ -891,6 +894,30 @@ async def t_run_alpha_hunter(args):
     return _text(alpha.report.format_telegram(result, meta))
 
 
+@tool("request_swing_scan",
+      "Hand a confirmed natural-language request for today's dedicated background "
+      "swing-candidate scan to Telegram's /swing command. Call this only when the "
+      "user is directly asking to START or REFRESH that scan. Do NOT call it when "
+      "the user quotes or discusses an earlier request, asks why prior results "
+      "differed, says they do not want a scan, or merely mentions swing trading. "
+      "Set refresh=true only when the user explicitly asks for a fresh/forced "
+      "refresh; language is 'tc' or 'en'.",
+      {"refresh": bool, "language": str})
+async def t_request_swing_scan(args):
+    language = "en" if str(args.get("language", "tc")).strip().lower() == "en" else "tc"
+    refresh = args.get("refresh", False) is True
+    _PENDING_ACTIONS.append({
+        "command": "swing",
+        "language": language,
+        "refresh": refresh,
+    })
+    return _text(
+        "Swing command handoff accepted. Do not run Alpha Hunter yourself and do "
+        "not provide candidates in this turn; Telegram will acknowledge and run "
+        "the tracked background job."
+    )
+
+
 @tool("market_regime",
       "Current market regime light — GREEN / YELLOW / RED — from QQQ vs its 50/200-day "
       "moving averages (Alpha Hunter's Layer 0). GREEN = uptrend (QQQ>50MA>200MA, 50MA "
@@ -1162,7 +1189,8 @@ CIO_TOOLS = [t_summary, t_positions, t_realized, t_set_price, t_ingest, t_alloc_
              t_run_strategy_profile,
              t_refresh_prices, t_stock_panel, t_stock_indicators, t_watchlist_prices,
              t_list_watchlists, t_watchlist_add, t_watchlist_remove,
-             t_watchlist_activate, t_run_alpha_hunter, t_market_regime,
+             t_watchlist_activate, t_run_alpha_hunter, t_request_swing_scan,
+             t_market_regime,
              t_market_clock, t_web_search, t_web_scrape, t_committee,
              t_sec_filings, t_analyst_ratings, t_earnings_info, t_company_profile,
              t_clinical_trials,
@@ -1221,6 +1249,13 @@ Rules:
   the REAL multi-agent committee and sends the official PDF. NEVER invent committee seats,
   votes, or a verdict yourself — do not simulate it inline. If unsure whether they want the
   full (cost-bearing) run, confirm the symbol first, then call the tool.
+- SWING COMMAND ROUTING: a normal-language request that directly asks you to start
+  today's swing-candidate scan (including a direct request to force-refresh it) must
+  call request_swing_scan so Telegram can run the tracked background /swing job. Do
+  NOT call that tool when the user is discussing, comparing, questioning, negating,
+  or quoting a prior swing request/result. In those cases answer the user's actual
+  question normally. The literal /swing command is handled before the message reaches
+  you.
 - HARNESS CHECKS (deterministic, free, no tokens): the consistency gate (V1) and citation
   gate (V2) now run AUTOMATICALLY on every reply — you do not call them. For the consistency
   gate to read your plan, emit ANY entry/exit plan as a fenced ```plan``` block holding one
@@ -1402,6 +1437,7 @@ class BaseRuntime:
         self._tokens = 0         # approx tokens since last checkpoint
         self._compaction_pending = False   # set by PreCompact hook -> checkpoint soon
         self._last_docs: list[str] = []    # doc paths from the most recent main turn
+        self._last_actions: list[dict] = []  # UI handoffs from the most recent main turn
         # Local day of the last persisted turn (survives restarts via the meta
         # table). Drives the day-boundary roll so one chat thread never spans days.
         try:
@@ -1441,9 +1477,19 @@ class BaseRuntime:
             _SEARCHED_THIS_TURN = False
             _PENDING.clear()
             _PENDING_DOCS.clear()
+            _PENDING_ACTIONS.clear()
             # NB: _SOURCES is NOT cleared here — it persists across turns within a
             # session so cross-turn [n] citations resolve. Reset on roll/close only.
-            return await self._run_query(prompt)
+            try:
+                return await self._run_query(prompt)
+            finally:
+                self._last_actions = list(_PENDING_ACTIONS)
+                _PENDING_ACTIONS.clear()
+
+    def take_actions(self) -> list[dict]:
+        """Drain model-requested UI handoffs from the last completed main turn."""
+        actions, self._last_actions = self._last_actions, []
+        return actions
 
     async def warm(self) -> None:
         """Eagerly connect (and resume) so the first message has no startup lag."""
@@ -1499,6 +1545,9 @@ class BaseRuntime:
         if NUDGE_TURNS and self._turns and self._turns % NUDGE_TURNS == 0:
             prompt = prompt + _NUDGE_SUFFIX
         text, images = await self._guarded_turn(prompt)
+        # A checkpoint below also uses _guarded_turn and would otherwise replace
+        # this main turn's UI handoff with the checkpoint turn's empty outbox.
+        actions, self._last_actions = self._last_actions, []
         # Append the verified Sources footer (user-facing only) BEFORE any checkpoint
         # below resets this scope's registry.
         text = _append_sources(text, list(_sources_for(self._scope)),
@@ -1537,6 +1586,7 @@ class BaseRuntime:
         if (self._compaction_pending or self._turns >= ROLL_TURNS
                 or self._tokens >= ROLL_TOKENS):
             await self._checkpoint()
+        self._last_actions = actions
         return text, images, docs
 
     async def _checkpoint(self) -> None:

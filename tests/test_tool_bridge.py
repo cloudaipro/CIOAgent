@@ -79,8 +79,8 @@ def real_schemas() -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 
 class TestConversionCoverage:
-    def test_all_44_tools_present(self):
-        assert len(agent.CIO_TOOLS) == 44
+    def test_all_45_tools_present(self):
+        assert len(agent.CIO_TOOLS) == 45
         assert len(tb.OPENAI_TOOLS) == len(agent.CIO_TOOLS)
 
     def test_preserves_cio_tools_ordering(self):
@@ -107,7 +107,7 @@ class TestSchemaParity:
         assert tb._claude_schema(t) == real_schemas[t.name]
 
     def test_shape_distribution_matches_verified_brief_counts(self):
-        # Brief Decisions 3/4: 16 empty, 27 param-mapping, 1 already JSON
+        # Brief Decisions 3/4: 16 empty, 28 param-mapping, 1 already JSON
         # Schema (harness_event_study). Independently re-verified against the
         # live CIO_TOOLS before writing the converter; pinned here so a future
         # CIO_TOOLS edit that changes the mix doesn't drift unnoticed.
@@ -120,7 +120,7 @@ class TestSchemaParity:
                 shapes["already_schema"] += 1
             else:
                 shapes["param_type"] += 1
-        assert shapes == {"empty": 16, "param_type": 27, "already_schema": 1}
+        assert shapes == {"empty": 16, "param_type": 28, "already_schema": 1}
 
 
 class TestUnknownTypeFallback:
@@ -187,7 +187,7 @@ class TestOptionalParamNullability:
 
     @pytest.mark.parametrize("t", agent.CIO_TOOLS, ids=lambda t: t.name)
     def test_ensure_strict_json_schema_accepts_each_converted_schema(self, t):
-        # Must not raise, for any of the 44 -- brief DoD 2 bullet 3.
+        # Must not raise, for any of the 45 -- brief DoD 2 bullet 3.
         ensure_strict_json_schema(copy.deepcopy(tb._openai_schema(t)))
 
 

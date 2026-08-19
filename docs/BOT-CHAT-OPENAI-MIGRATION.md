@@ -142,7 +142,7 @@ our own loop executes — would collapse this to one runtime. It was considered 
 
 | # | Decision | Rationale |
 |---|---|---|
-| **D1** | Bot chat supports **`claude` and `openai` only**. No LiteLLM, no NIM. A `nim` link inside a shared chain is logged and skipped. | 44 tools is a wide surface; a weak tool-caller burns whole turns. NIM stays a committee backend where output is prose. |
+| **D1** | Bot chat supports **`claude` and `openai` only**. No LiteLLM, no NIM. A `nim` link inside a shared chain is logged and skipped. | 45 tools is a wide surface; a weak tool-caller burns whole turns. NIM stays a committee backend where output is prose. |
 | **D2** | The Claude link is served by **`claude-agent-sdk`**, unchanged, subscription-billed. | Preserves today's cost model. |
 | **D3** | `claude-agent-sdk` therefore plugs in as a **whole-turn runtime**, never as an Agents SDK `Model`. | Forced by D2 — see §3.1. |
 | **D4** | **Runtime is selected at session start / roll, then pinned** for that session window. | The two transcripts never interleave → no history sync, no turn replay, no side-effect ledger. |
@@ -155,7 +155,7 @@ roll and at the start of any turn where the current link is latched or over budg
 
 The upgrade path, if that gap ever bites: per-turn runtime switching plus a **mutating-tool
 ledger**, so a failed turn replays on the next link only when nothing irreversible ran.
-Roughly ten of the 44 tools mutate — `ingest_transactions_csv`, `set_price`, `remember`,
+Roughly ten of the 45 tools mutate — `ingest_transactions_csv`, `set_price`, `remember`,
 `forget`, `save_playbook`, `add_econ_event`, `watchlist_add/remove/activate`,
 `run_alpha_hunter`, and `run_committee` (~20 LLM calls, KG-7). Replaying a turn without that
 ledger would double-execute them. **Do not add per-turn switching without the ledger.**
@@ -245,7 +245,7 @@ framework state:
 
 *Added 2026-07-27 during implementation (Step 12), measured against the real `CIO_TOOLS`. The
 snippet above passed `t.input_schema` straight through as `params_json_schema`. That is wrong
-for 43 of the 44 tools.*
+for 44 of the 45 tools.*
 
 Measured shapes:
 
@@ -322,7 +322,7 @@ The API offers two repairs and they are not equivalent:
 
 | Repair | Cost |
 |---|---|
-| `reasoning_effort='none'` on Chat Completions | Turns reasoning off across a 44-tool selection surface — the judgement we least want to lose |
+| `reasoning_effort='none'` on Chat Completions | Turns reasoning off across a 45-tool selection surface — the judgement we least want to lose |
 | **`/v1/responses`** ✅ | None. Reasoning intact, function tools supported |
 
 Responses is also the more honest fit for what this path already produces: the `input_image`
@@ -380,7 +380,7 @@ A transport with no live test is unverified no matter how green the suite is.
 
 | Feature | OpenAIRuntime | Note |
 |---|---|---|
-| 44 tools | ✅ | `FunctionTool` adapter, handler bodies unchanged |
+| 45 tools | ✅ | `FunctionTool` adapter, handler bodies unchanged |
 | memory tools, notes, recall, playbooks | ✅ | SQLite + local embeddings |
 | charts out, committee PDF out | ✅ | module globals |
 | Sources footer, citation registry, tier stamping | ✅ | deterministic, post-text |
@@ -389,7 +389,7 @@ A transport with no live test is unverified no matter how green the suite is.
 | `/stop` cancellation, single-flight per chat | ✅ | `cio/bot.py` task tracking is runtime-agnostic |
 | **usage + transcript attribution** | ⚠️ **fix required** | `cio/agent.py:1464,1484` hardcode `"claude"` — must take the resolved service, or bot chat corrupts the committee's shared budget table |
 | **image / receipt reading** | ⚠️ **gap** | the `Read` builtin (`cio/agent.py:1256`) does not exist off the Claude CLI. **A `read_image` FunctionTool cannot fix this** — see §7.1. The image must ride in as a multimodal *input part*, and the openai link must be vision-capable or receipt reading silently degrades |
-| **tool-calling strength** | ⚠️ | 44 tools needs a strong tool-caller; do not put a mini model in the bot-chat chain |
+| **tool-calling strength** | ⚠️ | 45 tools needs a strong tool-caller; do not put a mini model in the bot-chat chain |
 | **prompt-cache warmth** | ⚠️ | the static prefix is system prompt + memory block + 44 schemas. Every runtime switch pays a cold prefix |
 | **persona continuity** | ⚠️ | tone/format shifts across a switch. The committee hides this behind role reports; chat will not |
 | streaming, structured output | n/a | unused today |
@@ -499,7 +499,7 @@ Steps 1 and 2 are safe to ship independently and fix real bugs on their own.
 ## 11. Out of scope
 
 Committee / WMA / Alpha Hunter transports · `.mcp.json` · NIM in bot chat · Claude via LiteLLM
-· Claude via the raw Anthropic Messages API · re-hosting the 44 tools as a standalone MCP
+· Claude via the raw Anthropic Messages API · re-hosting the 45 tools as a standalone MCP
 server (worth doing only to reach them from Claude Desktop or Cursor — `FunctionTool` is
 strictly better in-app) · per-turn runtime switching and the mutating-tool ledger (§3.2, the
 documented upgrade path).

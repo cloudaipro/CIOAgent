@@ -4,7 +4,7 @@ bot_runtime.py — Runtime seam for the general Telegram bot chat.
 Every other agent (committee specialists, moderator, CIO, translator, WMA) goes
 through ``engine.ask_role``'s ``(system, user) -> text`` transport, so the named
 fallback chains (docs/FALLBACK-CHAINS.md) cover them for free. Bot chat cannot
-use that transport — it drives a 44-tool tool-calling loop, not a single prompt
+use that transport — it drives a 45-tool tool-calling loop, not a single prompt
 — so it needs its own runtime selection. Chain *policy* (chains, skip rules) is
 shared with the committee; chain *transport* is not.
 
@@ -224,7 +224,7 @@ def select_runtime(chat_id: int, *, resume: str | None = None,
         """Build an OpenAIRuntime over *links*, or None if it cannot be built.
 
         Imported lazily: `cio.agent_openai` pulls in the whole Agents SDK plus
-        the 44-tool bridge, which every importer of this module would otherwise
+        the 45-tool bridge, which every importer of this module would otherwise
         pay for even on a Claude-only chain. Returns None rather than raising —
         FallbackModel's constructor rejects an empty link list by design, and a
         routing problem must never take the chat down (Standing Rule R2).

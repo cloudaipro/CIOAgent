@@ -1,8 +1,8 @@
 """tool_bridge.py — adapts CIO_TOOLS (claude_agent_sdk.SdkMcpTool) into
-agents.FunctionTool so the OpenAI Agents SDK side can call the same 44 tools.
+agents.FunctionTool so the OpenAI Agents SDK side can call the same 45 tools.
 
 Standalone module: nothing imports this yet. cio/agent_openai.py (Step 13) is
-the first caller. This step only proves the 44 tools cross cleanly to the
+the first caller. This step only proves the 45 tools cross cleanly to the
 OpenAI side; it wires up no runtime, model, or session (Architect brief
 Step 12; plan of record docs/BOT-CHAT-OPENAI-MIGRATION.md §4).
 
@@ -10,8 +10,8 @@ Two schema quirks this module exists to handle — see handoff/ARCHITECT-BRIEF.m
 Step 12, Decisions 3 and 4 (independently re-verified against the live .venv
 before writing this, not just trusted):
 
-1. SdkMcpTool.input_schema is not JSON Schema for 43 of the 44 CIO_TOOLS — it's
-   either `{}` (16 tools) or a `{param_name: python_type}` mapping (27 tools;
+1. SdkMcpTool.input_schema is not JSON Schema for 44 of the 45 CIO_TOOLS — it's
+   either `{}` (16 tools) or a `{param_name: python_type}` mapping (28 tools;
    only str/int/float/bool appear). claude_agent_sdk turns that into real JSON
    Schema at MCP-registration time via a private closure (`_build_schema`,
    claude_agent_sdk/__init__.py:399-417, local to create_sdk_mcp_server — not

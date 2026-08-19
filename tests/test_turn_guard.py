@@ -47,3 +47,20 @@ def test_guarded_turn_sets_active_scope_per_runtime():
         assert first.seen_scope == "chat:1"
 
     asyncio.run(run())
+
+
+def test_guarded_turn_captures_and_drains_ui_handoffs():
+    class _ActionRuntime(_RecordingRuntime):
+        async def _run_query(self, prompt):
+            agent._PENDING_ACTIONS.append({"command": "swing"})
+            return (prompt, [])
+
+    async def run():
+        runtime = _ActionRuntime(chat_id=3)
+        await runtime._guarded_turn("start a swing scan")
+
+        assert runtime.take_actions() == [{"command": "swing"}]
+        assert runtime.take_actions() == []
+        assert agent._PENDING_ACTIONS == []
+
+    asyncio.run(run())

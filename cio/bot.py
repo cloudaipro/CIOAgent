@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 from dotenv import load_dotenv
 from telegram import (
@@ -57,22 +58,6 @@ ALLOWED_CHATS = {
 
 # Keep generated filenames inside their directory (no path traversal from a symbol).
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9.\-^=]")
-
-# High-value deterministic intents should not enter the general Codex loop. A
-# full Alpha scan can be network-bound for several minutes; the dedicated
-# /swing path runs it as a tracked worker job instead.
-_SWING_INTENT_RE = re.compile(
-    r"(?=.*(?:今天|今日|目前|現在))"
-    r"(?=.*(?:適合|适合|推薦|推荐|候選|候选))"
-    r"(?=.*(?:進場|进场|做波段|波段))"
-)
-
-
-def _is_swing_intent(text: str | None) -> bool:
-    """Return True for the common Chinese request for today's swing candidates."""
-    compact = re.sub(r"\s+", "", str(text or ""))
-    return bool(compact and _SWING_INTENT_RE.search(compact))
-
 
 def _safe_name(text: str, fallback: str = "report") -> str:
     s = _SAFE_NAME.sub("", str(text)).lstrip(".")[:24]
@@ -376,6 +361,40 @@ async def _run(update: Update, prompt: str) -> None:
                 await _reset_agent(chat_id)
             await update.effective_message.reply_text(f"⚠️ Agent error: {e}")
             return
+        # Natural-language command routing belongs to the LLM, not a keyword
+        # regex. A model that understood a direct swing request records a narrow
+        # handoff via request_swing_scan; Telegram then runs the exact same
+        # tracked/cancellable path as the explicit /swing command. Unknown action
+        # types are ignored so future agent tools cannot accidentally gain a bot
+        # execution surface merely by returning similarly shaped data.
+        take_actions = getattr(agent, "take_actions", None)
+        actions = take_actions() if callable(take_actions) else []
+        swing_action = next(
+            (a for a in actions
+             if isinstance(a, dict) and a.get("command") == "swing"),
+            None,
+        )
+        if swing_action is not None:
+            language = "en" if swing_action.get("language") == "en" else "tc"
+            refresh = swing_action.get("refresh") is True
+            log.info(
+                "routing LLM-confirmed swing handoff for chat %s refresh=%s language=%s",
+                chat_id, refresh, language,
+            )
+            # Keep the user's request visible in the cold conversation store. The
+            # former regex bypass omitted it entirely, which made a later "read my
+            # last question" refer to an unrelated older turn.
+            memory.log_turn(
+                chat_id,
+                agent.session_id,
+                prompt,
+                "Started the requested /swing background job.",
+            )
+            args = ["en" if language == "en" else "zh"]
+            if refresh:
+                args.append("refresh")
+            await cmd_swing(update, SimpleNamespace(args=args))
+            return
         # Persist the exchange for the dev dashboard + cold-store recall (best-effort).
         memory.log_turn(chat_id, agent.session_id, prompt, text)
         await _reply(update, text or "(no response)", images, docs)
@@ -407,7 +426,7 @@ def _help_text(chat_id: int) -> str:
         "• Send a broker screenshot or receipt photo and I'll read it\n"
         "• /watchlist — latest prices for your active watchlist\n"
         "• /swing [zh|en] [refresh] — background scan for today's swing candidates; "
-        "the Chinese request ‘今天有哪些適合進場做波段操作’ routes here automatically\n"
+        "ordinary-language requests are interpreted by the chat model first\n"
         "• /swing_status — check the background scan; /stop cancels it\n"
         "• /playbooks — list saved playbooks, then ask me to run one "
         "(e.g. \"Run the monthly_red_events playbook\")\n"
@@ -612,7 +631,7 @@ async def cmd_swing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             ack = (
                 f"📈 已啟動今日波段掃描（{mode}）。\n"
                 f"工作編號：{job.job_id}\n"
-                "這是獨立背景工作，不會佔用對話模型回合；完成後我會回傳候選名單。"
+                "掃描本身是獨立背景工作；完成後我會回傳候選名單。"
                 "可用 /swing_status 查詢，或用 /stop 取消。"
             )
         else:
@@ -620,7 +639,7 @@ async def cmd_swing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             ack = (
                 f"📈 Started today's swing scan ({mode}).\n"
                 f"Job: {job.job_id}\n"
-                "This is an independent background job, not a Codex turn. "
+                "The scan itself is an independent background job. "
                 "I'll send the candidates when it completes. Use /swing_status "
                 "to check or /stop to cancel."
             )
@@ -710,13 +729,10 @@ async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    if _is_swing_intent(text):
-        log.info("routing deterministic swing intent directly for chat %s",
-                 update.effective_chat.id)
-        await cmd_swing(update, ctx)
-        return
-    await _run(update, text)
+    # Slash commands are dispatched by CommandHandler. Every ordinary message
+    # reaches the conversational model; it may request a /swing handoff through
+    # the dedicated tool after understanding the full meaning and context.
+    await _run(update, update.message.text)
 
 
 async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
