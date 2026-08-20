@@ -145,6 +145,15 @@ for the dashboard.
 `/committee SYMBOL` runs a simulated buy-side process and returns a 14-section **PDF**
 research report. Add `zh` (`/committee AAPL zh`) for a **Traditional Chinese** version.
 
+`/committee_swing SYMBOL [zh]` runs the same multi-agent/debate/CIO process under a
+different mandate: assess a **fresh swing entry held for days to several weeks**. It
+uses the swing indicator profile (Squeeze, KDJ, Fisher, EFI, VIDYA), confirmed-bar
+state/stability, catalysts and event risk. In this command, BUY means enter, HOLD means
+wait without opening a new position, and SELL means avoid or exit. Its PDF adds a swing
+trade plan with setup status, entry trigger, invalidation, profit-taking, sizing, and
+event-risk treatment. Long-term fundamentals remain context; they cannot turn a weak
+swing setup into a HOLD-as-investment recommendation.
+
 - **Two ways to convene**: the `/committee SYMBOL` slash command, or just **ask in plain
   language** ("convene the committee on META", "委員會討論 Meta"). Both route through the
   same `cio/committee/delivery.py` pipeline. In chat, the agent's `run_committee` tool
@@ -426,6 +435,7 @@ Details and diagnostics:
 - `show NVDA indicators` / `指標視覺化 LRCX swing` — technical-indicator overlay chart (profile-driven panels, TTM Squeeze, BB/KC, divergence)
 - `/watchlist` — broker-style quote-board image for your active watchlist (manage lists in the dashboard)
 - `/committee SYMBOL` — full AI investment-committee PDF report (`/committee AAPL zh` for 繁體中文)
+- `/committee_swing SYMBOL` — swing-entry committee PDF (`/committee_swing AAPL zh` for 繁體中文)
 - `/briefing [SYMBOL…]` — pre-market watchlist briefing PDF (add `zh` for 繁體中文; auto-runs 06:00 on trading days)
 - `/stop` — cancel whatever's currently running for you (a turn or a committee/briefing run)
 - `/subscribe` — opt in to the daily portfolio digest **and** the 06:00 watchlist briefing · `/unsubscribe` — stop both

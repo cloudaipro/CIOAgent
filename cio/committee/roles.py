@@ -11,6 +11,8 @@ Every specialist also emits: vote (BUY|HOLD|SELL), confidence (0-100), reason.
 """
 from __future__ import annotations
 
+from copy import deepcopy
+
 _MEMORY_NOTE_RULE = (
     "End every analysis by writing `memory_note`: ONE durable, qualitative lesson "
     "for your future self about THIS company/sector/setup (a thesis, a risk pattern, "
@@ -228,3 +230,50 @@ CIO_SYSTEM = (
     "scenarios (list of dicts with keys: scenario, probability, price_target, key_drivers), "
     "and memory_note. " + _MEMORY_NOTE_RULE
 )
+
+
+# A committee profile changes the investment question, not just the indicators in
+# its data bundle.  Keep the mandate in one place and append it to every seat,
+# including debate, moderator, and CIO prompts.
+SWING_MANDATE = (
+    "SWING STRATEGY MANDATE: This committee is evaluating a fresh swing-trade "
+    "entry held for days to several weeks, not a long-term investment. Interpret "
+    "specialist votes as follows: BUY means enter/add the swing now; HOLD means "
+    "wait for a better trigger and do not open a new position yet; SELL means "
+    "avoid the setup (or exit an existing swing). Prioritize confirmed daily-bar "
+    "price structure, the swing TA profile, momentum, volume/force, volatility "
+    "compression or release, market regime, near-term catalysts, earnings/event "
+    "windows, invalidation risk, and reward-to-risk. Fundamentals and valuation "
+    "are context or catalyst/risk modifiers, not reasons to convert a poor swing "
+    "setup into a long-term hold. TA is the execution layer only: it may time a "
+    "trade but must not originate one without catalyst/behavior evidence. State "
+    "clearly when evidence is missing; missing evidence favors HOLD/WAIT."
+    " Keep final_recommendation and swing_action consistent: Strong Buy/Buy maps "
+    "to ENTER, Hold maps to WAIT, and Sell/Strong Sell maps to AVOID. The CIO's "
+    "time_horizon must remain within days to several weeks."
+)
+
+
+def resolve_committee_profile(profile: str | None) -> str:
+    """Resolve profiles supported by the full committee pipeline."""
+    key = str(profile or "committee").strip().lower()
+    if key == "wave":
+        key = "swing"
+    if key not in {"committee", "swing"}:
+        raise ValueError(f"unsupported committee profile: {profile}")
+    return key
+
+
+def strategy_mandate(profile: str | None) -> str:
+    """Return the cross-role mandate for *profile* (empty for legacy committee)."""
+    return SWING_MANDATE if resolve_committee_profile(profile) == "swing" else ""
+
+
+def specialists_for_profile(profile: str | None) -> list[dict]:
+    """Return isolated role definitions with the strategy mandate applied."""
+    roles = deepcopy(SPECIALISTS)
+    mandate = strategy_mandate(profile)
+    if mandate:
+        for role in roles:
+            role["system_prompt"] = role["system_prompt"] + "\n\n" + mandate
+    return roles

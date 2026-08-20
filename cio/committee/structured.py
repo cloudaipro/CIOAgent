@@ -193,6 +193,25 @@ CIO_SCHEMA = {
     "additionalProperties": False,
 }
 
+SWING_CIO_PROPERTIES = {
+    "swing_action": {
+        "type": "string", "enum": ["ENTER", "WAIT", "AVOID"]
+    },
+    "setup_status": _string("Concise description of the current swing setup"),
+    "entry_trigger": _string("Observable trigger required before entry, or 'Enter now'"),
+    "invalidation": _string("Observable condition that invalidates the swing thesis"),
+    "profit_taking": _string("Profit-taking or trailing-exit method"),
+    "position_sizing": _string("Risk-based sizing guidance without assuming portfolio size"),
+    "event_risk": _string("Near-term earnings or event-window treatment"),
+}
+
+SWING_CIO_SCHEMA = {
+    "type": "object",
+    "properties": {**CIO_SCHEMA["properties"], **SWING_CIO_PROPERTIES},
+    "required": [*CIO_SCHEMA["required"], *SWING_CIO_PROPERTIES],
+    "additionalProperties": False,
+}
+
 DEBATE_TEXT_SCHEMA = {
     "type": "object",
     "properties": {

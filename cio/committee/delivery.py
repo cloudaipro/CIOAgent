@@ -56,37 +56,47 @@ class CommitteeArtifact:
     doc_path: Path | None = None
     summary: str | None = None
     error: str | None = None
+    # Kept last so the original positional field order remains backward compatible.
+    profile: str = "committee"
 
 
 async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
-                         source: str = "command") -> CommitteeArtifact:
+                         source: str = "command",
+                         profile: str = "committee") -> CommitteeArtifact:
     """Run the full committee pipeline for one symbol and return an artifact.
 
     ``source`` tags what triggered the run ("command" for /committee, "chat" for
     the conversational agent's tool) so the dev dashboard can tell them apart.
+    ``profile`` selects the broad investment committee or swing-entry committee.
 
     Never raises: any failure inside run_committee is captured into
     ``CommitteeArtifact.error``.
     """
     from .translate import normalize_lang, translate_report
     from .engine import set_run_source
+    from .roles import resolve_committee_profile
 
     sym = str(symbol).upper()
+    try:
+        profile = resolve_committee_profile(profile)
+    except ValueError as exc:
+        return CommitteeArtifact(symbol=sym, profile=str(profile), error=f"⚠️ {exc}")
     lang = normalize_lang(lang)
     lang_label = " (繁體中文)" if lang == "tc" else ""
 
     set_run_source(source)
     from . import run_committee, build_report  # honour monkeypatch seams
     try:
-        result = await run_committee(sym)
+        result = (await run_committee(sym) if profile == "committee"
+                  else await run_committee(sym, profile=profile))
     except Exception as e:
         log.exception("run_committee error for %s", sym)
-        return CommitteeArtifact(symbol=sym, lang_label=lang_label,
+        return CommitteeArtifact(symbol=sym, profile=profile, lang_label=lang_label,
                                  error=f"⚠️ Committee error: {e}")
 
     if result.error:
         return CommitteeArtifact(
-            symbol=sym, lang_label=lang_label,
+            symbol=sym, profile=profile, lang_label=lang_label,
             error=f"No data for {sym}. Check the symbol (TW codes need .TW/.TWO).")
 
     md = build_report(sym, result)
@@ -95,17 +105,24 @@ async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
     md = await translate_report(md, lang)
 
     reports_dir.mkdir(parents=True, exist_ok=True)
-    report_title = f"Investment Committee Report: {sym}{lang_label}"
+    swing = profile == "swing"
+    report_title = (
+        f"Swing Strategy Committee Report: {sym}{lang_label}" if swing
+        else f"Investment Committee Report: {sym}{lang_label}"
+    )
+    file_kind = "committee_swing" if swing else "committee"
     pdf_path = _collision_safe_path(
-        reports_dir / f"{_safe_name(sym)}_committee_{date_str}{lang_suffix}.pdf",
+        reports_dir / f"{_safe_name(sym)}_{file_kind}_{date_str}{lang_suffix}.pdf",
         result,
     )
     # Best-effort indicator-visualization chart for the dossier appendix.
     appendix_images = []
     try:
         from .. import stock
-        chart_path = stock.render_indicators(sym, "committee")
-        appendix_images.append((f"{sym} · RSI / MACD / KDJ · divergence", chart_path))
+        chart_path = stock.render_indicators(sym, profile)
+        chart_label = (f"{sym} · Squeeze / KDJ / Fisher / EFI / VIDYA" if swing
+                       else f"{sym} · RSI / MACD / KDJ · divergence")
+        appendix_images.append((chart_label, chart_path))
     except Exception:
         log.debug("indicator chart skipped for %s", sym, exc_info=True)
 
@@ -122,11 +139,12 @@ async def produce_report(symbol: str, lang: "str | None", reports_dir: Path,
         md_path.write_text(md, encoding="utf-8")
         doc_path = md_path
 
-    return CommitteeArtifact(symbol=sym, lang_label=lang_label, doc_path=doc_path,
-                             summary=_summary(sym, lang_label, result))
+    return CommitteeArtifact(symbol=sym, profile=profile, lang_label=lang_label,
+                             doc_path=doc_path,
+                             summary=_summary(sym, lang_label, result, profile=profile))
 
 
-def _summary(sym: str, lang_label: str, result) -> str:
+def _summary(sym: str, lang_label: str, result, profile: str = "committee") -> str:
     """One short Markdown summary message (mirrors the old inline bot version)."""
     from .report import confidence_band
 
@@ -143,9 +161,19 @@ def _summary(sym: str, lang_label: str, result) -> str:
     sell_c = tally.get("sell_count", 0)
     agree = consensus.get("agreement_score") or "N/A"
 
+    swing = profile == "swing"
+    heading = "Swing Committee Summary" if swing else "Committee Summary"
+    rec_label = "Swing Recommendation" if swing else "Recommendation"
+    swing_lines = ""
+    if swing:
+        action = cio.get("swing_action") or "N/A"
+        composite = (getattr(result, "bundle", None) or {}).get("ta_composite", "N/A")
+        swing_lines = f"*Action:* {action}\n*Swing TA:* {composite}\n"
+
     return (
-        f"📋 *{sym} Committee Summary{lang_label}*\n\n"
-        f"*Recommendation:* {final_rec}\n"
+        f"📋 *{sym} {heading}{lang_label}*\n\n"
+        f"*{rec_label}:* {final_rec}\n"
+        f"{swing_lines}"
         f"*Confidence:* {conf_str} — {band}\n"
         f"*Vote Tally:* BUY {buy_c} | HOLD {hold_c} | SELL {sell_c}\n"
         f"*Agreement Score:* {agree}\n\n"

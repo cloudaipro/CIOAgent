@@ -74,6 +74,7 @@ BOT_COMMANDS = [
     ("swing_status", "Check today's swing scan"),
     ("playbooks", "List saved playbooks you can ask me to run"),
     ("committee", "Investment committee on a symbol — /committee AAPL [zh]"),
+    ("committee_swing", "Swing-strategy committee — /committee_swing AAPL [zh]"),
     ("briefing", "Pre-market watchlist briefing — /briefing [SYMBOL…] [zh]"),
     ("subscribe", "Daily digest + 06:00 briefing"),
     ("unsubscribe", "Stop the daily digest"),
@@ -87,7 +88,8 @@ BOT_COMMANDS = [
 _REPLY_KEYBOARD = ReplyKeyboardMarkup(
     [["/watchlist", "/alpha"],
      ["/swing"],
-     ["/committee", "/briefing"],
+     ["/committee", "/committee_swing"],
+     ["/briefing"],
      ["/playbooks"],
      ["/subscribe", "/unsubscribe"],
      ["/help"]],
@@ -433,6 +435,8 @@ def _help_text(chat_id: int) -> str:
         "• /subscribe — opt in to the daily portfolio digest AND the 06:00 "
         "pre-market watchlist briefing on trading days (/unsubscribe to stop)\n"
         "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)\n"
+        "• /committee_swing SYMBOL [zh] — swing-focused committee PDF; "
+        "BUY=enter, HOLD=wait, SELL=avoid/exit\n"
         "• /briefing [SYMBOL…] [zh] — pre-market watchlist briefing as PDF "
         "(add zh for 繁體中文; auto-runs 06:00 on trading days)\n"
         "• /stop — cancel whatever I'm currently working on for you\n\n"
@@ -769,17 +773,28 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Tracked wrapper around the committee run so /stop can cancel it mid-flight."""
+    await _cmd_committee_tracked(update, ctx, profile="committee")
+
+
+async def cmd_committee_swing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Run the committee with a swing-entry mandate and swing TA evidence."""
+    await _cmd_committee_tracked(update, ctx, profile="swing")
+
+
+async def _cmd_committee_tracked(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                                 profile: str) -> None:
+    """Shared busy/cancellation wrapper for both committee strategy profiles."""
     chat_id = update.effective_chat.id
     task = asyncio.current_task()
     if not _try_acquire(chat_id, task):
         await update.message.reply_text(_BUSY_MSG)
         return
     try:
-        await _cmd_committee_impl(update, ctx)
+        await _cmd_committee_impl(update, ctx, profile=profile)
     except asyncio.CancelledError:
         if task in _stopping:
             _stopping.discard(task)
-            log.info("committee run stopped by user for chat %s", chat_id)
+            log.info("%s committee run stopped by user for chat %s", profile, chat_id)
             try:
                 await update.message.reply_text("🛑 Committee run stopped.")
             except Exception:
@@ -790,13 +805,15 @@ async def cmd_committee(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         _untrack_task(chat_id, task)
 
 
-async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                              profile: str = "committee") -> None:
     try:
         # ── 1. Parse symbol + optional language ──────────────────────────
         if not ctx.args:
+            command = "/committee_swing" if profile == "swing" else "/committee"
             await update.message.reply_text(
-                "Usage: /committee SYMBOL [zh]  "
-                "(e.g. /committee AAPL or /committee 2330.TW zh)"
+                f"Usage: {command} SYMBOL [zh]  "
+                f"(e.g. {command} AAPL or {command} 2330.TW zh)"
             )
             return
         sym = ctx.args[0].upper()
@@ -805,8 +822,14 @@ async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
         lang = normalize_lang(ctx.args[1] if len(ctx.args) > 1 else None)
 
         # ── 2. Acknowledge ────────────────────────────────────────────────
+        committee_label = "swing-strategy committee" if profile == "swing" else "investment committee"
+        mandate_line = (
+            "The vote evaluates a fresh swing entry using confirmed swing signals, "
+            "catalysts, event risk, and trade invalidation.\n" if profile == "swing" else ""
+        )
         await update.message.reply_text(
-            f"🏛 Convening the investment committee on {sym}…\n"
+            f"🏛 Convening the {committee_label} on {sym}…\n"
+            f"{mandate_line}"
             "This runs ~10-20 model calls (specialists → debate → CIO), "
             "typically 1-3 min. I'll send the full report when ready."
         )
@@ -814,7 +837,9 @@ async def _cmd_committee_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
         # ── 3. Run + render via the shared pipeline ───────────────────────
         from .committee.delivery import produce_report
-        art = await produce_report(sym, lang, REPORTS_DIR)
+        art = (await produce_report(sym, lang, REPORTS_DIR)
+               if profile == "committee"
+               else await produce_report(sym, lang, REPORTS_DIR, profile=profile))
         if art.error:
             await update.message.reply_text(art.error)
             return
@@ -1023,6 +1048,7 @@ def main() -> None:
     # Long handlers run block=False so the dispatcher keeps reading updates while
     # one is in flight — that is what lets a /stop arrive and cancel it.
     app.add_handler(CommandHandler("committee", cmd_committee, block=False))
+    app.add_handler(CommandHandler("committee_swing", cmd_committee_swing, block=False))
     app.add_handler(CommandHandler("briefing", cmd_briefing, block=False))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^(cb|pb):", block=False))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo, block=False))

@@ -19,7 +19,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .bundle import gather_bundle, format_bundle
-from .roles import SPECIALISTS, MODERATOR_SYSTEM, CIO_SYSTEM
+from .roles import (
+    MODERATOR_SYSTEM,
+    CIO_SYSTEM,
+    resolve_committee_profile,
+    specialists_for_profile,
+    strategy_mandate,
+)
 from . import agent_memory
 from . import note_sanitizer
 from . import sanitizer_log
@@ -1019,6 +1025,7 @@ async def run_committee(
     symbol: str,
     debate: bool | None = None,
     parallel: bool | None = None,
+    profile: str = "committee",
 ) -> CommitteeResult:
     """
     Run the full committee pipeline for *symbol*:
@@ -1030,8 +1037,15 @@ async def run_committee(
 
     debate=None reads CIO_DEBATE env var (default "on").
     parallel=None reads CIO_PARALLEL env var (default "on" / parallel).
+    profile="swing" changes both the data profile and every role's decision mandate.
     Returns CommitteeResult; never raises.
     """
+    try:
+        profile = resolve_committee_profile(profile)
+    except ValueError as exc:
+        return CommitteeResult(
+            symbol=symbol, resolved=None, as_of="", bundle={}, error=str(exc))
+
     # Resolve parallel flag
     use_parallel = PARALLEL if parallel is None else parallel
 
@@ -1041,7 +1055,9 @@ async def run_committee(
     _RUN_SYMBOL.set(symbol)
 
     # Step 1 — data
-    bundle = gather_bundle(symbol)
+    # Preserve the original one-argument seam for existing integrations/tests.
+    bundle = (gather_bundle(symbol) if profile == "committee"
+              else gather_bundle(symbol, profile=profile))
     if bundle.get("resolved") is None:
         return CommitteeResult(
             symbol=symbol,
@@ -1057,8 +1073,9 @@ async def run_committee(
     is_etf = bundle.get("is_etf", False)
 
     # Step 2 — specialists (parallel or sequential)
+    profile_roles = specialists_for_profile(profile)
     active_roles = [
-        role for role in SPECIALISTS
+        role for role in profile_roles
         if not (role["key"] == "etf" and not is_etf)
     ]
 
@@ -1096,7 +1113,7 @@ async def run_committee(
         unique_base = {str(op.get("vote", "HOLD")).upper().replace("STRONG ", "") for op in opinions}
         if len(unique_base) > 1:
             from .debate import run_debate
-            roles_by_key = {r["key"]: r for r in SPECIALISTS}
+            roles_by_key = {r["key"]: r for r in profile_roles}
             debate_result = await run_debate(
                 opinions, bundle_text, resolved, roles_by_key, parallel=use_parallel
             )
@@ -1110,38 +1127,49 @@ async def run_committee(
         f"[{op['title']}]\nvote: {op.get('vote')}\nconfidence: {op.get('confidence')}\nreason: {op.get('reason')}"
         for op in opinions
     )
+    mandate = strategy_mandate(profile)
     moderator_prompt = (
         f"Symbol: {resolved}\n\n"
+        f"Strategy profile: {profile}\n\n"
         f"Specialist votes and reasoning:\n{opinions_summary}\n\n"
         f"Required output fields: committee_recommendation, agreement_score, "
         f"majority_view, minority_view, key_disagreements"
     )
+    moderator_system = MODERATOR_SYSTEM + ("\n\n" + mandate if mandate else "")
     mod_raw = await ask_structured_role(
-        MODERATOR_SYSTEM, moderator_prompt,
+        moderator_system, moderator_prompt,
         role_key="moderator", response_schema=structured.MODERATOR_SCHEMA,
         schema_name="committee_moderator",
     )
     consensus = parse_yaml_block(mod_raw)
 
     # Step 5 — CIO (serial; uses config for model/service)
+    swing_fields = (
+        ", swing_action, setup_status, entry_trigger, invalidation, profit_taking, "
+        "position_sizing, event_risk" if profile == "swing" else ""
+    )
     cio_prompt = (
         f"Symbol: {resolved}\n\n"
+        f"Strategy profile: {profile}\n\n"
         f"DATA SUMMARY:\n{bundle_text}\n\n"
         f"COMMITTEE OPINIONS:\n{opinions_summary}\n\n"
         f"CONSENSUS:\n{mod_raw}\n\n"
         f"Required output fields: final_recommendation, confidence_score, risk_rating, "
         f"time_horizon, macro_alignment_score, geopolitical_risk_score, "
-        f"external_risk_adjustment, base_case, bull_case, bear_case, scenarios"
+        f"external_risk_adjustment, base_case, bull_case, bear_case, scenarios{swing_fields}"
     )
     # Inject CIO's own scoped memory block, plus the figure-prevention rule.
     cio_mem = agent_memory.recall_block("cio", resolved)
-    cio_system = CIO_SYSTEM + "\n\n" + note_sanitizer.FIGURE_RULE
+    cio_system = CIO_SYSTEM + ("\n\n" + mandate if mandate else "")
+    cio_system += "\n\n" + note_sanitizer.FIGURE_RULE
     if cio_mem:
         cio_system += "\n\n" + cio_mem
     cio_raw = await ask_structured_role(
         cio_system, cio_prompt,
-        role_key="cio", response_schema=structured.CIO_SCHEMA,
-        schema_name="committee_cio",
+        role_key="cio",
+        response_schema=(structured.SWING_CIO_SCHEMA if profile == "swing"
+                         else structured.CIO_SCHEMA),
+        schema_name=("committee_swing_cio" if profile == "swing" else "committee_cio"),
     )
     cio = parse_yaml_block(cio_raw)
 

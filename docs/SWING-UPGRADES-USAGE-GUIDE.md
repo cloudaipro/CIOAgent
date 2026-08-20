@@ -12,7 +12,7 @@ CovFlag) that drive the Alpha Hunter ranking.
 | Feature (pass) | Telegram | Dashboard | State |
 |----------------|----------|-----------|-------|
 | Coverage density — analyst + institutional (1, 3, 4) | `/alpha` ranking | `/alpha` ranking + table columns | Live; itemized in the `/alpha` table (Anlst / CovEdge / CovFlag) since pass 5 |
-| Four-layer gate (2) | `/committee` PDF | `/committee/<run_id>` | Live |
+| Four-layer gate (2) | `/committee` and `/committee_swing` PDF | `/committee/<run_id>` | Live |
 | Expectancy KPI (3) | — | `/expectancy` tab | Live; populate the ledger via the Sync button below |
 | Trade ledger / IBKR sync (2, 3) | — | `/portfolio` "Sync trade ledger" button | Trigger wired (pass 5); needs `CIO_IBKR_TWS` |
 | Market regime / trend light — 肥/勤 driver (3, 5) | `/alpha` top line | `/alpha` header badge + Run-history column | Live; QQQ 50/200MA regime, sets the hold posture |
@@ -23,7 +23,7 @@ CovFlag) that drive the Alpha Hunter ranking.
 
 ## 2. Telegram usage
 
-Commands registered in `cio/bot.py`: `/watchlist`, `/alpha`, `/committee`, `/briefing`,
+Commands registered in `cio/bot.py`: `/watchlist`, `/alpha`, `/committee`, `/committee_swing`, `/briefing`,
 `/playbooks`, plus `/start`, `/help`, `/subscribe`, `/unsubscribe`, `/stop`.
 
 ### `/alpha`
@@ -33,6 +33,15 @@ names that also carry a real catalyst rank higher, because `coverage.apply` ampl
 earnings/catalyst term inside `final_score`. Analyst count is live on the free Finnhub
 tier; institutional ownership only contributes on a premium key (otherwise None, no
 effect — see Section 5).
+
+### `/committee_swing SYMBOL [zh]`
+
+Runs the full investment committee with a swing-specific mandate. Unlike `/committee`,
+every seat evaluates a fresh entry over days to several weeks and receives the swing TA
+profile. BUY means enter, HOLD means wait, and SELL means avoid/exit. The report includes
+an explicit entry trigger, invalidation, profit-taking method, position-sizing guidance,
+and treatment of nearby earnings or event risk. Use `/committee` for broad position or
+investment decisions; use `/committee_swing` when the decision being made is a swing.
 
 **Reading the trend (rise/down) here.** The first line of the `/alpha` reply is the
 **market regime** light: `🟢/🟡/🔴 Market regime: GREEN/YELLOW/RED (detail)`. This *is* the

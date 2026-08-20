@@ -284,6 +284,8 @@ def build_report(symbol: str, result) -> str:
     fund = bundle.get("fundamentals") or {}
     quote = bundle.get("quote") or {}
     name = fund.get("name") or resolved
+    profile = str(bundle.get("ta_profile") or "committee").lower()
+    is_swing = profile == "swing"
 
     sections: list[str] = []
 
@@ -475,6 +477,18 @@ def build_report(symbol: str, result) -> str:
         final_body = "_Insufficient data._"
     sections.append(_section("Final Recommendation", final_body))
 
+    if is_swing and cio and not cio.get("_raw"):
+        swing_body = "\n\n".join([
+            _field("Action", cio.get("swing_action")),
+            _field("Setup Status", cio.get("setup_status")),
+            _field("Entry Trigger", cio.get("entry_trigger")),
+            _field("Invalidation / Stop Logic", cio.get("invalidation")),
+            _field("Profit-Taking", cio.get("profit_taking")),
+            _field("Position Sizing", cio.get("position_sizing")),
+            _field("Event Risk", cio.get("event_risk")),
+        ])
+        sections.append(_section("Swing Trade Plan", swing_body))
+
     # ── TIRF Transparency Appendix (evidence/assumptions/counterargs/scores) ──
     # Folded in so committee members receive the audit layer inline (proposal §12).
     # Never breaks the report if the TIRF layer is absent or errors.
@@ -498,5 +512,10 @@ def build_report(symbol: str, result) -> str:
             pass
 
     # ── Assemble ──────────────────────────────────────────────────────────
-    header = f"# Investment Committee Report: {resolved}\n\n_Generated: {as_of}_\n"
+    report_name = "Swing Strategy Committee Report" if is_swing else "Investment Committee Report"
+    mandate_note = (
+        "\n\n_Mandate: fresh swing entry over days to several weeks; BUY=enter, "
+        "HOLD=wait, SELL=avoid/exit._" if is_swing else ""
+    )
+    header = f"# {report_name}: {resolved}\n\n_Generated: {as_of}_{mandate_note}\n"
     return header + "\n".join(sections)

@@ -2,7 +2,7 @@
 cio.committee — Investment Committee engine.
 
 Public API:
-  run_committee(symbol)     -> CommitteeResult   (async)
+  run_committee(symbol, profile="committee") -> CommitteeResult   (async)
   build_report(symbol, result) -> str            (sync markdown)
   gather_bundle(symbol)     -> dict              (sync)
 """
