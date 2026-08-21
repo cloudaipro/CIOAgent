@@ -75,7 +75,7 @@ BOT_COMMANDS = [
     ("playbooks", "List saved playbooks you can ask me to run"),
     ("committee", "Investment committee on a symbol — /committee AAPL [zh]"),
     ("committee_swing", "Swing-strategy committee — /committee_swing AAPL [zh]"),
-    ("briefing", "Pre-market watchlist briefing — /briefing [SYMBOL…] [zh]"),
+    ("briefing", "Watchlist briefing — /briefing [SYMBOL…] [mix|en|zh]"),
     ("subscribe", "Daily digest + 06:00 briefing"),
     ("unsubscribe", "Stop the daily digest"),
     ("stop", "Cancel whatever I'm running for you"),
@@ -437,8 +437,8 @@ def _help_text(chat_id: int) -> str:
         "• /committee SYMBOL [zh] — committee report as PDF (add zh for 繁體中文)\n"
         "• /committee_swing SYMBOL [zh] — swing-focused committee PDF; "
         "BUY=enter, HOLD=wait, SELL=avoid/exit\n"
-        "• /briefing [SYMBOL…] [zh] — pre-market watchlist briefing as PDF "
-        "(add zh for 繁體中文; auto-runs 06:00 on trading days)\n"
+        "• /briefing [SYMBOL…] [mix|en|zh] — pre-market watchlist briefing as PDF "
+        "(default: mixed English + 繁體中文; auto-runs 06:00 on trading days)\n"
         "• /stop — cancel whatever I'm currently working on for you\n\n"
         "💡 Type \"/\" for the command list, tap the ☰ menu, or use the buttons below."
     )
@@ -884,27 +884,33 @@ async def cmd_briefing(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def _cmd_briefing_impl(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Run the Watchlist Monitoring Agent on demand and reply with the briefing.
 
-    No args → the active watchlist. Args → those symbols only. Add ``zh`` for a
-    Traditional-Chinese briefing (e.g. /briefing NVDA MU zh, or /briefing zh).
+    No args → the active watchlist. Args → those symbols only. The default is
+    interleaved English + Traditional Chinese. Use ``en`` or ``zh`` for a
+    single-language briefing (e.g. /briefing NVDA MU en, or /briefing zh).
     """
     try:
         from .watchlist_monitor import (
             monitor_watchlist, global_macro_snapshot, build_briefing,
             briefing_summary, as_of_now,
         )
-        from .committee.translate import normalize_lang, translate_report
+        from .committee.translate import (
+            is_language_token, normalize_lang, translate_report,
+        )
 
-        # Split a language token (zh) out of the symbol args.
-        lang = "en"
+        # Split an explicit language token out of the symbol args.
+        lang = "mix"
         symbol_args: list[str] = []
         for arg in (ctx.args or []):
-            if normalize_lang(arg) == "tc":
-                lang = "tc"
+            if is_language_token(arg):
+                lang = normalize_lang(arg)
             else:
                 symbol_args.append(arg.upper())
         symbols = symbol_args or None
-        lang_label = " (繁體中文)" if lang == "tc" else ""
-        lang_suffix = "_zh" if lang == "tc" else ""
+        lang_label = {
+            "mix": " (English + 繁體中文)",
+            "tc": " (繁體中文)",
+        }.get(lang, "")
+        lang_suffix = {"mix": "_mix", "tc": "_zh"}.get(lang, "")
 
         scope = ", ".join(symbols) if symbols else "your active watchlist"
         await update.message.reply_text(

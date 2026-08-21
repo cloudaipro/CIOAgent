@@ -520,14 +520,16 @@ trading day. `CIO_WMA_HOUR=off` disables it. The briefing is pushed (PDF + short
 fallback) to every **subscribed** chat (`memory.subscribed_chats`, the same opt-in as the
 daily digest; §8 lists subscribers).
 
-### 7.5 Output — PDF + on-request 繁體中文 + manual invoke
+### 7.5 Output — mixed-language PDF by default + manual invoke
 `build_briefing` renders the PRD §8 markdown (executive summary with environment + bullish/
 neutral/bearish counts + highest-priority pick, high/critical alerts, aggregated new risks,
 upcoming catalysts, escalation list, then a priority-ordered per-security review);
-`briefing_summary` is the short Telegram recap. The scheduled push is English; the manual
-paths take a language token for a Traditional-Chinese briefing (reusing the committee
-`translate_report` + OpenCC pipeline, §6.7): **Telegram** `/briefing [SYMBOL…] [zh]`
-(no symbols = active watchlist) and **CLI** `python -m cio.watchlist_monitor [SYMBOL…] [zh]`.
+`briefing_summary` is the short Telegram recap. Scheduled and manual briefing PDFs default to
+mixed language: each English markdown block is immediately followed by its Traditional-Chinese
+translation. `en` selects English-only and `zh` selects Traditional-Chinese-only output; `mix`
+selects the default explicitly. All translated paths reuse the committee `translate_report` +
+OpenCC pipeline (§6.7): **Telegram** `/briefing [SYMBOL…] [mix|en|zh]` (no symbols = active
+watchlist) and **CLI** `python -m cio.watchlist_monitor [SYMBOL…] [mix|en|zh]`.
 Both are `/stop`-aware and under the per-chat single-flight lock (§5.1).
 
 ---

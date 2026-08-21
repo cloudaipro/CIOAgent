@@ -63,8 +63,10 @@ catalyst. The gate is advisory; it annotates, it does not block the CIO vote.
 ### `/watchlist`
 Latest prices for the active watchlist — typically the list `/alpha` just published.
 
-### `/briefing [SYMBOL…] [zh]`
-Runs the Watchlist Monitoring Agent and returns the pre-market briefing (PDF). Since
+### `/briefing [SYMBOL…] [mix|en|zh]`
+Runs the Watchlist Monitoring Agent and returns the pre-market briefing (PDF). It defaults
+to mixed language, with each English block immediately followed by its Traditional Chinese
+translation; `en` and `zh` select either single-language version. Since
 pass 5 each per-security block carries a **Hold posture** line — the 肥/勤 hold decision:
 `HOLD / TRIM / EXIT (style, stop mode) — reason`. EXIT fires when the catalyst layer
 breaks (thesis gone) even if the chart still looks green; TRIM on euphoric behavior in an
@@ -312,7 +314,7 @@ to 0; name will not surface near the top regardless of other scores.
 | Telegram | `/alpha` | `cio.alpha.engine.run` + `coverage` |
 | Telegram | `/committee SYMBOL [zh]` | committee + `tirf.gate` (four-layer) |
 | Telegram | `/watchlist` | active watchlist prices |
-| Telegram | `/briefing [SYMBOL…] [zh]` | monitor + Hold posture (`hold.hold_decision`) |
+| Telegram | `/briefing [SYMBOL…] [mix|en|zh]` | monitor + Hold posture (`hold.hold_decision`) |
 | Dashboard | `/alpha` | `views.render_alpha` (+ coverage columns) |
 | Dashboard | `/expectancy` | `trades.list_closed` + `expectancy.summary` |
 | Dashboard | `/committee/<run_id>` | `views.render_committee_run` + `report` |

@@ -103,6 +103,20 @@ class TestNormalizeLang:
         for token in ("en", "EN", "foo", "ja", "ko", "", "english"):
             assert normalize_lang(token) == "en", f"Expected 'en' for token {token!r}"
 
+    def test_mix_aliases_return_mix(self):
+        from cio.committee.translate import normalize_lang
+
+        for token in ("mix", "MIXED", "bilingual", "en-zh", "中英", "中英雙語"):
+            assert normalize_lang(token) == "mix", f"Expected 'mix' for token {token!r}"
+
+    def test_only_explicit_aliases_are_language_tokens(self):
+        from cio.committee.translate import is_language_token
+
+        for token in ("en", "english", "zh", "繁中", "mix", "bilingual", "中英"):
+            assert is_language_token(token)
+        for token in (None, "", "MU", "ENPH", "foo"):
+            assert not is_language_token(token)
+
     def test_none_returns_en(self):
         from cio.committee.translate import normalize_lang
 
@@ -161,6 +175,83 @@ class TestTranslateReport:
 
         assert result == canned_tc
 
+    def test_lang_mix_requests_interleaved_english_and_traditional_chinese(
+            self, monkeypatch):
+        import cio.committee.engine as engine_mod
+
+        source = "# Market Brief\n\nDemand remains strong."
+        canned_tc = "# 市場簡報\n\n需求依然強勁。"
+
+        async def _fake_ask_role(system_prompt, user_prompt, role_key=None, **kwargs):
+            assert role_key == "translator"
+            assert user_prompt == source
+            assert "Traditional Chinese" in system_prompt
+            return canned_tc
+
+        monkeypatch.setattr(engine_mod, "ask_role", _fake_ask_role)
+
+        from cio.committee.translate import translate_report
+
+        result = _run(translate_report(source, "mix"))
+
+        assert result == (
+            "# Market Brief\n\n# 市場簡報\n\n"
+            "Demand remains strong.\n\n需求依然強勁。\n"
+        )
+        assert result.index("Demand remains strong.") < result.index("需求依然強勁。")
+
+    def test_lang_mix_interleaves_list_items_without_breaking_the_list(
+            self, monkeypatch):
+        import cio.committee.engine as engine_mod
+
+        source = "- First risk\n- Second risk"
+        translated = "- 第一項風險\n- 第二項風險"
+
+        async def _fake_ask_role(*args, **kwargs):
+            return translated
+
+        monkeypatch.setattr(engine_mod, "ask_role", _fake_ask_role)
+
+        from cio.committee.translate import translate_report
+
+        result = _run(translate_report(source, "mix"))
+
+        assert result == (
+            "- First risk\n- 第一項風險\n"
+            "- Second risk\n- 第二項風險\n"
+        )
+
+    def test_lang_mix_keeps_markdown_tables_valid(self, monkeypatch):
+        import cio.committee.engine as engine_mod
+
+        source = "| Ticker | Risk |\n|---|---|\n| MU | high |"
+        translated = "| 代號 | 風險 |\n|---|---|\n| MU | 高 |"
+
+        async def _fake_ask_role(*args, **kwargs):
+            return translated
+
+        monkeypatch.setattr(engine_mod, "ask_role", _fake_ask_role)
+
+        from cio.committee.translate import translate_report
+
+        result = _run(translate_report(source, "mix"))
+
+        assert result == source + "\n\n" + translated + "\n"
+
+    def test_lang_mix_rejects_duplicated_english_as_translation(self, monkeypatch):
+        import cio.committee.engine as engine_mod
+
+        source = "# Market Brief\n\nDemand remains strong."
+
+        async def _fake_duplicate(*args, **kwargs):
+            return source
+
+        monkeypatch.setattr(engine_mod, "ask_role", _fake_duplicate)
+
+        from cio.committee.translate import translate_report
+
+        assert _run(translate_report(source, "mix")) == source
+
     def test_simplified_model_output_is_forced_to_traditional(self, monkeypatch):
         """A model that emits Simplified Chinese is OpenCC-converted to Traditional."""
         import cio.committee.engine as engine_mod
@@ -178,6 +269,19 @@ class TestTranslateReport:
         # Traditional forms must appear; Simplified forms must be gone.
         assert "投資報告" in result and "蘋果" in result
         assert "投资" not in result and "苹果" not in result and "软件" not in result
+
+    def test_observed_mixed_label_artifact_is_normalized(self, monkeypatch):
+        import cio.committee.engine as engine_mod
+
+        async def _fake_artifact(*args, **kwargs):
+            return "**市場環境：** मिश्र合"
+
+        monkeypatch.setattr(engine_mod, "ask_role", _fake_artifact)
+
+        from cio.committee.translate import translate_report
+
+        result = _run(translate_report("**Market environment:** mixed", "tc"))
+        assert result == "**市場環境：** 混合"
 
     def test_ask_role_returns_empty_falls_back_to_original(self, monkeypatch):
         """ask_role returning '' → translate_report falls back to the original md."""

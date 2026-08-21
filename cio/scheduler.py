@@ -162,22 +162,30 @@ async def daily_digest(bot) -> None:
 
 
 async def _send_briefing(bot, chat_ids, briefing_md: str, summary_text: str,
-                         date_str: str) -> bool:
+                         date_str: str, lang: str = "mix") -> bool:
     """Render the briefing PDF (text fallback) and push it to *chat_ids*.
     Returns True if at least one chat received it. Never raises."""
     from pathlib import Path
     reports_dir = Path(__file__).resolve().parent.parent / "data" / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     doc_path = None
+    lang_suffix = {"mix": "_mix", "tc": "_zh"}.get(lang, "")
+    lang_label = {
+        "mix": " (English + 繁體中文)",
+        "tc": " (繁體中文)",
+    }.get(lang, "")
     try:
         from .committee.render_pdf import markdown_to_pdf
-        pdf_path = reports_dir / f"watchlist_briefing_{date_str}.pdf"
-        markdown_to_pdf(briefing_md, pdf_path, title=f"Watchlist Briefing {date_str}")
+        pdf_path = reports_dir / f"watchlist_briefing_{date_str}{lang_suffix}.pdf"
+        markdown_to_pdf(
+            briefing_md, pdf_path,
+            title=f"Watchlist Briefing {date_str}{lang_label}",
+        )
         doc_path = pdf_path
     except Exception:
         log.exception("WMA briefing PDF render failed; will send the .md instead")
         try:
-            md_path = reports_dir / f"watchlist_briefing_{date_str}.md"
+            md_path = reports_dir / f"watchlist_briefing_{date_str}{lang_suffix}.md"
             md_path.write_text(briefing_md, encoding="utf-8")
             doc_path = md_path
         except Exception:
@@ -229,8 +237,15 @@ async def watchlist_briefing(bot) -> None:
         log.exception("watchlist_briefing: macro snapshot failed; continuing without")
         macro = None
     briefing = build_briefing(assessments, as_of=as_of_now(), macro=macro)
+    try:
+        from .committee.translate import translate_report
+        briefing = await translate_report(briefing, "mix")
+    except Exception:
+        # translate_report is itself fail-safe; retain one final guard so a bad
+        # import/configuration can never suppress the scheduled briefing.
+        log.exception("watchlist_briefing: mixed-language rendering failed; using English")
     summary = briefing_summary(assessments, macro)
-    if await _send_briefing(bot, chats, briefing, summary, today):
+    if await _send_briefing(bot, chats, briefing, summary, today, lang="mix"):
         memory.set_meta(_LAST_WMA_KEY, today)
 
 

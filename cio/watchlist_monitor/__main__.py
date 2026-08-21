@@ -1,10 +1,11 @@
 """
-python -m cio.watchlist_monitor [SYMBOL ...] [zh]
+python -m cio.watchlist_monitor [SYMBOL ...] [mix|en|zh]
 
 Dev/smoke tool: runs the WMA over the given symbols (or the active watchlist when
 none are given), renders the morning briefing, and writes a PDF to data/reports/.
-Add ``zh`` for a Traditional-Chinese briefing. Prints the output path. Falls back
-to .md if PDF rendering fails.
+The default is mixed language: every English block is immediately followed by its
+Traditional-Chinese translation. Use ``en`` or ``zh`` for a single language.
+Prints the output path. Falls back to .md if PDF rendering fails.
 """
 import asyncio
 import sys
@@ -17,17 +18,23 @@ def main():
         monitor_watchlist, global_macro_snapshot, build_briefing,
         briefing_summary, as_of_now,
     )
-    from ..committee.translate import normalize_lang, translate_report
+    from ..committee.translate import (
+        is_language_token, normalize_lang, translate_report,
+    )
 
-    # Split a trailing/any language token (zh) out of the symbol list.
-    lang = "en"
+    # Split a trailing/any explicit language token out of the symbol list.
+    lang = "mix"
     symbols: list[str] = []
     for arg in sys.argv[1:]:
-        if normalize_lang(arg) == "tc":
-            lang = "tc"
+        if is_language_token(arg):
+            lang = normalize_lang(arg)
         else:
             symbols.append(arg.upper())
-    lang_suffix = "_zh" if lang == "tc" else ""
+    lang_suffix = {"mix": "_mix", "tc": "_zh"}.get(lang, "")
+    lang_label = {
+        "mix": " (English + 繁體中文)",
+        "tc": " (繁體中文)",
+    }.get(lang, "")
 
     assessments = asyncio.run(monitor_watchlist(symbols or None))
     macro = asyncio.run(global_macro_snapshot())
@@ -42,7 +49,9 @@ def main():
     pdf_path = out_dir / f"watchlist_briefing_{date_str}{lang_suffix}.pdf"
     try:
         from ..committee.render_pdf import markdown_to_pdf
-        markdown_to_pdf(briefing, pdf_path, title=f"Watchlist Briefing {date_str}")
+        markdown_to_pdf(
+            briefing, pdf_path, title=f"Watchlist Briefing {date_str}{lang_label}"
+        )
         print(pdf_path)
     except Exception as exc:
         md_path = out_dir / f"watchlist_briefing_{date_str}{lang_suffix}.md"

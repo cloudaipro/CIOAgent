@@ -341,3 +341,48 @@ def test_regime_snapshot_none_when_fred_disabled(monkeypatch):
     monkeypatch.delenv("FRED_API_KEY", raising=False)
     from cio.watchlist_monitor.report import _regime_snapshot
     assert _regime_snapshot() is None
+
+
+def test_scheduled_watchlist_briefing_defaults_to_mix(monkeypatch):
+    from cio import scheduler
+    import cio.committee.translate as translate_mod
+    import cio.watchlist_monitor as monitor_mod
+
+    monkeypatch.setattr(scheduler.memory, "get_meta", lambda key: None)
+    monkeypatch.setattr(scheduler.memory, "subscribed_chats", lambda: [123])
+    monkeypatch.setattr(scheduler.memory, "set_meta", lambda key, value: None)
+    monkeypatch.setattr(scheduler.timeutil, "is_trading_day", lambda: True)
+
+    async def _monitor():
+        return [{"ticker": "MU"}]
+
+    async def _macro():
+        return None
+
+    monkeypatch.setattr(monitor_mod, "monitor_watchlist", _monitor)
+    monkeypatch.setattr(monitor_mod, "global_macro_snapshot", _macro)
+    monkeypatch.setattr(monitor_mod, "build_briefing", lambda *a, **k: "English report")
+    monkeypatch.setattr(monitor_mod, "briefing_summary", lambda *a, **k: "Summary")
+    monkeypatch.setattr(monitor_mod, "as_of_now", lambda: "now")
+
+    translated: list[tuple[str, str]] = []
+
+    async def _translate(md, lang):
+        translated.append((md, lang))
+        return "English report\n\n繁體中文報告"
+
+    monkeypatch.setattr(translate_mod, "translate_report", _translate)
+
+    sent: dict = {}
+
+    async def _send(bot, chats, md, summary, date_str, lang="mix"):
+        sent.update(chats=chats, md=md, summary=summary, lang=lang)
+        return True
+
+    monkeypatch.setattr(scheduler, "_send_briefing", _send)
+
+    _run(scheduler.watchlist_briefing(object()))
+
+    assert translated == [("English report", "mix")]
+    assert sent["lang"] == "mix"
+    assert sent["md"] == "English report\n\n繁體中文報告"

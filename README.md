@@ -242,9 +242,12 @@ what deserves a deeper look.
   for a full `/committee SYMBOL` run (it doesn't auto-run the committee — keeps the briefing cheap).
 - **Schedule**: runs automatically at **06:00 local on trading days**. Holidays *and* weekends
   are skipped via the **NYSE calendar** (`pandas_market_calendars`). The briefing PDF + a short
-  summary are pushed to every **subscribed** chat (same opt-in as the daily digest).
+  summary are pushed to every **subscribed** chat (same opt-in as the daily digest). The PDF
+  defaults to mixed language: each English block is immediately followed by its Traditional
+  Chinese translation.
 - **On demand**: `/briefing` (active watchlist) or `/briefing NVDA MU` (specific symbols);
-  add `zh` for a **Traditional Chinese** briefing. CLI: `python -m cio.watchlist_monitor [SYMBOL…] [zh]`.
+  the default is mixed English + Traditional Chinese. Add `en` or `zh` for a single-language
+  briefing. CLI: `python -m cio.watchlist_monitor [SYMBOL…] [mix|en|zh]`.
 - **Model chain** (`config/committee_models.yaml`, role `wma`): uses the `premium` named
   chain — Codex `gpt-5.6-sol` (`medium`) → OpenAI `gpt-5.6-terra` (daily 120k) → NVIDIA
   NIM `kimi-k2.6` (last resort) — the same fallback machinery as the CIO. Codex is
@@ -436,7 +439,7 @@ Details and diagnostics:
 - `/watchlist` — broker-style quote-board image for your active watchlist (manage lists in the dashboard)
 - `/committee SYMBOL` — full AI investment-committee PDF report (`/committee AAPL zh` for 繁體中文)
 - `/committee_swing SYMBOL` — swing-entry committee PDF (`/committee_swing AAPL zh` for 繁體中文)
-- `/briefing [SYMBOL…]` — pre-market watchlist briefing PDF (add `zh` for 繁體中文; auto-runs 06:00 on trading days)
+- `/briefing [SYMBOL…] [mix|en|zh]` — pre-market watchlist briefing PDF (mixed English + 繁體中文 by default; auto-runs 06:00 on trading days)
 - `/stop` — cancel whatever's currently running for you (a turn or a committee/briefing run)
 - `/subscribe` — opt in to the daily portfolio digest **and** the 06:00 watchlist briefing · `/unsubscribe` — stop both
 
