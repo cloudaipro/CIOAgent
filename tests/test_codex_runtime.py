@@ -91,6 +91,58 @@ def test_close_closes_app_server(monkeypatch, tmp_path):
     assert client.closed is True
 
 
+def test_app_server_uses_large_jsonl_stream_limit(monkeypatch, tmp_path):
+    class _Pipe:
+        async def readline(self):
+            return b""
+
+    class _Stdin:
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            pass
+
+    class _Process:
+        def __init__(self):
+            self.returncode = None
+            self.stdin = _Stdin()
+            self.stdout = _Pipe()
+            self.stderr = _Pipe()
+
+        def terminate(self):
+            self.returncode = 0
+
+        async def wait(self):
+            return self.returncode
+
+    process = _Process()
+    seen = {}
+
+    async def create_process(*args, **kwargs):
+        seen.update(kwargs)
+        return process
+
+    async def request(method, params):
+        if method == "account/read":
+            return {"account": {"type": "chatgpt"}}
+        return {}
+
+    binary = tmp_path / "codex"
+    binary.touch()
+    monkeypatch.setattr(agent_codex, "CODEX_BIN", str(binary))
+    monkeypatch.setattr(agent_codex.asyncio, "create_subprocess_exec", create_process)
+    server = CodexAppServer([])
+    server._request = request
+
+    try:
+        _run(server.start())
+        assert seen["limit"] == agent_codex.CODEX_STREAM_LIMIT
+        assert seen["limit"] > 65536
+    finally:
+        _run(server.close())
+
+
 def test_dynamic_specs_cover_every_cio_tool():
     specs = agent_codex._dynamic_tool_specs()
     assert [spec["name"] for spec in specs] == [tool.name for tool in agent.CIO_TOOLS]

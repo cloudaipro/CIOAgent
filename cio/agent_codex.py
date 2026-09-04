@@ -32,6 +32,9 @@ CODEX_CWD = _env("CODEX_CWD", "/tmp")
 CODEX_START_TIMEOUT = float(_env("CODEX_START_TIMEOUT", "20"))
 CODEX_TURN_TIMEOUT = float(_env("CODEX_TURN_TIMEOUT", "600"))
 CODEX_INTERRUPT_TIMEOUT = float(_env("CODEX_INTERRUPT_TIMEOUT", "10"))
+# App-server speaks newline-delimited JSON.  A resumed thread or a large tool
+# result can exceed asyncio's 64 KiB default readline limit.
+CODEX_STREAM_LIMIT = int(_env("CODEX_STREAM_LIMIT", str(16 * 1024 * 1024)))
 
 _UPLOAD_PATH_RE = re.compile(r"(/\S+?\.(?:png|jpe?g|gif|webp))", re.I)
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
@@ -155,6 +158,7 @@ class CodexAppServer:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            limit=CODEX_STREAM_LIMIT,
         )
         self._reader_task = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._stderr_loop())

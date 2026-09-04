@@ -387,6 +387,8 @@ In `.env`:
   `CIO_CODEX_BIN` selects a non-default CLI path.
 - `CIO_CODEX_REASONING_EFFORT` — temporary process-wide Codex override (`low`, `medium`,
   `high`, `xhigh`, `max`, or `ultra`); chain settings are preferred for normal operation.
+- `CIO_CODEX_STREAM_LIMIT` — maximum bytes in one Codex app-server JSONL message (default
+  16 MiB); increase this only if unusually large resumed threads or tool results require it.
 - `CODEX_TURN_TIMEOUT` — local maximum seconds to wait for one Codex turn (default `600`).
   On expiry, cio.bot sends `turn/interrupt` and reports structured timeout diagnostics.
 - `CODEX_INTERRUPT_TIMEOUT` — seconds allowed for the interrupt request and completion

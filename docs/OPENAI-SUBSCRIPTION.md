@@ -67,6 +67,10 @@ Changing the dashboard/YAML setting invalidates the cached chat runtime and take
 the next chat message. The replacement starts a fresh transport transcript, so the bot
 notifies the user to restate anything important from the previous thread.
 
+The app-server transport accepts newline-delimited JSON messages. Its per-stream limit is
+16 MiB by default, which accommodates resumed thread state and large tool results; set
+`CIO_CODEX_STREAM_LIMIT` higher if a deliberately larger message is required.
+
 ## Agent coverage
 
 Every LLM-backed role routed through `committee.engine.ask_role` supports Codex:
