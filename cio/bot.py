@@ -24,6 +24,7 @@ from telegram import (
 )
 from telegram.constants import ChatAction
 from telegram.error import NetworkError, TimedOut
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     ApplicationHandlerStop,
@@ -111,6 +112,18 @@ _INLINE_MENU = InlineKeyboardMarkup(
       InlineKeyboardButton("🔕 Unsubscribe", callback_data="cb:unsubscribe")],
      [InlineKeyboardButton("❓ Help", callback_data="cb:help")]],
 )
+
+
+def _telegram_media_write_timeout() -> float:
+    """Multipart upload timeout for PDFs/charts sent through PTB.
+
+    PTB's default media write timeout is 20 seconds.  A normal 0.5 MB briefing
+    can exceed that on a congested uplink even though Telegram itself is fine.
+    """
+    try:
+        return max(1.0, float(os.getenv("CIO_TELEGRAM_MEDIA_WRITE_TIMEOUT", "120")))
+    except (TypeError, ValueError):
+        return 120.0
 
 # One conversational runtime per chat, created lazily. Selection is pinned for
 # transcript continuity, but the cache is invalidated when the effective
@@ -1028,9 +1041,13 @@ def main() -> None:
     from . import version as _version
     boot = _version.stamp_boot()
     log.info("CIO bot booting: version %s (pid %s)", boot["version"], boot["pid"])
+    telegram_request = HTTPXRequest(
+        media_write_timeout=_telegram_media_write_timeout(),
+    )
     app = (
         Application.builder()
         .token(token)
+        .request(telegram_request)
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()

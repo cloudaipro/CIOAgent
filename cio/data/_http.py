@@ -56,6 +56,13 @@ def _int_env(name: str, default: int) -> int:
 _cooldown: dict[str, float] = {}
 _cooldown_lock = threading.Lock()
 
+# A limiter spaces requests out, but it does not stop several worker threads
+# from queuing the same host before the first one discovers a 429.  Serialize
+# the complete request/retry sequence per host so a newly latched cooldown is
+# observed by the next caller instead of producing one 429 per watchlist symbol.
+_host_gates: dict[str, threading.Lock] = {}
+_host_gates_lock = threading.Lock()
+
 
 def _host(url: str) -> str:
     part = url.split("://", 1)[-1]
@@ -76,6 +83,11 @@ def _cooling(host: str) -> float:
 def _latch(host: str, seconds: float) -> None:
     with _cooldown_lock:
         _cooldown[host] = max(_cooldown.get(host, 0.0), time.monotonic() + seconds)
+
+
+def _host_gate(host: str) -> threading.Lock:
+    with _host_gates_lock:
+        return _host_gates.setdefault(host, threading.Lock())
 
 
 def _retry_after(exc) -> float | None:
@@ -117,36 +129,46 @@ def get_json(url, *, params=None, headers=None, timeout=None, limiter=None,
                     url, left)
         return None
 
-    backoff = 1.0
-    for attempt in range(attempts):
-        try:
-            if limiter is not None:
-                limiter.wait()
-            resp = httpx.get(url, params=params, headers=headers, timeout=timeout)
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            status = getattr(getattr(e, "response", None), "status_code", None)
-            # A throttled host sometimes answers 200 with an HTML/plain body,
-            # which surfaces as a JSON decode error — retry those like a 429.
-            decode_err = isinstance(e, ValueError) and status is None
-            transient = (status in (408, 425, 429) or (status or 0) >= 500
-                         or decode_err
-                         or isinstance(e, (httpx.TimeoutException,
-                                           httpx.NetworkError)))
-            last = attempt == attempts - 1
-            if not transient or last:
-                if status == 429:
-                    _latch(host, cooldown_s)
-                    log.warning("data.get_json failed for %s: %s "
-                                "(rate limited; %s cooling down %.0fs)",
-                                url, e, host, cooldown_s)
-                else:
-                    log.warning("data.get_json failed for %s: %s", url, e)
-                return None
-            delay = _retry_after(e) or backoff
-            log.info("data.get_json retrying %s in %.1fs (attempt %d/%d): %s",
-                     url, delay, attempt + 1, attempts, e)
-            time.sleep(delay)
-            backoff *= 2
+    with _host_gate(host):
+        # Another worker may have latched the host while this caller was
+        # waiting for the per-host gate.  Re-check inside the gate as well as
+        # above, otherwise concurrent WMA workers can still deepen a throttle.
+        left = _cooling(host)
+        if left > 0:
+            log.warning("data.get_json skipped %s: host cooling down %.0fs "
+                        "(rate limited)", url, left)
+            return None
+
+        backoff = 1.0
+        for attempt in range(attempts):
+            try:
+                if limiter is not None:
+                    limiter.wait()
+                resp = httpx.get(url, params=params, headers=headers, timeout=timeout)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                # A throttled host sometimes answers 200 with an HTML/plain body,
+                # which surfaces as a JSON decode error — retry those like a 429.
+                decode_err = isinstance(e, ValueError) and status is None
+                transient = (status in (408, 425, 429) or (status or 0) >= 500
+                             or decode_err
+                             or isinstance(e, (httpx.TimeoutException,
+                                               httpx.NetworkError)))
+                last = attempt == attempts - 1
+                if not transient or last:
+                    if status == 429:
+                        _latch(host, cooldown_s)
+                        log.warning("data.get_json failed for %s: %s "
+                                    "(rate limited; %s cooling down %.0fs)",
+                                    url, e, host, cooldown_s)
+                    else:
+                        log.warning("data.get_json failed for %s: %s", url, e)
+                    return None
+                delay = _retry_after(e) or backoff
+                log.info("data.get_json retrying %s in %.1fs (attempt %d/%d): %s",
+                         url, delay, attempt + 1, attempts, e)
+                time.sleep(delay)
+                backoff *= 2
     return None

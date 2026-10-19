@@ -8,6 +8,7 @@ dir keeps the disk cache out of the repo's data/ tree.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 import pytest
@@ -373,6 +374,30 @@ class TestHttpRetry:
         assert _http.get_json("https://missing.example/a") is None
         assert calls["n"] == 1
         assert _http._cooling("missing.example") == 0.0
+
+    def test_concurrent_429_callers_share_host_cooldown(self, monkeypatch):
+        """Concurrent WMA workers must not each hit a throttled host once."""
+        import httpx
+        from cio.data import _http
+
+        monkeypatch.setenv("CIO_HTTP_RETRIES", "0")
+        monkeypatch.setenv("CIO_HTTP_COOLDOWN", "300")
+        calls = {"n": 0}
+
+        def _get(url, **kw):
+            calls["n"] += 1
+            return self._resp(429)
+
+        monkeypatch.setattr(httpx, "get", _get)
+        _http._cooldown.clear()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(
+                lambda i: _http.get_json(f"https://parallel.example/{i}"),
+                range(4),
+            ))
+        assert results == [None] * 4
+        assert calls["n"] == 1
+        _http._cooldown.clear()
 
 
 def _capture_query(monkeypatch, ret):

@@ -654,6 +654,8 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `CIO_WMA_HOUR` / `_MINUTE` | `6` / `0` | Watchlist briefing time, local TZ (`off` to disable) |
 | `CIO_WMA_DAYS` | `mon-fri` | Cron `day_of_week` pre-filter (Nasdaq holidays/weekends always skipped) |
 | `CIO_WMA_CONCURRENCY` | `4` | Securities assessed in parallel per briefing |
+| `CIO_GDELT_MIN_INTERVAL` | `5` | Minimum seconds between GDELT requests |
+| `CIO_HTTP_RETRIES` / `_COOLDOWN` | `2` / `300` | Data-source retries + per-host 429 cooldown |
 | `CIO_TZ` | `America/Vancouver` | Local timezone for schedule times + the token-usage day boundary |
 | `CIO_ROLL_TURNS` / `_TOKENS` | `40` / `16000` | Rolling-session checkpoint thresholds |
 | `CIO_NUDGE_TURNS` | `8` | Persist-reminder cadence |
@@ -664,6 +666,8 @@ All `CIO_*` vars honor a `CFO_*` fallback for back-compat.
 | `FIRECRAWL_API_KEY` | unset | Firecrawl bearer token (cloud / authed instances; self-hosted needs none) |
 | `CIO_WEB_MAX_CHARS` | `6000` | Per-result web-markdown cap (prompt-budget guard) |
 | `CIO_WEB_TIMEOUT` | `45` | Web request timeout (seconds) |
+| `CIO_SEND_RETRIES` | `3` | Scheduled Telegram text/document retries for transient transport errors |
+| `CIO_TELEGRAM_MEDIA_WRITE_TIMEOUT` | `120` | Telegram multipart upload write timeout (seconds) |
 | `CIO_CAPTURE_LEVEL` | `1` | Dev-dashboard capture scope 1–3 (§8) |
 | `CIO_TRANSCRIPT_KEEP_RUNS` | `200` | Committee runs retained when pruning (level 1/3) |
 | `CIO_DASH_HOST` / `CIO_DASH_PORT` | `127.0.0.1` / `8787` | Dashboard bind |

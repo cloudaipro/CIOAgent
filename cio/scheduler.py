@@ -98,6 +98,47 @@ async def _send_text(bot, chat_id, text: str) -> None:
         await asyncio.sleep(delay)
 
 
+async def _send_document(bot, chat_id, document_path) -> None:
+    """Upload a local document with the same transient retry policy as text.
+
+    The file is reopened for every attempt.  A timed-out multipart upload can
+    leave the original file handle at EOF, so retrying the same handle would
+    send an empty or truncated body.
+    """
+    from pathlib import Path
+    import telegram.error as tg_err
+
+    path = Path(document_path)
+    attempts = 1 + _send_retries()
+    backoff = 2.0
+    for attempt in range(attempts):
+        try:
+            with path.open("rb") as fh:
+                await bot.send_document(chat_id=chat_id, document=fh,
+                                        filename=path.name)
+            return
+        except tg_err.RetryAfter as e:
+            if attempt == attempts - 1:
+                raise
+            raw = getattr(e, "retry_after", None)
+            if isinstance(raw, timedelta):
+                delay = raw.total_seconds()
+            else:
+                try:
+                    delay = float(raw)
+                except (TypeError, ValueError):
+                    delay = backoff
+        except (tg_err.TimedOut, tg_err.NetworkError) as e:
+            if attempt == attempts - 1:
+                raise
+            delay = backoff
+            backoff *= 2
+            log.warning("document send to chat %s failed (%s); retrying in %.0fs "
+                        "(attempt %d/%d)", chat_id, e, delay,
+                        attempt + 1, attempts)
+        await asyncio.sleep(delay)
+
+
 def _format_digest() -> str:
     s = portfolio.summary()
     if not s["positions"]:
@@ -197,9 +238,7 @@ async def _send_briefing(bot, chat_ids, briefing_md: str, summary_text: str,
             if not await richmsg.send_rich_text(bot, chat_id, summary_text):
                 await _send_text(bot, chat_id, summary_text)
             if doc_path is not None:
-                with open(doc_path, "rb") as fh:
-                    await bot.send_document(chat_id=chat_id, document=fh,
-                                            filename=doc_path.name)
+                await _send_document(bot, chat_id, doc_path)
             sent_any = True
         except Exception:  # one bad chat must not block the rest
             log.exception("WMA briefing send failed for chat %s", chat_id)

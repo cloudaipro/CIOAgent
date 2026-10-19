@@ -258,3 +258,60 @@ class TestScheduledSendRetry:
         with pytest.raises(tg_err.Forbidden):
             asyncio.run(scheduler._send_text(_Bot(), 1, "hi"))
         assert calls["n"] == 1
+
+    def test_send_document_reopens_file_after_timeout(self, monkeypatch, tmp_path):
+        import telegram.error as tg_err
+        from cio import scheduler
+
+        monkeypatch.setenv("CIO_SEND_RETRIES", "2")
+        path = tmp_path / "briefing.pdf"
+        payload = b"pdf bytes"
+        path.write_bytes(payload)
+        calls = {"n": 0}
+        bodies: list[bytes] = []
+        slept: list[float] = []
+
+        class _Bot:
+            async def send_document(self, **kw):
+                calls["n"] += 1
+                bodies.append(kw["document"].read())
+                if calls["n"] == 1:
+                    raise tg_err.TimedOut()
+
+        async def _sleep(s):
+            slept.append(s)
+
+        monkeypatch.setattr(scheduler.asyncio, "sleep", _sleep)
+        asyncio.run(scheduler._send_document(_Bot(), 1, path))
+        assert calls["n"] == 2
+        assert bodies == [payload, payload]
+        assert slept == [2.0]
+
+    def test_send_document_does_not_retry_a_bad_chat(self, monkeypatch, tmp_path):
+        import telegram.error as tg_err
+        from cio import scheduler
+
+        path = tmp_path / "briefing.pdf"
+        path.write_bytes(b"pdf bytes")
+        calls = {"n": 0}
+
+        class _Bot:
+            async def send_document(self, **kw):
+                calls["n"] += 1
+                raise tg_err.Forbidden("bot was blocked by the user")
+
+        with pytest.raises(tg_err.Forbidden):
+            asyncio.run(scheduler._send_document(_Bot(), 1, path))
+        assert calls["n"] == 1
+
+
+class TestTelegramMediaTimeout:
+    def test_media_write_timeout_is_configurable(self, monkeypatch):
+        from cio import bot
+
+        monkeypatch.delenv("CIO_TELEGRAM_MEDIA_WRITE_TIMEOUT", raising=False)
+        assert bot._telegram_media_write_timeout() == 120.0
+        monkeypatch.setenv("CIO_TELEGRAM_MEDIA_WRITE_TIMEOUT", "75")
+        assert bot._telegram_media_write_timeout() == 75.0
+        monkeypatch.setenv("CIO_TELEGRAM_MEDIA_WRITE_TIMEOUT", "bad")
+        assert bot._telegram_media_write_timeout() == 120.0
